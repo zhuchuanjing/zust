@@ -4,12 +4,13 @@ version = "0.1.0"
 schema_version = 1
 authors = ["OpenAI Codex <codex@openai.com>"]
 description = "Zust language support for Zed, powered by zust-lsp."
-repository = "https://cnb.cool/dongli.ai/zust"
+repository = "https://github.com/zhuchuanjing/zust"
 languages = ["languages/zust"]
 
 [grammars.zust]
-repository = "../../tree-sitter-zust"
-rev = "27c009aaa65fa35249b97bae1d3a5327dc677d8d"
+repository = "https://github.com/zhuchuanjing/zust"
+rev = "2764cc7ade4f4297c3e24a9732c2a58499144a48"
+path = "zed-extension/tree-sitter-zust"
 
 [language_servers.zust-lsp]
 name = "zust-lsp"

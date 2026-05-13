@@ -59,7 +59,7 @@
 
 ## 已知限制
 
-- Zed 要求 `extension.toml` 中的 grammar 通过 Git repository 和 revision 注册；本地开发安装使用从 Zed checkout 目标 `grammars/zust` 解析的相对 Git 路径 `../../tree-sitter-zust`。`tree-sitter-zust` 目录需要有本地 Git 元数据供 Zed fetch，但不要把 `.git`、bare Git 仓库对象或 Zed 生成的 checkout 目录提交到主仓库。
+- Zed 要求 `extension.toml` 中的 grammar 通过 Git repository 和 revision 注册。当前配置从公开的 Zust 仓库拉取固定 revision，并通过 `path = "zed-extension/tree-sitter-zust"` 指向内置 grammar 目录。
 - 这一版 grammar 已覆盖 Zust 当前常见语法：函数、结构体、`impl`、闭包、list/map、结构体初始化、路径调用、range、类型标注和基础表达式。后面如果你要把 outline、folding、runnables 做细，还可以继续补对应的 query 文件。
 
 ## 排查

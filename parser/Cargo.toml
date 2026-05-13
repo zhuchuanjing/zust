@@ -1,10 +1,19 @@
 ﻿[package]
-name = "parser"
+name = "zust-parser"
 version = "0.9.0"
 edition = "2024"
+rust-version = "1.85"
+description = "Lexer and parser for the Zust scripting language."
+license = "Apache-2.0"
+repository = "https://github.com/zhuchuanjing/zust"
+keywords = ["zust", "parser", "language"]
+categories = ["compilers", "parser-implementations"]
+
+[lib]
+name = "parser"
 
 [dependencies]
-dynamic = {path = "../dynamic"}
+dynamic = { package = "zust-dynamic", version = "0.9.0", path = "../dynamic" }
 anyhow = "1.0.102"
 thiserror = "2.0.18"
 smol_str = "0.3.6"
@@ -12,7 +21,3 @@ num_enum = "0.7.6"
 
 [dev-dependencies]
 proptest = "1.11.0"
-compiler = { path = "../compiler" }
-vm = { path = "../vm", features = ["ir-disassembly"] }
-
-

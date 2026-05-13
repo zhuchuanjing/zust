@@ -1,11 +1,20 @@
 [package]
-name = "llm"
+name = "zust-llm"
 version = "0.9.0"
 edition = "2024"
+rust-version = "1.85"
+description = "LLM request helpers for Zust runtime integrations."
+license = "Apache-2.0"
+repository = "https://github.com/zhuchuanjing/zust"
+keywords = ["zust", "llm", "runtime"]
+categories = ["api-bindings"]
+
+[lib]
+name = "llm"
 
 [dependencies]
-dynamic = { path = "../dynamic" }
-root = { path = "../root" }
+dynamic = { package = "zust-dynamic", version = "0.9.0", path = "../dynamic" }
+root = { package = "zust-root", version = "0.9.0", path = "../root" }
 hex = "0.4.3"
 reqwest = { version = "0.13.3", features = ["stream"] }
 anyhow = "1.0.102"

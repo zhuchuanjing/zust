@@ -1,7 +1,16 @@
 [package]
-name = "vm"
+name = "zust-vm"
 version = "0.9.0"
 edition = "2024"
+rust-version = "1.85"
+description = "Cranelift JIT runtime for executing Zust modules."
+license = "Apache-2.0"
+repository = "https://github.com/zhuchuanjing/zust"
+keywords = ["zust", "jit", "runtime"]
+categories = ["compilers", "development-tools"]
+
+[lib]
+name = "vm"
 
 [features]
 default = []
@@ -9,11 +18,11 @@ ir-disassembly = []
 
 [dependencies]
 log = "0.4.29"
-dynamic = { path = "../dynamic" }
-parser = { path = "../parser" }
-compiler = { path = "../compiler" }
-root = { path = "../root" }
-llm = { path = "../llm" }
+dynamic = { package = "zust-dynamic", version = "0.9.0", path = "../dynamic" }
+parser = { package = "zust-parser", version = "0.9.0", path = "../parser" }
+compiler = { package = "zust-compiler", version = "0.9.0", path = "../compiler" }
+root = { package = "zust-root", version = "0.9.0", path = "../root" }
+llm = { package = "zust-llm", version = "0.9.0", path = "../llm" }
 
 anyhow = "1.0.102"
 thiserror = "2.0.18"

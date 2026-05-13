@@ -1,7 +1,13 @@
 [package]
-name = "vm-metal"
+name = "zust-vm-metal"
 version = "0.9.0"
 edition = "2024"
+rust-version = "1.85"
+description = "Metal shader source generation backend for the Zust scripting language."
+license = "Apache-2.0"
+repository = "https://github.com/zhuchuanjing/zust"
+keywords = ["zust", "metal", "gpu"]
+categories = ["compilers", "rendering"]
 
 [lib]
 name = "vm_metal"
@@ -9,12 +15,12 @@ name = "vm_metal"
 [dependencies]
 anyhow = "1.0.102"
 bytemuck = "1.25.0"
-compiler = { path = "../compiler" }
-dynamic = { path = "../dynamic" }
+compiler = { package = "zust-compiler", version = "0.9.0", path = "../compiler" }
+dynamic = { package = "zust-dynamic", version = "0.9.0", path = "../dynamic" }
 image = "0.25.10"
 metal = "0.33.0"
 objc = "0.2.7"
-parser = { path = "../parser" }
+parser = { package = "zust-parser", version = "0.9.0", path = "../parser" }
 smol_str = "0.3.6"
 
 [[example]]

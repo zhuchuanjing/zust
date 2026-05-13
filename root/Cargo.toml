@@ -1,10 +1,19 @@
 [package]
-name = "root"
+name = "zust-root"
 version = "0.9.0"
 edition = "2024"
+rust-version = "1.85"
+description = "Addressable object tree and storage abstractions for Zust runtime integrations."
+license = "Apache-2.0"
+repository = "https://github.com/zhuchuanjing/zust"
+keywords = ["zust", "storage", "runtime"]
+categories = ["data-structures"]
+
+[lib]
+name = "root"
 
 [dependencies]
-dynamic = {path = "../dynamic"}
+dynamic = { package = "zust-dynamic", version = "0.9.0", path = "../dynamic" }
 
 anyhow = "1.0.102"
 thiserror = "2.0.18"

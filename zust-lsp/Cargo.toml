@@ -2,11 +2,17 @@
 name = "zust-lsp"
 version = "0.9.0"
 edition = "2024"
+rust-version = "1.85"
+description = "Language server for the Zust scripting language."
+license = "Apache-2.0"
+repository = "https://github.com/zhuchuanjing/zust"
+keywords = ["zust", "lsp", "language-server"]
+categories = ["development-tools"]
 
 [dependencies]
-compiler = { path = "../compiler" }
-dynamic = { path = "../dynamic" }
-parser = { path = "../parser" }
+compiler = { package = "zust-compiler", version = "0.9.0", path = "../compiler" }
+dynamic = { package = "zust-dynamic", version = "0.9.0", path = "../dynamic" }
+parser = { package = "zust-parser", version = "0.9.0", path = "../parser" }
 dashmap = "7.0.0-rc2"
 serde_json = "1.0.149"
 tokio = { version = "1.52.3", features = ["full"] }

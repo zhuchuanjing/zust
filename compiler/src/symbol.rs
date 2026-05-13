@@ -1,0 +1,322 @@
+use dynamic::{ConstIntOp, Dynamic, Type};
+use parser::Stmt;
+use smol_str::SmolStr;
+use std::{collections::BTreeMap, rc::Rc, sync::Arc};
+
+use super::Capture;
+
+#[derive(Debug, Clone, Default)]
+pub enum Symbol {
+    #[default]
+    Null,
+    Const {
+        value: Dynamic,
+        ty: Type,
+        is_pub: bool,
+    },
+    Static {
+        value: Option<Dynamic>,
+        ty: Type,
+        is_pub: bool,
+    },
+    Struct(Type, bool),
+    Fn {
+        ty: Type,
+        args: Vec<SmolStr>,
+        generic_params: Vec<Type>,
+        cap: Capture,
+        body: Arc<Stmt>,
+        is_pub: bool,
+    },
+    Native(Type),
+}
+
+impl Symbol {
+    pub fn native(tys: Vec<Type>, ret: Type) -> Self {
+        Self::Native(Type::Fn { tys, ret: Rc::new(ret) })
+    }
+
+    pub fn is_pub(&self) -> bool {
+        match self {
+            Self::Const { value: _, ty: _, is_pub } => *is_pub,
+            Self::Static { value: _, ty: _, is_pub } => *is_pub,
+            Self::Struct(_, is_pub) => *is_pub,
+            Self::Fn { ty: _, args: _, generic_params: _, cap: _, body: _, is_pub } => *is_pub,
+            _ => true,
+        }
+    }
+
+    pub fn is_fn(&self) -> bool {
+        match self {
+            Self::Fn { ty: _, args: _, generic_params: _, cap: _, body: _, is_pub: _ } => true,
+            Self::Native(_) => true,
+            _ => false,
+        }
+    }
+}
+
+use anyhow::{Result, anyhow};
+use indexmap::IndexMap;
+
+pub fn eval_const_int_type(ty: &Type) -> Option<i64> {
+    match ty {
+        Type::ConstInt(value) => Some(*value),
+        Type::ConstBinary { op, left, right } => {
+            let left = eval_const_int_type(left)?;
+            let right = eval_const_int_type(right)?;
+            match op {
+                ConstIntOp::Add => Some(left + right),
+                ConstIntOp::Sub => Some(left - right),
+                ConstIntOp::Mul => Some(left * right),
+                ConstIntOp::Div => (right != 0).then_some(left / right),
+                ConstIntOp::Mod => (right != 0).then_some(left % right),
+            }
+        }
+        _ => None,
+    }
+}
+
+pub fn substitute_type(ty: &Type, params: &[Type], args: &[Type]) -> Type {
+    match ty {
+        Type::Ident { name, params: nested } if nested.is_empty() => {
+            params.iter().position(|param| matches!(param, Type::Ident { name: param_name, params } if params.is_empty() && param_name == name)).map(|idx| args[idx].clone()).unwrap_or_else(|| ty.clone())
+        }
+        Type::Ident { name, params: nested } => Type::Ident { name: name.clone(), params: nested.iter().map(|param| substitute_type(param, params, args)).collect() },
+        Type::Struct { params: struct_params, fields } => Type::Struct {
+            params: struct_params.iter().map(|param| substitute_type(param, params, args)).collect(),
+            fields: fields.iter().map(|(name, field_ty)| (name.clone(), substitute_type(field_ty, params, args))).collect(),
+        },
+        Type::Vec(elem, len) => Type::Vec(Rc::new(substitute_type(elem, params, args)), *len),
+        Type::Array(elem, len) => Type::Array(Rc::new(substitute_type(elem, params, args)), *len),
+        Type::ArrayParam(elem, len) => Type::ArrayParam(Rc::new(substitute_type(elem, params, args)), Rc::new(substitute_type(len, params, args))),
+        Type::ConstBinary { op, left, right } => {
+            let left = substitute_type(left, params, args);
+            let right = substitute_type(right, params, args);
+            let ty = Type::ConstBinary { op: *op, left: Rc::new(left), right: Rc::new(right) };
+            eval_const_int_type(&ty).map(Type::ConstInt).unwrap_or(ty)
+        }
+        Type::Fn { tys, ret } => Type::Fn { tys: tys.iter().map(|ty| substitute_type(ty, params, args)).collect(), ret: Rc::new(substitute_type(ret, params, args)) },
+        Type::Symbol { id, params: nested } => Type::Symbol { id: *id, params: nested.iter().map(|param| substitute_type(param, params, args)).collect() },
+        Type::Tuple(items) => Type::Tuple(items.iter().map(|item| substitute_type(item, params, args)).collect()),
+        _ => ty.clone(),
+    }
+}
+
+#[derive(Clone, Default)]
+pub struct SymbolTable {
+    pub symbols: IndexMap<SmolStr, Symbol>,
+    modules: BTreeMap<SmolStr, BTreeMap<SmolStr, u32>>,
+    pub roots: Vec<SmolStr>,
+}
+
+impl SymbolTable {
+    pub fn add_to_module(&mut self, module: &str, name: SmolStr, s: Symbol) -> Result<u32> {
+        let full_name: SmolStr = format!("{}::{}", module, name).into();
+        let id = self.symbols.insert_full(full_name, s).0 as u32;
+        let module_symbols = self.modules.get_mut(module).ok_or_else(|| anyhow!("模块 {} 不存在", module))?;
+        module_symbols.insert(name, id);
+        Ok(id)
+    }
+    pub fn get_symbol(&self, idx: u32) -> Result<(&SmolStr, &Symbol)> {
+        self.symbols.get_index(idx as usize).ok_or(anyhow!("未发现符号 {}", idx))
+    }
+
+    pub fn get_symbol_mut(&mut self, idx: u32) -> Option<(&SmolStr, &mut Symbol)> {
+        self.symbols.get_index_mut(idx as usize)
+    }
+
+    pub fn symbol(&self, name: &str) -> Vec<(SmolStr, u32)> {
+        self.modules.get(name).map(|m| m.iter().map(|(name, id)| (name.clone(), *id)).collect()).unwrap_or(Vec::new())
+    }
+
+    pub fn disassemble(&self, name: &str) -> Result<String> {
+        let id = self.get_id(name)?;
+        let (name, s) = self.get_symbol(id)?;
+        if let Symbol::Fn { ty, args, generic_params: _, cap, body, is_pub } = s {
+            if *is_pub { Ok(format!("pub {} {:?} {:?} {:?}\n{}", name, ty, args, cap, body)) } else { Ok(format!("{} {:?} {:?} {:?}\n{}", name, ty, args, cap, body)) }
+        } else {
+            Err(anyhow!("未发现符号 {}", name))
+        }
+    }
+
+    pub fn get_field(&self, ty: &Type, name: &str) -> Result<(usize, Type)> {
+        //原生类型的函数 is_map is_list 或者 sqrt
+        let id = match ty {
+            Type::Any => {
+                if let Ok(id) = self.get_id("Any")
+                    && let Ok((_, Symbol::Struct(any_ty, _))) = self.get_symbol(id)
+                    && let Ok((idx, field_ty)) = any_ty.get_field(name)
+                {
+                    return Ok((idx, field_ty.clone()));
+                }
+                return Ok((usize::MAX, Type::Any));
+            }
+            Type::Struct { params: _, fields: _ } => {
+                return ty.get_field(name).map(|(idx, ty)| (idx, ty.clone()));
+            }
+            Type::Symbol { id, params: _ } => *id,
+            Type::Vec(_, _) => self.get_id("Vec")?,
+            Type::Fn { tys: _, ret } => {
+                return self.get_field(ret, name);
+            }
+            _ => {
+                //增加一个外部函数定义
+                if name == "is_map" || name == "is_list" {
+                    return Ok((usize::MAX, Type::Bool));
+                }
+                return Err(anyhow!("未发现 symbol {:?} {}", ty, name));
+            }
+        };
+        let (_, s) = self.get_symbol(id)?;
+        if let Symbol::Struct(s, _) = s {
+            return s.get_field(name).and_then(|(idx, ty)| Ok((idx, ty.clone())));
+        };
+        Err(anyhow!("未发现 field {:?} {}", ty, name))
+    }
+
+    pub fn get_type(&self, ty: &Type) -> Result<Type> {
+        match ty {
+            Type::Ident { name, params } => {
+                let params = params.iter().map(|param| self.get_type(param)).collect::<Result<Vec<_>>>()?;
+                if name.as_str() == "Vec" && params.len() == 1 {
+                    return Ok(Type::Vec(Rc::new(params[0].clone()), 0));
+                }
+                let id = self.get_id(&name)?;
+                if let (_, Symbol::Struct(ty, _)) = self.get_symbol(id)? {
+                    if let Type::Struct { params: generic_params, .. } = ty
+                        && !generic_params.is_empty()
+                        && generic_params.len() == params.len()
+                    {
+                        return self.get_type(&substitute_type(ty, generic_params, &params));
+                    }
+                    return Ok(ty.clone());
+                }
+                return Ok(Type::Symbol { id, params });
+            }
+            Type::Symbol { id, params } => {
+                return match self.get_symbol(*id)? {
+                    (_, Symbol::Fn { ty, args: _, generic_params: _, cap: _, body: _, is_pub: _ }) => Ok(ty.clone()),
+                    (_, Symbol::Native(ty)) => Ok(ty.clone()),
+                    (_, Symbol::Struct(ty, _)) => {
+                        let params = params.iter().map(|param| self.get_type(param)).collect::<Result<Vec<_>>>()?;
+                        if let Type::Struct { params: generic_params, .. } = ty
+                            && !generic_params.is_empty()
+                            && generic_params.len() == params.len()
+                        {
+                            self.get_type(&substitute_type(ty, generic_params, &params))
+                        } else {
+                            Ok(ty.clone())
+                        }
+                    }
+                    (_, s) => {
+                        println!("s-> {:?}", s);
+                        Ok(Type::Symbol { id: *id, params: params.clone() })
+                    }
+                };
+            }
+            Type::Vec(elem, len) => {
+                return Ok(Type::Vec(Rc::new(self.get_type(elem)?), *len));
+            }
+            Type::Array(elem, len) => {
+                return Ok(Type::Array(Rc::new(self.get_type(elem)?), *len));
+            }
+            Type::ArrayParam(elem, len) => {
+                let elem = self.get_type(elem)?;
+                let len = self.get_type(len)?;
+                if let Some(len) = eval_const_int_type(&len) {
+                    let len = u32::try_from(len).map_err(|_| anyhow!("数组长度超出 u32 范围"))?;
+                    return Ok(Type::Array(Rc::new(elem), len));
+                }
+                return Ok(Type::ArrayParam(Rc::new(elem), Rc::new(len)));
+            }
+            Type::ConstBinary { op, left, right } => {
+                let left = self.get_type(left)?;
+                let right = self.get_type(right)?;
+                let ty = Type::ConstBinary { op: *op, left: Rc::new(left), right: Rc::new(right) };
+                return Ok(eval_const_int_type(&ty).map(Type::ConstInt).unwrap_or(ty));
+            }
+            Type::Fn { tys, ret } => {
+                return Ok(Type::Fn { tys: tys.iter().map(|ty| self.get_type(ty)).collect::<Result<Vec<_>>>()?, ret: Rc::new(self.get_type(ret)?) });
+            }
+            Type::Struct { params, fields } => {
+                return Ok(Type::Struct {
+                    params: params.iter().map(|param| self.get_type(param)).collect::<Result<Vec<_>>>()?,
+                    fields: fields.iter().map(|(name, ty)| if matches!(ty, Type::Symbol { .. }) { Ok((name.clone(), ty.clone())) } else { self.get_type(ty).map(|ty| (name.clone(), ty)) }).collect::<Result<Vec<_>>>()?,
+                });
+            }
+            _ => {}
+        }
+        Ok(ty.clone())
+    }
+
+    pub fn add_module(&mut self, name: SmolStr) {
+        let len = self.roots.len();
+        if let Some(pos) = self.roots.iter().position(|r| r.as_str() == name.as_str()) {
+            if pos != len - 1 {
+                self.roots.swap(pos, len - 1);
+            }
+        } else {
+            self.roots.push(name.clone());
+        }
+        self.modules.insert(name, BTreeMap::new());
+    }
+
+    pub fn pop_module(&mut self) {
+        //如果不想模块成为全局的 add_module 之后调用 pop_module
+        if let Some(last) = self.roots.pop() {
+            if let Some(names) = self.modules.get(&last).map(|m| {
+                let kvs: Vec<(SmolStr, u32)> = m.iter().map(|kv| (kv.0.clone(), *kv.1)).collect();
+                kvs.iter().filter_map(|kv| if !self.get_symbol(kv.1).map(|s| s.1.is_pub()).unwrap_or(false) { Some(kv.0.clone()) } else { None }).collect::<Vec<_>>()
+            }) {
+                if let Some(m) = self.modules.get_mut(&last) {
+                    for name in names {
+                        m.remove(&name); //删除非 pub 的符号
+                    }
+                }
+            }
+        }
+    }
+
+    pub fn get_id(&self, name: &str) -> Result<u32> {
+        if let Some(id) = self.roots.iter().rev().find_map(|r| self.modules.get(r).and_then(|m| m.get(name))) {
+            return Ok(*id);
+        }
+        if let Some(id) = self.modules.values().find_map(|m| m.get(name)) {
+            return Ok(*id);
+        }
+        if let Some((mod_name, symbol_name)) = name.split_once("::") {
+            if let Some(m) = self.modules.get(mod_name) {
+                return m.get(symbol_name).copied().ok_or(anyhow!("{} 未发现", name));
+            }
+        }
+        self.roots.iter().find_map(|r| self.modules.get(r).and_then(|m| m.get(name))).copied().ok_or(anyhow!("{} 未发现", name))
+    }
+
+    pub fn add(&mut self, name: SmolStr, s: Symbol) -> u32 {
+        let root = self.roots.last().cloned().unwrap();
+        let id = self.symbols.insert_full(format!("{}::{}", root, name).into(), s).0 as u32;
+        self.modules.get_mut(&root).map(|m| m.insert(name, id));
+        id
+    }
+
+    pub fn add_global(&mut self, name: SmolStr, s: Symbol) -> u32 {
+        if let Some((mod_name, symbol_name)) = name.as_str().split_once("::") {
+            if let Some(m) = self.modules.get_mut(mod_name) {
+                if let Some(&id) = m.get(symbol_name) {
+                    return id;
+                }
+            }
+        }
+        let id = self.symbols.insert_full(name.clone(), s).0 as u32;
+        if let Some((mod_name, symbol_name)) = name.as_str().split_once("::") {
+            if let Some(m) = self.modules.get_mut(mod_name) {
+                m.insert(symbol_name.into(), id);
+            }
+        }
+        id
+    }
+
+    pub fn take(&mut self, id: u32) -> Option<Symbol> {
+        self.symbols.get_index_mut(id as usize).map(|(_, s)| std::mem::take(s))
+    }
+}

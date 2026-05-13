@@ -1,0 +1,225 @@
+use super::Dynamic;
+
+use std::ops::{Neg, Not};
+impl Neg for Dynamic {
+    type Output = Self;
+    fn neg(self) -> Self::Output {
+        use Dynamic::*;
+        match self {
+            I8(i) => I8(-i),
+            I16(i) => I16(-i),
+            I32(i) => I32(-i),
+            I64(i) => I64(-i),
+            F32(f) => F32(-f),
+            F64(f) => F64(-f),
+            _ => Null,
+        }
+    }
+}
+
+impl Not for Dynamic {
+    type Output = Self;
+    fn not(self) -> Self::Output {
+        match self {
+            Self::Bool(b) => Self::Bool(!b),
+            _ => Self::Null,
+        }
+    }
+}
+
+use std::ops::{Add, Div, Mul, Rem, Sub};
+
+impl Add for Dynamic {
+    type Output = Self;
+    fn add(self, rhs: Self) -> Self::Output {
+        if self.is_list() {
+            self.clone().append(rhs);
+            return self;
+        } else if rhs.is_list() {
+            rhs.clone().append(self);
+            return rhs;
+        }
+        if self.is_str() || rhs.is_str() {
+            return Self::String(format!("{}{}", self.to_string(), rhs.to_string()).into());
+        } else if self.is_f64() || rhs.is_f64() {
+            return Dynamic::F64(self.as_float().unwrap_or(0.0) + rhs.as_float().unwrap_or(0.0));
+        } else if self.is_f32() || rhs.is_f32() {
+            return Dynamic::F32(self.as_float().unwrap_or(0.0) as f32 + rhs.as_float().unwrap_or(0.0) as f32);
+        }
+        if self.is_str() || rhs.is_str() {
+            return Self::String(format!("{}{}", self.to_string(), rhs.to_string()).into());
+        }
+        if self.is_int() || rhs.is_int() {
+            return Self::I64(self.as_int().unwrap() + rhs.as_int().unwrap());
+        }
+        if self.is_uint() || rhs.is_uint() {
+            return Self::U64(self.as_uint().unwrap() + rhs.as_uint().unwrap());
+        }
+        if self.is_map() && rhs.is_map() {
+            self.append(rhs);
+        }
+        self
+    }
+}
+
+impl Mul for Dynamic {
+    type Output = Self;
+    fn mul(self, rhs: Self) -> Self::Output {
+        if self.is_f64() || rhs.is_f64() {
+            return Dynamic::F64(self.as_float().unwrap_or(0.0) * rhs.as_float().unwrap_or(0.0));
+        } else if self.is_f32() || rhs.is_f32() {
+            return Dynamic::F32(self.as_float().unwrap_or(0.0) as f32 * rhs.as_float().unwrap_or(0.0) as f32);
+        }
+        if self.is_int() || rhs.is_int() {
+            return Self::I64(self.as_int().unwrap_or(0) * rhs.as_int().unwrap_or(0));
+        }
+        if self.is_uint() || rhs.is_uint() {
+            return Self::U64(self.as_uint().unwrap_or(0) * rhs.as_uint().unwrap_or(0));
+        }
+        self
+    }
+}
+
+impl Sub for Dynamic {
+    type Output = Self;
+    fn sub(self, rhs: Self) -> Self::Output {
+        if self.is_f64() || rhs.is_f64() {
+            return Dynamic::F64(self.as_float().unwrap() - rhs.as_float().unwrap());
+        } else if self.is_f32() || rhs.is_f32() {
+            return Dynamic::F32(self.as_float().unwrap() as f32 - rhs.as_float().unwrap() as f32);
+        }
+        if self.is_int() || rhs.is_int() || self.is_uint() || rhs.is_uint() {
+            return Self::I64(self.as_int().unwrap() - rhs.as_int().unwrap());
+        }
+        if self.is_list() && rhs.is_list() {
+            if self.len() == rhs.len() {}
+        }
+        self
+    }
+}
+
+impl Div for Dynamic {
+    type Output = Self;
+    fn div(self, rhs: Self) -> Self::Output {
+        if self.is_f64() || rhs.is_f64() {
+            return Dynamic::F64(self.as_float().unwrap() / rhs.as_float().unwrap());
+        } else if self.is_f32() || rhs.is_f32() {
+            return Dynamic::F32(self.as_float().unwrap() as f32 / rhs.as_float().unwrap() as f32);
+        }
+        if self.is_int() || rhs.is_int() || self.is_uint() || rhs.is_uint() {
+            return Self::I64(self.as_int().unwrap() / rhs.as_int().unwrap());
+        }
+        self
+    }
+}
+
+impl Rem for Dynamic {
+    type Output = Self;
+    fn rem(self, rhs: Self) -> Self::Output {
+        if self.is_int() || rhs.is_int() || self.is_uint() || rhs.is_uint() {
+            return Self::I64(self.as_int().unwrap() % rhs.as_int().unwrap());
+        }
+        self
+    }
+}
+
+use std::ops::{Shl, Shr};
+
+impl Shl for Dynamic {
+    type Output = Self;
+    fn shl(self, rhs: Self) -> Self::Output {
+        use Dynamic::*;
+        let shift = u64::try_from(rhs).unwrap();
+        match self {
+            I8(i) => I8(i << shift),
+            I16(i) => I16(i << shift),
+            I32(i) => I32(i << shift),
+            I64(i) => I64(i << shift),
+            U8(i) => U8(i << shift),
+            U16(i) => U16(i << shift),
+            U32(i) => U32(i << shift),
+            U64(i) => U64(i << shift),
+            _ => panic!("Cannot shift non-integer types"),
+        }
+    }
+}
+
+impl Shr for Dynamic {
+    type Output = Self;
+    fn shr(self, rhs: Self) -> Self::Output {
+        use Dynamic::*;
+        let shift = u64::try_from(rhs).unwrap();
+        match self {
+            I8(i) => I8(i >> shift),
+            I16(i) => I16(i >> shift),
+            I32(i) => I32(i >> shift),
+            I64(i) => I64(i >> shift),
+            U8(i) => U8(i >> shift),
+            U16(i) => U16(i >> shift),
+            U32(i) => U32(i >> shift),
+            U64(i) => U64(i >> shift),
+            _ => panic!("Cannot shift non-integer types"),
+        }
+    }
+}
+
+use std::ops::{BitAnd, BitOr, BitXor};
+impl BitAnd for Dynamic {
+    type Output = Self;
+    fn bitand(self, rhs: Self) -> Self::Output {
+        let ty = self.get_type() + rhs.get_type();
+        let left = ty.force(self).unwrap();
+        let right = ty.force(rhs).unwrap();
+        match (left, right) {
+            (Dynamic::I8(l), Dynamic::I8(r)) => Dynamic::I8(l & r),
+            (Dynamic::I16(l), Dynamic::I16(r)) => Dynamic::I16(l & r),
+            (Dynamic::I32(l), Dynamic::I32(r)) => Dynamic::I32(l & r),
+            (Dynamic::I64(l), Dynamic::I64(r)) => Dynamic::I64(l & r),
+            (Dynamic::U8(l), Dynamic::U8(r)) => Dynamic::U8(l & r),
+            (Dynamic::U16(l), Dynamic::U16(r)) => Dynamic::U16(l & r),
+            (Dynamic::U32(l), Dynamic::U32(r)) => Dynamic::U32(l & r),
+            (Dynamic::U64(l), Dynamic::U64(r)) => Dynamic::U64(l & r),
+            (_, _) => Dynamic::Null,
+        }
+    }
+}
+
+impl BitOr for Dynamic {
+    type Output = Self;
+    fn bitor(self, rhs: Self) -> Self::Output {
+        let ty = self.get_type() + rhs.get_type();
+        let left = ty.force(self).unwrap();
+        let right = ty.force(rhs).unwrap();
+        match (left, right) {
+            (Dynamic::I8(l), Dynamic::I8(r)) => Dynamic::I8(l | r),
+            (Dynamic::I16(l), Dynamic::I16(r)) => Dynamic::I16(l | r),
+            (Dynamic::I32(l), Dynamic::I32(r)) => Dynamic::I32(l | r),
+            (Dynamic::I64(l), Dynamic::I64(r)) => Dynamic::I64(l | r),
+            (Dynamic::U8(l), Dynamic::U8(r)) => Dynamic::U8(l | r),
+            (Dynamic::U16(l), Dynamic::U16(r)) => Dynamic::U16(l | r),
+            (Dynamic::U32(l), Dynamic::U32(r)) => Dynamic::U32(l | r),
+            (Dynamic::U64(l), Dynamic::U64(r)) => Dynamic::U64(l | r),
+            (_, _) => Dynamic::Null,
+        }
+    }
+}
+
+impl BitXor for Dynamic {
+    type Output = Self;
+    fn bitxor(self, rhs: Self) -> Self::Output {
+        let ty = self.get_type() + rhs.get_type();
+        let left = ty.force(self).unwrap();
+        let right = ty.force(rhs).unwrap();
+        match (left, right) {
+            (Dynamic::I8(l), Dynamic::I8(r)) => Dynamic::I8(l ^ r),
+            (Dynamic::I16(l), Dynamic::I16(r)) => Dynamic::I16(l ^ r),
+            (Dynamic::I32(l), Dynamic::I32(r)) => Dynamic::I32(l ^ r),
+            (Dynamic::I64(l), Dynamic::I64(r)) => Dynamic::I64(l ^ r),
+            (Dynamic::U8(l), Dynamic::U8(r)) => Dynamic::U8(l ^ r),
+            (Dynamic::U16(l), Dynamic::U16(r)) => Dynamic::U16(l ^ r),
+            (Dynamic::U32(l), Dynamic::U32(r)) => Dynamic::U32(l ^ r),
+            (Dynamic::U64(l), Dynamic::U64(r)) => Dynamic::U64(l ^ r),
+            (_, _) => Dynamic::Null,
+        }
+    }
+}

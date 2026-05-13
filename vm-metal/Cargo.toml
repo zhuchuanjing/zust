@@ -1,0 +1,26 @@
+[package]
+name = "vm-metal"
+version = "0.9.0"
+edition = "2024"
+
+[lib]
+name = "vm_metal"
+
+[dependencies]
+anyhow = "1.0.102"
+bytemuck = "1.25.0"
+compiler = { path = "../compiler" }
+dynamic = { path = "../dynamic" }
+image = "0.25.10"
+metal = "0.33.0"
+objc = "0.2.7"
+parser = { path = "../parser" }
+smol_str = "0.3.6"
+
+[[example]]
+name = "vm_metal_bitonic"
+path = "examples/bitonic.rs"
+
+[[example]]
+name = "vm_metal_run_mandel"
+path = "examples/run_mandel.rs"

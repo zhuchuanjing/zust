@@ -1,0 +1,21 @@
+{
+  "name": "tree-sitter-zust",
+  "version": "0.1.0",
+  "description": "Tree-sitter grammar for the Zust programming language",
+  "license": "MIT",
+  "main": "grammar.js",
+  "keywords": [
+    "parser",
+    "tree-sitter",
+    "zust"
+  ],
+  "files": [
+    "grammar.js"
+  ],
+  "tree-sitter": [
+    {
+      "scope": "source.zs",
+      "injection-regex": "^zust$"
+    }
+  ]
+}

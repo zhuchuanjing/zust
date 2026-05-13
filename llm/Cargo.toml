@@ -1,0 +1,21 @@
+[package]
+name = "llm"
+version = "0.9.0"
+edition = "2024"
+
+[dependencies]
+dynamic = { path = "../dynamic" }
+root = { path = "../root" }
+hex = "0.4.3"
+reqwest = { version = "0.13.3", features = ["stream"] }
+anyhow = "1.0.102"
+thiserror = "2.0.18"
+smol_str = "0.3.6"
+futures-util = "0.3.32"
+bytes = "1.11.1"
+tokio = { version = "1.52.3", features = ["full"] }
+tokio-util = "0.7.18"
+log = "0.4.29"
+base64 = "0.22.1"
+uuid = { version = "1.23.1", features = ["v4"]}
+regex = "1.12.3"

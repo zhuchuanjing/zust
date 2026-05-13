@@ -1,0 +1,30 @@
+[package]
+name = "zusts"
+version = "0.9.0"
+edition = "2024"
+
+[dependencies]
+dynamic = {path = "../dynamic"}
+parser = {path = "../parser"}
+compiler = {path = "../compiler"}
+root = {path = "../root"}
+vm = {path = "../vm", features = ["ir-disassembly"]}
+vm-spirv = {path = "../vm-spirv"}
+vulkan = {path = "../vulkan"}
+llm = {path = "../llm"}
+anyhow = "1.0.102"
+smol_str = "0.3.6"
+cranelift = "0.131.1"
+image = "0.25.10"
+bytemuck = "1.25.0"
+vulkano = "0.35.2"
+
+rand = "0.10.1"
+
+tokio = {version = "1.52.3", features = ["full"]}
+futures = "0.3.32"
+
+[dev-dependencies]
+num-bigint = "0.4.6"
+num-rational = "0.4.2"
+num-traits = "0.2.19"

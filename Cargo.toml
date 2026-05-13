@@ -1,0 +1,15 @@
+[workspace]
+    members = [
+        "dynamic",
+        "parser",
+        "compiler",
+        "vm",
+        "vm-spirv",
+        "vm-metal",
+        "vulkan",
+        "zusts",
+        "root",
+        "llm",
+        "zust-lsp",
+    ]
+    resolver = "2"

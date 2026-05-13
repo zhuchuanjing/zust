@@ -1,0 +1,29 @@
+[package]
+name = "root"
+version = "0.9.0"
+edition = "2024"
+
+[dependencies]
+dynamic = {path = "../dynamic"}
+
+anyhow = "1.0.102"
+thiserror = "2.0.18"
+smol_str = "0.3.6"
+indexmap = "2.14.0"
+
+scc = "3.7.1"
+redis = { version = "1.2.1", features = ["tokio-comp"] }
+rslock = "0.7.4"
+
+axum = {version = "0.8.9", features = ["ws"]}
+futures-util = "0.3.32"
+
+tokio = {version = "1.52.3", features = ["full"]}
+fjall = "3.1.4"
+rustc-hash = "2.1.2"
+rayon = "1.12.0"
+anndists = "0.1.5"
+rand = "0.10.1"
+bytes = "1.11.1"
+log = "0.4.29"
+uuid = { version = "1.23.1", features = ["v4"]}

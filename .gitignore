@@ -1,0 +1,15 @@
+**/target/** 
+*.lock
+*.png
+*.spv
+*.spvasm
+.DS_Store
+.claude/
+.idea/
+.vscode/
+*.log
+/llm/arrow/
+/server/arrow/
+split_obj_info_description.py
+arrow.rar
+zed-extension/grammars/zust/

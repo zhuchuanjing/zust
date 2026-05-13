@@ -1,0 +1,29 @@
+[package]
+name = "vulkan"
+version = "0.9.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1.0.102"
+bytemuck = "1.25.0"
+image = "0.25.10"
+vulkano = "0.35.2"
+
+[dev-dependencies]
+vm-spirv = { path = "../vm-spirv" }
+
+[[example]]
+name = "vulkan_run_bitonic"
+path = "examples/run_bitonic.rs"
+
+[[example]]
+name = "vulkan_run_mandel"
+path = "examples/run_mandel.rs"
+
+[[example]]
+name = "vulkan_run_pathfind"
+path = "examples/run_pathfind.rs"
+
+[[example]]
+name = "vulkan_run_poly"
+path = "examples/run_poly.rs"

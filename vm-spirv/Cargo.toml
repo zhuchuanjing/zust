@@ -1,0 +1,36 @@
+[package]
+name = "vm-spirv"
+version = "0.9.0"
+edition = "2024"
+
+[lib]
+name = "vm_spirv"
+
+[dependencies]
+anyhow = "1.0.102"
+compiler = { path = "../compiler" }
+dynamic = { path = "../dynamic" }
+parser = { path = "../parser" }
+rspirv = "0.13.0"
+smol_str = "0.3.6"
+spirv = "0.4.0"
+
+[[example]]
+name = "vm_spirv_bitonic"
+path = "examples/bitonic.rs"
+
+[[example]]
+name = "vm_spirv_dump_mandel"
+path = "examples/dump_mandel.rs"
+
+[[example]]
+name = "vm_spirv_mandelbrot"
+path = "examples/mandelbrot.rs"
+
+[[example]]
+name = "vm_spirv_pathfind"
+path = "examples/pathfind.rs"
+
+[[example]]
+name = "vm_spirv_poly"
+path = "examples/poly.rs"

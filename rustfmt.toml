@@ -1,0 +1,33 @@
+max_width = 220
+force_multiline_blocks = false
+fn_single_line = true
+struct_lit_single_line = true
+enum_discriminant_single_line = true
+control_brace_style = "AlwaysSameLine"
+blank_lines_upper_bound = 1
+use_small_heuristics = "Max"
+imports_layout = "Horizontal"
+reorder_imports = true
+reorder_modules = true
+format_macro_matchers = true
+single_line_if_else = true
+# 控制 match 表达式的格式化
+match_arm_blocks = false
+match_arm_leading_pipes = "Never"
+
+# 控制代码行的长度和换行
+wrap_match_arms = false
+
+# 控制花括号的格式化
+brace_style = "SameLineWhere"
+
+condense_wildcard_suffixes = true
+enum_discrim_align_threshold = 1
+
+enum_variant_width_threshold = 200
+enum_variant_align_threshold = 16
+single_line_if_else_width = 200
+
+hard_tabs = false
+tab_spaces = 4
+chain_width = 200

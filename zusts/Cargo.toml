@@ -2,12 +2,7 @@
 name = "zusts"
 version = "0.9.0"
 edition = "2024"
-rust-version = "1.85"
-description = "Example runner and script collection for the Zust scripting language."
-license = "Apache-2.0"
-repository = "https://github.com/zhuchuanjing/zust"
-keywords = ["zust", "examples", "scripts"]
-categories = ["compilers"]
+publish = false
 
 [dependencies]
 dynamic = { package = "zust-dynamic", version = "0.9.0", path = "../dynamic" }

@@ -2,6 +2,7 @@
 name = "zed-zust"
 version = "0.9.0"
 edition = "2021"
+publish = false
 
 [lib]
 crate-type = ["cdylib"]

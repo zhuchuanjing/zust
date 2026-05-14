@@ -1,6 +1,6 @@
 [package]
 name = "zust-llm"
-version = "0.9.1"
+version = "0.9.2"
 edition = "2024"
 rust-version = "1.85"
 description = "LLM request helpers for Zust runtime integrations."
@@ -13,8 +13,8 @@ categories = ["api-bindings"]
 name = "llm"
 
 [dependencies]
-dynamic = { package = "zust-dynamic", version = "0.9.1", path = "../dynamic" }
-root = { package = "zust-root", version = "0.9.1", path = "../root" }
+dynamic = { package = "zust-dynamic", version = "0.9.2", path = "../dynamic" }
+root = { package = "zust-root", version = "0.9.2", path = "../root" }
 hex = "0.4.3"
 reqwest = { version = "0.13.3", features = ["stream"] }
 anyhow = "1.0.102"

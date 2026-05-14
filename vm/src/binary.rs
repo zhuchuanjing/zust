@@ -7,6 +7,11 @@ use parser::{BinaryOp, Expr};
 use anyhow::{Result, anyhow};
 
 impl JITRunTime {
+    fn any_to_string(&mut self, ctx: &mut BuildContext, vt: (Value, Type)) -> Result<Value> {
+        let value = self.convert(ctx, vt, Type::Any)?;
+        self.call(ctx, self.get_method(&Type::Any, "to_string")?, vec![value]).map(|(v, _)| v)
+    }
+
     fn struct_to_dynamic(&mut self, ctx: &mut BuildContext, base: Value, ty: &Type) -> Result<Value> {
         let Type::Struct { params: _, fields: _ } = ty else {
             return Err(anyhow!("不是结构体 {:?}", ty));
@@ -59,10 +64,14 @@ impl JITRunTime {
                     return self.call(ctx, self.get_method(&Type::Any, "from_f64")?, vec![v]).map(|(v, _)| v);
                 } else if vt.1.is_f64() {
                     return self.call(ctx, self.get_method(&Type::Any, "from_f64")?, vec![vt.0]).map(|(v, _)| v);
+                } else if vt.1.is_str() {
+                    return Ok(vt.0);
                 }
             } else if vt.1.is_any() {
                 if ty.is_bool() {
                     return self.call(ctx, self.get_method(&Type::Any, "to_bool")?, vec![vt.0]).map(|(v, _)| v);
+                } else if ty.is_str() {
+                    return self.call(ctx, self.get_method(&Type::Any, "to_string")?, vec![vt.0]).map(|(v, _)| v);
                 } else if ty.is_int() | ty.is_uint() {
                     let (v, _) = self.call(ctx, self.get_method(&Type::Any, "to_i64")?, vec![vt.0])?;
                     return Ok(match ty.width() {
@@ -79,6 +88,8 @@ impl JITRunTime {
                 } else {
                     return Ok(vt.0);
                 }
+            } else if ty.is_str() {
+                return self.any_to_string(ctx, vt);
             } else if ty.is_int() || ty.is_uint() {
                 if vt.1.is_f32() || vt.1.is_f64() {
                     let target = crate::get_type(&ty)?;
@@ -159,7 +170,13 @@ impl JITRunTime {
         } else {
             self.eval(ctx, right)?.get(ctx).ok_or_else(|| anyhow!("没有返回值: {:?}", right))?
         };
-        let ty = if op.is_add() && (left.1.is_any() || right.1.is_any()) { Type::Any } else { left.1.clone() + right.1.clone() }; //为了支持字符串的加法需要单独处理
+        let ty = if op.is_add() && (left.1.is_str() || right.1.is_str()) {
+            Type::Str
+        } else if op.is_add() && (left.1.is_any() || right.1.is_any()) {
+            Type::Any
+        } else {
+            left.1.clone() + right.1.clone()
+        }; //为了支持字符串的加法需要单独处理
         let left = self.convert(ctx, left, ty.clone())?;
         let right = self.convert(ctx, right, ty.clone())?;
         if ty.is_any() {
@@ -177,6 +194,10 @@ impl JITRunTime {
                     return Ok((ctx.builder.ins().iadd(left, right), ty));
                 } else if ty.is_float() {
                     return Ok((ctx.builder.ins().fadd(left, right), ty));
+                } else if ty.is_str() {
+                    let op = ctx.builder.ins().iconst(types::I32, i32::from(op) as i64);
+                    let result = self.call(ctx, self.get_method(&Type::Any, "binary")?, vec![left, op, right])?.0;
+                    return Ok((result, ty));
                 }
             }
             BinaryOp::Sub | BinaryOp::SubAssign => {
@@ -290,6 +311,16 @@ impl JITRunTime {
         let left = self.convert(ctx, left, ty.clone())?;
         match op {
             BinaryOp::Add | BinaryOp::AddAssign => {
+                if ty.is_str() {
+                    let right_vt = ctx.get_const(&right).or_else(|_| {
+                        let idx = self.compiler.get_const(right.clone());
+                        self.get_const_value(ctx, idx)
+                    })?;
+                    let right = self.convert(ctx, right_vt, Type::Str)?;
+                    let op = ctx.builder.ins().iconst(types::I32, i32::from(op) as i64);
+                    let result = self.call(ctx, self.get_method(&Type::Any, "binary")?, vec![left, op, right])?.0;
+                    return Ok((result, ty));
+                }
                 if ty.is_int() | ty.is_uint() {
                     return Ok((ctx.builder.ins().iadd_imm(left, right.as_int().ok_or(anyhow!("非整数"))?), ty));
                 }

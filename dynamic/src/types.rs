@@ -70,6 +70,8 @@ impl std::ops::Add for Type {
     fn add(self, rhs: Self) -> Self::Output {
         if self == rhs {
             self
+        } else if self.is_str() || rhs.is_str() {
+            Type::Str
         } else if self.is_any() || rhs.is_any() {
             Type::Any
         } else if self.is_float() || rhs.is_float() {
@@ -252,6 +254,10 @@ impl Type {
 
     pub fn is_bool(&self) -> bool {
         if let Self::Bool = self { true } else { false }
+    }
+
+    pub fn is_str(&self) -> bool {
+        if let Self::Str = self { true } else { false }
     }
 
     pub fn is_native(&self) -> bool {

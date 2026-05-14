@@ -249,6 +249,13 @@ extern "C" fn any_to_f64(addr: *const Dynamic) -> f64 {
     unsafe { (&*addr).as_float().unwrap_or(0.0) }
 }
 
+extern "C" fn any_to_string(addr: *const Dynamic) -> *const Dynamic {
+    if addr.is_null() {
+        return Box::into_raw(Box::new(Dynamic::from("")));
+    }
+    Box::into_raw(Box::new(Dynamic::from(unsafe { &*addr }.to_string())))
+}
+
 extern "C" fn any_binary(left: *const Dynamic, op: i32, right: *const Dynamic) -> *const Dynamic {
     if left.is_null() {
         return right;
@@ -287,7 +294,7 @@ pub const STD: [(&str, &[Type], Type, *const u8); 6] = [
     ("__struct_from_ptr", &[Type::I64, Type::I64], Type::Any, struct_from_ptr as *const u8),
 ];
 
-pub const ANY: [(&str, &[Type], Type, *const u8); 25] = [
+pub const ANY: [(&str, &[Type], Type, *const u8); 26] = [
     ("Any::null", &[], Type::Any, any_null as *const u8),
     ("Any::is_map", &[Type::Any], Type::Bool, any_is_map as *const u8),
     ("Any::is_list", &[Type::Any], Type::Bool, any_is_list as *const u8),
@@ -309,6 +316,7 @@ pub const ANY: [(&str, &[Type], Type, *const u8); 25] = [
     ("Any::to_bool", &[Type::Any], Type::Bool, any_to_bool as *const u8),
     ("Any::from_f64", &[Type::F64], Type::Any, any_from_f64 as *const u8),
     ("Any::to_f64", &[Type::Any], Type::F64, any_to_f64 as *const u8),
+    ("Any::to_string", &[Type::Any], Type::Str, any_to_string as *const u8),
     ("Any::binary", &[Type::Any, Type::I32, Type::Any], Type::Any, any_binary as *const u8),
     ("Any::logic", &[Type::Any, Type::I32, Type::Any], Type::Bool, any_logic as *const u8),
     ("Any::iter", &[Type::Any], Type::Any, any_iter as *const u8),

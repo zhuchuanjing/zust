@@ -170,3 +170,65 @@ pub fn disassemble(name: &str) -> Result<String> {
 pub fn disassemble_ir(name: &str) -> Result<String> {
     JIT.write().unwrap().disassemble_ir(name)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{get_fn, import_code};
+    use dynamic::{Dynamic, Type};
+
+    #[test]
+    fn compares_any_with_string_literal_as_string() -> anyhow::Result<()> {
+        import_code(
+            "vm_string_compare_any",
+            br#"
+            pub fn any_ne_empty(chat_path) {
+                chat_path != ""
+            }
+            "#
+            .to_vec(),
+        )?;
+
+        let (fn_ptr, ret_ty) = get_fn("vm_string_compare_any::any_ne_empty", &[Type::Any])?;
+        assert_eq!(ret_ty, Type::Bool);
+
+        let any_ne_empty: extern "C" fn(*const Dynamic) -> bool = unsafe { std::mem::transmute(fn_ptr) };
+        let empty = Dynamic::from("");
+        let non_empty = Dynamic::from("chat");
+
+        assert!(!any_ne_empty(&empty));
+        assert!(any_ne_empty(&non_empty));
+        Ok(())
+    }
+
+    #[test]
+    fn compares_concrete_value_with_string_literal_as_string() -> anyhow::Result<()> {
+        import_code(
+            "vm_string_compare_imm",
+            br#"
+            pub fn int_eq_str(value: i64) {
+                value == "42"
+            }
+
+            pub fn int_to_str(value: i64) {
+                value + ""
+            }
+            "#
+            .to_vec(),
+        )?;
+
+        let (fn_ptr, ret_ty) = get_fn("vm_string_compare_imm::int_eq_str", &[Type::I64])?;
+        assert_eq!(ret_ty, Type::Bool);
+
+        let int_eq_str: extern "C" fn(i64) -> bool = unsafe { std::mem::transmute(fn_ptr) };
+
+        let (fn_ptr, ret_ty) = get_fn("vm_string_compare_imm::int_to_str", &[Type::I64])?;
+        assert_eq!(ret_ty, Type::Any);
+        let int_to_str: extern "C" fn(i64) -> *const Dynamic = unsafe { std::mem::transmute(fn_ptr) };
+        let text = int_to_str(42);
+        assert_eq!(unsafe { &*text }.as_str(), "42");
+
+        assert!(int_eq_str(42));
+        assert!(!int_eq_str(7));
+        Ok(())
+    }
+}

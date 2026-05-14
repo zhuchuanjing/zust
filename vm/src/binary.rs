@@ -12,6 +12,11 @@ impl JITRunTime {
         self.call(ctx, self.get_method(&Type::Any, "to_string")?, vec![value]).map(|(v, _)| v)
     }
 
+    fn any_logic(&mut self, ctx: &mut BuildContext, left: Value, op: BinaryOp, right: Value) -> Result<(Value, Type)> {
+        let op = ctx.builder.ins().iconst(types::I32, i32::from(op) as i64);
+        self.call(ctx, self.get_method(&Type::Any, "logic")?, vec![left, op, right])
+    }
+
     fn struct_to_dynamic(&mut self, ctx: &mut BuildContext, base: Value, ty: &Type) -> Result<Value> {
         let Type::Struct { params: _, fields: _ } = ty else {
             return Err(anyhow!("不是结构体 {:?}", ty));
@@ -150,6 +155,7 @@ impl JITRunTime {
         if matches!(op, BinaryOp::And | BinaryOp::Or) {
             return self.short_circuit_logic(ctx, left, op, right);
         }
+        let right_ty_hint = if right.is_value() { right.clone().value().ok().map(|v| v.get_type()) } else { self.get_dynamic(right).map(|v| v.get_type()) };
         let right = if right.is_value() {
             let right = right.clone().value()?;
             if right.is_f32() {
@@ -170,9 +176,10 @@ impl JITRunTime {
         } else {
             self.eval(ctx, right)?.get(ctx).ok_or_else(|| anyhow!("没有返回值: {:?}", right))?
         };
-        let ty = if op.is_add() && (left.1.is_str() || right.1.is_str()) {
+        let right_ty = right_ty_hint.as_ref().unwrap_or(&right.1);
+        let ty = if (op.is_add() || op.is_logic()) && (left.1.is_str() || right.1.is_str() || right_ty.is_str()) {
             Type::Str
-        } else if op.is_add() && (left.1.is_any() || right.1.is_any()) {
+        } else if (op.is_add() || op.is_logic()) && (left.1.is_any() || right.1.is_any()) {
             Type::Any
         } else {
             left.1.clone() + right.1.clone()
@@ -181,12 +188,14 @@ impl JITRunTime {
         let right = self.convert(ctx, right, ty.clone())?;
         if ty.is_any() {
             if op.is_logic() {
-                let op = ctx.builder.ins().iconst(types::I32, i32::from(op) as i64);
-                return self.call(ctx, self.get_method(&Type::Any, "logic")?, vec![left, op, right]);
+                return self.any_logic(ctx, left, op, right);
             } else {
                 let op = ctx.builder.ins().iconst(types::I32, i32::from(op) as i64);
                 return self.call(ctx, self.get_method(&Type::Any, "binary")?, vec![left, op, right]);
             }
+        }
+        if ty.is_str() && op.is_logic() {
+            return self.any_logic(ctx, left, op, right);
         }
         match op {
             BinaryOp::Add | BinaryOp::AddAssign => {
@@ -309,6 +318,14 @@ impl JITRunTime {
     pub(crate) fn binary_imm<'a>(&mut self, ctx: &'a mut BuildContext, left: (Value, Type), op: BinaryOp, right: Dynamic) -> Result<(Value, Type)> {
         let ty = left.1.clone() + right.get_type();
         let left = self.convert(ctx, left, ty.clone())?;
+        if ty.is_str() && op.is_logic() {
+            let right_vt = ctx.get_const(&right).or_else(|_| {
+                let idx = self.compiler.get_const(right.clone());
+                self.get_const_value(ctx, idx)
+            })?;
+            let right = self.convert(ctx, right_vt, Type::Str)?;
+            return self.any_logic(ctx, left, op, right);
+        }
         match op {
             BinaryOp::Add | BinaryOp::AddAssign => {
                 if ty.is_str() {

@@ -85,7 +85,14 @@ fn contains_responses_content(msg: &Dynamic) -> bool {
 }
 
 fn chat_content_item(item: Dynamic) -> Dynamic {
-    if item.is_map() && item.contains("type") { item } else { map!("type"=> "text", "text"=> item) }
+    if item.is_map() && item.contains("type") {
+        item
+    } else if item.is_str() {
+        let text = item.as_str();
+        if text.starts_with("http://") || text.starts_with("https://") || text.starts_with("data:image/") { map!("type"=> "image_url", "image_url"=> map!("url"=> item)) } else { map!("type"=> "text", "text"=> item) }
+    } else {
+        map!("type"=> "text", "text"=> item)
+    }
 }
 
 fn response_content(msg: Dynamic) -> Dynamic {
@@ -241,17 +248,7 @@ pub async fn audio_recognize(bigmodel: Dynamic, audio: Dynamic) -> Result<Dynami
     let url = bigmodel.get_dynamic("url").ok_or(anyhow!("没有 url"))?;
     let app_id = bigmodel.get_dynamic("app_id").ok_or(anyhow!("没有 app_id"))?;
     let access_token = bigmodel.get_dynamic("access_token").ok_or(anyhow!("没有 access_token"))?;
-    let audio = if audio.contains("url") {
-        audio
-    } else if audio.contains("data") {
-        let audio_base64 = general_purpose::STANDARD.encode(audio.get_dynamic("data").unwrap().as_bytes().ok_or(anyhow!("没有音频数据"))?);
-        map!("data"=> audio_base64)
-    } else if audio.contains("audio") {
-        let audio_base64 = general_purpose::STANDARD.encode(audio.get_dynamic("audio").unwrap().as_bytes().ok_or(anyhow!("没有音频数据"))?);
-        map!("data"=> audio_base64)
-    } else {
-        return Err(anyhow!("没有 url 也没有 data"));
-    };
+    let audio = normalize_audio_payload(audio)?;
 
     let body = map!("user"=> map!("uid"=> app_id.clone()), "audio"=> audio, "request"=> map!("model_name"=> "bigmodel"));
 
@@ -270,6 +267,22 @@ pub async fn audio_recognize(bigmodel: Dynamic, audio: Dynamic) -> Result<Dynami
         .await?;
     let (t, _) = Dynamic::from_json(resp.text().await?.as_bytes())?;
     t.get_dynamic("result").and_then(|r| r.get_dynamic("text")).ok_or(anyhow!("没有文字结果"))
+}
+
+fn normalize_audio_payload(audio: Dynamic) -> Result<Dynamic> {
+    if audio.contains("url") {
+        let source = audio.get_dynamic("url").unwrap();
+        let source_text = source.as_str().trim();
+        if source_text.starts_with("data:") { if let Some((_, data)) = source_text.split_once(',') { Ok(map!("data"=> data)) } else { Ok(audio) } } else { Ok(audio) }
+    } else if audio.contains("data") {
+        let audio_base64 = general_purpose::STANDARD.encode(audio.get_dynamic("data").unwrap().as_bytes().ok_or(anyhow!("没有音频数据"))?);
+        Ok(map!("data"=> audio_base64))
+    } else if audio.contains("audio") {
+        let audio_base64 = general_purpose::STANDARD.encode(audio.get_dynamic("audio").unwrap().as_bytes().ok_or(anyhow!("没有音频数据"))?);
+        Ok(map!("data"=> audio_base64))
+    } else {
+        Err(anyhow!("没有 url 也没有 data"))
+    }
 }
 
 fn copy_request_options(options: &Dynamic, msg: &Dynamic) {
@@ -622,6 +635,33 @@ mod test {
 
         assert_eq!(normalized.get_dynamic("type").unwrap().as_str(), "image_url");
         assert!(normalized.get_dynamic("text").is_none());
+    }
+
+    #[test]
+    fn chat_content_turns_image_urls_into_image_items() {
+        let normalized = super::chat_content_item("https://example.test/a.jpg".into());
+
+        assert_eq!(normalized.get_dynamic("type").unwrap().as_str(), "image_url");
+        assert_eq!(normalized.get_dynamic("image_url").unwrap().get_dynamic("url").unwrap().as_str(), "https://example.test/a.jpg");
+        assert!(normalized.get_dynamic("text").is_none());
+    }
+
+    #[test]
+    fn chat_content_keeps_plain_text_as_text_item() {
+        let normalized = super::chat_content_item("hello".into());
+
+        assert_eq!(normalized.get_dynamic("type").unwrap().as_str(), "text");
+        assert_eq!(normalized.get_dynamic("text").unwrap().as_str(), "hello");
+        assert!(normalized.get_dynamic("image_url").is_none());
+    }
+
+    #[test]
+    fn audio_data_url_is_sent_as_base64_data() {
+        let audio = map!("url"=> "data:audio/wav;base64,AQID");
+        let normalized = super::normalize_audio_payload(audio).unwrap();
+
+        assert_eq!(normalized.get_dynamic("data").unwrap().as_str(), "AQID");
+        assert!(normalized.get_dynamic("url").is_none());
     }
 
     #[test]

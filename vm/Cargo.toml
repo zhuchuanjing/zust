@@ -1,6 +1,6 @@
 [package]
 name = "zust-vm"
-version = "0.9.0"
+version = "0.9.1"
 edition = "2024"
 rust-version = "1.85"
 description = "Cranelift JIT runtime for executing Zust modules."
@@ -18,11 +18,11 @@ ir-disassembly = []
 
 [dependencies]
 log = "0.4.29"
-dynamic = { package = "zust-dynamic", version = "0.9.0", path = "../dynamic" }
-parser = { package = "zust-parser", version = "0.9.0", path = "../parser" }
-compiler = { package = "zust-compiler", version = "0.9.0", path = "../compiler" }
-root = { package = "zust-root", version = "0.9.0", path = "../root" }
-llm = { package = "zust-llm", version = "0.9.0", path = "../llm" }
+dynamic = { package = "zust-dynamic", version = "0.9.1", path = "../dynamic" }
+parser = { package = "zust-parser", version = "0.9.1", path = "../parser" }
+compiler = { package = "zust-compiler", version = "0.9.1", path = "../compiler" }
+root = { package = "zust-root", version = "0.9.1", path = "../root" }
+llm = { package = "zust-llm", version = "0.9.1", path = "../llm" }
 
 anyhow = "1.0.102"
 thiserror = "2.0.18"

@@ -397,6 +397,7 @@ fn lsp_externs() -> Vec<LspExtern> {
         LspExtern { full_name: "llm::complete", arg_tys: vec![Type::Any, Type::Any], ret_ty: Type::Any },
         LspExtern { full_name: "llm::image", arg_tys: vec![Type::Any, Type::Any, Type::Any], ret_ty: Type::Any },
         LspExtern { full_name: "llm::audio", arg_tys: vec![Type::Any, Type::Any], ret_ty: Type::Any },
+        LspExtern { full_name: "llm::tts", arg_tys: vec![Type::Any, Type::Any], ret_ty: Type::Any },
         LspExtern { full_name: "llm::deep", arg_tys: vec![Type::Any, Type::Any, Type::Any], ret_ty: Type::Any },
     ]
 }

@@ -15,6 +15,13 @@ extern "C" fn llm_audio(openai: *const Dynamic, value: *const Dynamic) -> *const
     Box::into_raw(Box::new(text))
 }
 
+extern "C" fn llm_tts(openai: *const Dynamic, value: *const Dynamic) -> *const Dynamic {
+    let openai = unsafe { openai.read() };
+    let value = unsafe { value.read() };
+    let audio = root::sync_await!(llm::tts(openai, value)).ok().unwrap_or(Dynamic::Null);
+    Box::into_raw(Box::new(audio))
+}
+
 extern "C" fn llm_deep(openai: *const Dynamic, value: *const Dynamic, notifier: *const Dynamic) -> *const Dynamic {
     //启动一个任务 使用 消息点来接收 中间消息
     let openai = unsafe { openai.read() };
@@ -94,9 +101,10 @@ extern "C" fn llm_image(openai: *const Dynamic, value: *const Dynamic, notifier:
     Box::into_raw(Box::new(id.into()))
 }
 
-pub const LLM_NATIVE: [(&str, &[Type], Type, *const u8); 4] = [
+pub const LLM_NATIVE: [(&str, &[Type], Type, *const u8); 5] = [
     ("complete", &[Type::Any, Type::Any], Type::Any, llm_complete as *const u8),
     ("image", &[Type::Any, Type::Any, Type::Any], Type::Any, llm_image as *const u8),
     ("audio", &[Type::Any, Type::Any], Type::Any, llm_audio as *const u8),
+    ("tts", &[Type::Any, Type::Any], Type::Any, llm_tts as *const u8),
     ("deep", &[Type::Any, Type::Any, Type::Any], Type::Any, llm_deep as *const u8),
 ];

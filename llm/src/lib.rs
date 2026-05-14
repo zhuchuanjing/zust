@@ -33,16 +33,82 @@ use tokio::io::BufReader;
 use tokio_util::io::StreamReader; // 关键转换工具
 
 pub async fn complete(openai: Dynamic, msg: Dynamic, tx: Option<Dynamic>) -> Result<Dynamic> {
+    if uses_responses_api(&openai, &msg) {
+        let body = if msg.is_map() && msg.contains("input") { msg } else { map!("input"=> list!(map!("role"=> "user", "content"=> response_content(msg)))) };
+        return post("responses", openai, body, tx).await;
+    }
+
     if msg.is_list() {
         let mut list = Dynamic::list(Vec::new());
         for idx in 0..msg.len() {
-            list.push(map!("type"=> "text", "text"=> msg.get_idx(idx).unwrap()));
+            list.push(chat_content_item(msg.get_idx(idx).unwrap()));
         }
         post("chat/completions", openai, map!("messages"=> list!(map!("role"=> "user", "content"=> list))), tx).await
     } else {
         let mut msg_text = String::new();
         to_markdown(&msg, &mut msg_text);
         post("chat/completions", openai, map!("messages"=> list!(map!("role"=> "user", "content"=> msg_text))), tx).await
+    }
+}
+
+fn uses_responses_api(openai: &Dynamic, msg: &Dynamic) -> bool {
+    let configured = openai.get_dynamic("api").or_else(|| openai.get_dynamic("endpoint")).or_else(|| openai.get_dynamic("method")).is_some_and(|api| api.as_str() == "responses");
+
+    configured || contains_responses_content(msg)
+}
+
+fn contains_responses_content(msg: &Dynamic) -> bool {
+    if msg.is_map() {
+        if let Some(ty) = msg.get_dynamic("type") {
+            return matches!(ty.as_str(), "input_file" | "input_text" | "input_image");
+        }
+        if let Some(input) = msg.get_dynamic("input") {
+            return contains_responses_content(&input);
+        }
+        if let Some(content) = msg.get_dynamic("content") {
+            return contains_responses_content(&content);
+        }
+        return false;
+    }
+
+    if msg.is_list() {
+        for idx in 0..msg.len() {
+            if let Some(item) = msg.get_idx(idx)
+                && contains_responses_content(&item)
+            {
+                return true;
+            }
+        }
+    }
+
+    false
+}
+
+fn chat_content_item(item: Dynamic) -> Dynamic {
+    if item.is_map() && item.contains("type") { item } else { map!("type"=> "text", "text"=> item) }
+}
+
+fn response_content(msg: Dynamic) -> Dynamic {
+    if msg.is_list() {
+        let mut list = Dynamic::list(Vec::new());
+        for idx in 0..msg.len() {
+            if let Some(item) = msg.get_idx(idx) {
+                list.push(response_content_item(item));
+            }
+        }
+        list
+    } else {
+        Dynamic::list(vec![response_content_item(msg)])
+    }
+}
+
+fn response_content_item(item: Dynamic) -> Dynamic {
+    if item.is_map() && item.contains("type") {
+        item
+    } else {
+        let mut text = String::new();
+        to_markdown(&item, &mut text);
+        map!("type"=> "input_text", "text"=> text)
     }
 }
 
@@ -58,6 +124,29 @@ pub async fn image(openai: Dynamic, msg: Dynamic, tx: Option<Dynamic>) -> Result
         to_markdown(&msg, &mut msg_text);
         post("images/generations", openai, map!("prompt"=> msg_text), tx).await
     }
+}
+
+pub async fn tts(openai: Dynamic, msg: Dynamic) -> Result<Dynamic> {
+    let body = if msg.is_map() {
+        if !msg.contains("input") {
+            if let Some(text) = msg.remove_dynamic("text") {
+                msg.insert("input", text);
+            }
+        }
+        if msg.contains("input") {
+            msg
+        } else {
+            let mut msg_text = String::new();
+            to_markdown(&msg, &mut msg_text);
+            map!("input"=> msg_text)
+        }
+    } else {
+        let mut msg_text = String::new();
+        to_markdown(&msg, &mut msg_text);
+        map!("input"=> msg_text)
+    };
+
+    post_binary("audio/speech", openai, body).await
 }
 
 fn normalize_function_schema(function: Dynamic) -> Dynamic {
@@ -183,6 +272,87 @@ pub async fn audio_recognize(bigmodel: Dynamic, audio: Dynamic) -> Result<Dynami
     t.get_dynamic("result").and_then(|r| r.get_dynamic("text")).ok_or(anyhow!("没有文字结果"))
 }
 
+fn copy_request_options(options: &Dynamic, msg: &Dynamic) {
+    copy_request_options_except(options, msg, &[]);
+}
+
+fn copy_request_options_except(options: &Dynamic, msg: &Dynamic, skipped_keys: &[&str]) {
+    for key in options.keys() {
+        if key != "url" && key != "key" && key != "api" && key != "endpoint" && key != "method" && !skipped_keys.iter().any(|skipped| key.as_str() == *skipped) {
+            msg.insert(key.clone(), options.get_dynamic(key.as_str()).unwrap());
+        }
+    }
+}
+
+pub async fn post_binary(method: &str, openai: Dynamic, msg: Dynamic) -> Result<Dynamic> {
+    let url = openai.get_dynamic("url").ok_or(anyhow!("没有 url"))?;
+    let key = openai.get_dynamic("key");
+
+    copy_request_options_except(&openai, &msg, &["stream"]);
+
+    let client = reqwest::Client::new();
+    let mut body_str = String::new();
+    msg.to_json(&mut body_str);
+    log::info!("{}", body_str);
+
+    let resp = if let Some(key) = key {
+        client.post(&format!("{}/{}", url.as_str(), method)).header("Content-Type", "application/json").header("authorization", format!("Bearer {}", key.as_str())).body(body_str).send().await?
+    } else {
+        client.post(&format!("{}/{}", url.as_str(), method)).header("Content-Type", "application/json").body(body_str).send().await?
+    };
+    let status = resp.status();
+    let content_type = resp.headers().get(reqwest::header::CONTENT_TYPE).and_then(|value| value.to_str().ok()).unwrap_or("").to_string();
+    let bytes = resp.bytes().await?;
+
+    if !status.is_success() {
+        let text = String::from_utf8_lossy(&bytes);
+        return Err(anyhow!("LLM 请求失败 HTTP {}: {}", status.as_u16(), text.trim()));
+    }
+
+    decode_binary_response(bytes.to_vec(), &content_type)
+}
+
+fn decode_binary_response(bytes: Vec<u8>, content_type: &str) -> Result<Dynamic> {
+    if content_type.starts_with("application/json") {
+        let (body, _) = Dynamic::from_json(&bytes)?;
+        return decode_tts_json_response(body);
+    }
+
+    Ok(Dynamic::Bytes(bytes))
+}
+
+fn decode_tts_json_response(body: Dynamic) -> Result<Dynamic> {
+    for key in ["audio", "data", "b64_json", "base64", "audio_base64"] {
+        if let Some(value) = body.get_dynamic(key) {
+            if value.as_bytes().is_some() {
+                return Ok(value);
+            }
+            if value.is_str() {
+                return general_purpose::STANDARD.decode(value.as_str()).map(Dynamic::Bytes).map_err(|e| anyhow!("TTS 响应字段 {key} 不是合法 base64: {e}"));
+            }
+        }
+    }
+
+    if let Some(url) = body.get_dynamic("url").or_else(|| body.get_dynamic("audio_url")) {
+        return Ok(map!("url"=> url));
+    }
+
+    for key in ["data", "result"] {
+        if let Some(value) = body.get_dynamic(key) {
+            if value.is_map() {
+                return decode_tts_json_response(value);
+            }
+            if value.is_list() {
+                if let Some(item) = value.get_idx(0) {
+                    return decode_tts_json_response(item);
+                }
+            }
+        }
+    }
+
+    Ok(body)
+}
+
 pub async fn post(method: &str, openai: Dynamic, msg: Dynamic, tx: Option<Dynamic>) -> Result<Dynamic> {
     //不能把 dynamic 作为耗材使用
     let url = openai.get_dynamic("url").ok_or(anyhow!("没有 url"))?;
@@ -195,11 +365,7 @@ pub async fn post(method: &str, openai: Dynamic, msg: Dynamic, tx: Option<Dynami
         openai.get_dynamic("stream").and_then(|is_stream| is_stream.as_bool()).unwrap_or(true)
     };
 
-    for key in openai.keys() {
-        if key != "url" && key != "key" {
-            msg.insert(key.clone(), openai.get_dynamic(key.as_str()).unwrap());
-        }
-    }
+    copy_request_options(&openai, &msg);
 
     normalize_glm_tools(&msg);
 
@@ -262,25 +428,54 @@ fn decode_llm_response(t: Dynamic, raw_text: &str) -> Result<Dynamic> {
     if let Some(data) = t.remove_dynamic("data").and_then(|c| c.into_vec::<Dynamic>()).and_then(|v| v.into_iter().next()) {
         return Ok(data);
     }
+    if let Some(content) = decode_responses_text(&t) {
+        return decode_text_content(content, raw_text);
+    }
     let choice = t.remove_dynamic("choices").and_then(|c| c.into_vec::<Dynamic>()).and_then(|v| v.into_iter().next()).ok_or_else(|| anyhow!("LLM 响应缺少 data[0] 或 choices[0]: {raw_text}"))?;
-    if let Some(content) = choice.remove_dynamic("message").and_then(|m| m.remove_dynamic("content")) {
-        if content.as_str().trim_start().starts_with('{') {
-            Dynamic::from_json(content.as_str().as_bytes()).map(|(v, _)| v)
-        } else {
-            let reg = regex::Regex::new(r"```(\w+)?\n([\s\S]*?)\n?```")?;
-            if let Some(cap) = reg.captures_iter(content.as_str()).next() {
-                let lang = cap.get(1).map_or("unknown", |m| m.as_str());
-                let code = cap.get(2).unwrap().as_str();
-                Ok(map!("lang"=> lang, "code"=> code))
-            } else if let Some(pos) = content.as_str().find("\n{") {
-                let (v, _) = Dynamic::from_json(content.as_str()[pos..].as_bytes())?;
-                Ok(v)
-            } else {
-                Err(anyhow!("结果不是 json"))
+    if let Some(content) = choice.remove_dynamic("message").and_then(|m| m.remove_dynamic("content")) { decode_text_content(content, raw_text) } else { Err(anyhow!("结果不是 json")) }
+}
+
+fn decode_responses_text(t: &Dynamic) -> Option<Dynamic> {
+    let output = t.get_dynamic("output")?;
+    if !output.is_list() {
+        return None;
+    }
+
+    for idx in 0..output.len() {
+        let item = output.get_idx(idx)?;
+        let content = item.get_dynamic("content")?;
+        if !content.is_list() {
+            continue;
+        }
+        for content_idx in 0..content.len() {
+            let content_item = content.get_idx(content_idx)?;
+            if content_item.get_dynamic("type").is_some_and(|ty| ty.as_str() == "output_text")
+                && let Some(text) = content_item.get_dynamic("text")
+            {
+                return Some(text);
             }
         }
+    }
+
+    None
+}
+
+fn decode_text_content(content: Dynamic, _raw_text: &str) -> Result<Dynamic> {
+    let text = content.as_str();
+    if text.trim_start().starts_with('{') || text.trim_start().starts_with('[') {
+        Dynamic::from_json(text.as_bytes()).map(|(v, _)| v)
     } else {
-        Err(anyhow!("结果不是 json"))
+        let reg = regex::Regex::new(r"```(\w+)?\n([\s\S]*?)\n?```")?;
+        if let Some(cap) = reg.captures_iter(text).next() {
+            let lang = cap.get(1).map_or("unknown", |m| m.as_str());
+            let code = cap.get(2).unwrap().as_str();
+            if lang == "json" || code.trim_start().starts_with('{') || code.trim_start().starts_with('[') { Dynamic::from_json(code.as_bytes()).map(|(v, _)| v) } else { Ok(map!("lang"=> lang, "code"=> code)) }
+        } else if let Some(pos) = text.find("\n{") {
+            let (v, _) = Dynamic::from_json(text[pos..].as_bytes())?;
+            Ok(v)
+        } else {
+            Ok(content)
+        }
     }
 }
 
@@ -375,6 +570,68 @@ mod test {
 
         assert!(message.contains("缺少 data[0] 或 choices[0]"));
         assert!(message.contains("bad api key"));
+        Ok(())
+    }
+
+    #[test]
+    fn decode_tts_json_response_accepts_base64_audio() -> anyhow::Result<()> {
+        let body = map!("audio"=> "AQID");
+        let audio = super::decode_tts_json_response(body)?;
+
+        assert_eq!(audio.as_bytes(), Some(&[1, 2, 3][..]));
+        Ok(())
+    }
+
+    #[test]
+    fn decode_tts_json_response_keeps_audio_url() -> anyhow::Result<()> {
+        let body = map!("audio_url"=> "https://example.test/audio.mp3");
+        let audio = super::decode_tts_json_response(body)?;
+
+        assert_eq!(audio.get_dynamic("url").unwrap().as_str(), "https://example.test/audio.mp3");
+        Ok(())
+    }
+
+    #[test]
+    fn decode_tts_json_response_accepts_nested_data_item() -> anyhow::Result<()> {
+        let body = map!("data"=> list!(map!("url"=> "https://example.test/audio.wav")));
+        let audio = super::decode_tts_json_response(body)?;
+
+        assert_eq!(audio.get_dynamic("url").unwrap().as_str(), "https://example.test/audio.wav");
+        Ok(())
+    }
+
+    #[test]
+    fn responses_api_detects_input_file_content() {
+        let openai = map!("url"=> "https://example.test", "model"=> "doubao");
+        let msg = list!(map!("type"=> "input_file", "file_url"=> "https://example.test/doc.pdf"), map!("type"=> "input_text", "text"=> "extract"));
+
+        assert!(super::uses_responses_api(&openai, &msg));
+    }
+
+    #[test]
+    fn responses_api_can_be_configured_explicitly() {
+        let openai = map!("url"=> "https://example.test", "api"=> "responses");
+
+        assert!(super::uses_responses_api(&openai, &"plain text".into()));
+    }
+
+    #[test]
+    fn chat_content_preserves_typed_items() {
+        let item = map!("type"=> "image_url", "image_url"=> map!("url"=> "https://example.test/a.jpg"));
+        let normalized = super::chat_content_item(item);
+
+        assert_eq!(normalized.get_dynamic("type").unwrap().as_str(), "image_url");
+        assert!(normalized.get_dynamic("text").is_none());
+    }
+
+    #[test]
+    fn decode_responses_output_text_json() -> anyhow::Result<()> {
+        let raw = r#"{"output":[{"type":"message","content":[{"type":"output_text","text":"{\"ok\":true,\"name\":\"pdf\"}"}]}]}"#;
+        let (body, _) = Dynamic::from_json(raw.as_bytes())?;
+        let decoded = super::decode_llm_response(body, raw)?;
+
+        assert!(decoded.get_dynamic("ok").unwrap().is_true());
+        assert_eq!(decoded.get_dynamic("name").unwrap().as_str(), "pdf");
         Ok(())
     }
 }

@@ -175,7 +175,7 @@ pub fn disassemble_ir(name: &str) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::{get_fn, import_code};
-    use dynamic::{Dynamic, Type};
+    use dynamic::{Dynamic, ToJson, Type};
 
     #[test]
     fn compares_any_with_string_literal_as_string() -> anyhow::Result<()> {
@@ -230,6 +230,42 @@ mod tests {
 
         assert!(int_eq_str(42));
         assert!(!int_eq_str(7));
+        Ok(())
+    }
+
+    #[test]
+    fn root_native_calls_do_not_take_ownership_of_dynamic_args() -> anyhow::Result<()> {
+        import_code(
+            "vm_root_clone_bridge",
+            br#"
+            pub fn add_then_reuse(arg) {
+                let user = {
+                    address: "test-wallet",
+                    points: 20
+                };
+                root::add("local/root-clone-bridge-user", user);
+                user.points = user.points - 7;
+                root::add("local/root-clone-bridge-user", user);
+                {
+                    user: user,
+                    points: user.points
+                }
+            }
+            "#
+            .to_vec(),
+        )?;
+
+        let (fn_ptr, ret_ty) = get_fn("vm_root_clone_bridge::add_then_reuse", &[Type::Any])?;
+        assert_eq!(ret_ty, Type::Any);
+        let add_then_reuse: extern "C" fn(*const Dynamic) -> *const Dynamic = unsafe { std::mem::transmute(fn_ptr) };
+        let arg = Dynamic::Null;
+        let result = add_then_reuse(&arg);
+        let result = unsafe { &*result };
+
+        assert_eq!(result.get_dynamic("points").and_then(|value| value.as_int()), Some(13));
+        let mut json = String::new();
+        result.to_json(&mut json);
+        assert!(json.contains("\"points\": 13"));
         Ok(())
     }
 }

@@ -239,7 +239,7 @@ extern "C" fn any_split(addr: *mut Dynamic, s: *const Dynamic) -> *const Dynamic
         return &Dynamic::Null;
     }
     let s: &str = unsafe { &*s }.as_str();
-    Box::into_raw(Box::new(unsafe { std::ptr::read(addr) }.split(s)))
+    Box::into_raw(Box::new(unsafe { (&*addr).clone() }.split(s)))
 }
 
 extern "C" fn any_to_f64(addr: *const Dynamic) -> f64 {

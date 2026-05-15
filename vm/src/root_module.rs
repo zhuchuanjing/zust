@@ -4,7 +4,7 @@ use dynamic::{Dynamic, Type};
 use root::{Object, get_mount};
 extern "C" fn root_add(name: *const Dynamic, value: *const Dynamic) -> bool {
     unsafe {
-        let obj = Object::Value(std::ptr::read(value));
+        let obj = Object::Value((*value).clone());
         root::add(&(*name).as_str(), obj).unwrap_or(false)
     }
 }
@@ -23,14 +23,14 @@ extern "C" fn root_dir(name: *const Dynamic) -> *const Dynamic {
 
 extern "C" fn root_send(name: *const Dynamic, value: *const Dynamic) -> *const Dynamic {
     unsafe {
-        let ret = root::send_msg(&(*name).as_str(), std::ptr::read(value)).unwrap_or(Dynamic::Null);
+        let ret = root::send_msg(&(*name).as_str(), (*value).clone()).unwrap_or(Dynamic::Null);
         Box::into_raw(Box::new(ret))
     }
 }
 
 extern "C" fn root_send_idx(name: *const Dynamic, idx: i64, value: *const Dynamic) {
     unsafe {
-        let _ = root::send_idx_msg(&(*name).as_str(), idx as usize, std::ptr::read(value));
+        let _ = root::send_idx_msg(&(*name).as_str(), idx as usize, (*value).clone());
     }
 }
 
@@ -64,7 +64,7 @@ extern "C" fn root_len(name: *const Dynamic) -> i64 {
 }
 
 extern "C" fn root_push(name: *const Dynamic, value: *const Dynamic) -> i64 {
-    unsafe { root::push(&(*name).as_str(), std::ptr::read(value)).map(|idx| idx as i64).unwrap_or(-1) }
+    unsafe { root::push(&(*name).as_str(), (*value).clone()).map(|idx| idx as i64).unwrap_or(-1) }
 }
 
 extern "C" fn root_get_idx(name: *const Dynamic, idx: i64) -> *const Dynamic {
@@ -83,7 +83,7 @@ extern "C" fn root_remove_idx(name: *const Dynamic, idx: i64) -> *const Dynamic 
 
 extern "C" fn root_insert(name: *const Dynamic, key: *const Dynamic, value: *const Dynamic) {
     unsafe {
-        let _ = root::insert(&(*name).as_str(), &(*key).as_str(), std::ptr::read(value));
+        let _ = root::insert(&(*name).as_str(), &(*key).as_str(), (*value).clone());
     }
 }
 

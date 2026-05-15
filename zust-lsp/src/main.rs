@@ -382,7 +382,7 @@ fn lsp_externs() -> Vec<LspExtern> {
         LspExtern { full_name: "root::add", arg_tys: vec![Type::Any, Type::Any], ret_ty: Type::I32 },
         LspExtern { full_name: "root::dir", arg_tys: vec![Type::Any], ret_ty: Type::Any },
         LspExtern { full_name: "root::remove", arg_tys: vec![Type::Any], ret_ty: Type::Any },
-        LspExtern { full_name: "root::contains", arg_tys: vec![Type::Any, Type::Any], ret_ty: Type::I32 },
+        LspExtern { full_name: "root::contains", arg_tys: vec![Type::Any], ret_ty: Type::I32 },
         LspExtern { full_name: "root::send", arg_tys: vec![Type::Any, Type::Any], ret_ty: Type::Any },
         LspExtern { full_name: "root::send_idx", arg_tys: vec![Type::Any, Type::I64, Type::Any], ret_ty: Type::Void },
         LspExtern { full_name: "root::get", arg_tys: vec![Type::Any], ret_ty: Type::Any },

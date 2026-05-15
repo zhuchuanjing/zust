@@ -398,7 +398,13 @@ pub fn get_mount<'a>(name: &'a str) -> Result<(Mount<Object>, &'a str)> {
 
 pub fn add(name: &str, obj: Object) -> Result<bool> {
     let (m, name) = get_mount(name)?;
-    Ok(m.add(name, obj))
+    let mut obj = obj;
+    let expire = take_object_expire(&mut obj);
+    let added = m.add(name, obj);
+    if added {
+        apply_redis_expire(&m, name, expire);
+    }
+    Ok(added)
 }
 
 pub fn add_native(name: &str, native_name: &str) -> Result<bool> {
@@ -411,7 +417,13 @@ pub fn add_native(name: &str, native_name: &str) -> Result<bool> {
 
 pub fn add_value<T: Into<Dynamic>>(name: &str, val: T) -> Result<bool> {
     let (m, name) = get_mount(name)?;
-    Ok(m.add(name, Object::Value(val.into())))
+    let mut value = val.into();
+    let expire = take_dynamic_expire(&mut value);
+    let added = m.add(name, Object::Value(value));
+    if added {
+        apply_redis_expire(&m, name, expire);
+    }
+    Ok(added)
 }
 
 pub fn get(name: &str) -> Result<Dynamic> {
@@ -445,7 +457,11 @@ pub fn add_list(name: &str) -> Result<()> {
 
 pub fn push(name: &str, value: Dynamic) -> Result<usize> {
     let (m, name) = get_mount(name)?;
-    m.push(name, Object::Value(value))
+    let mut value = value;
+    let expire = take_dynamic_expire(&mut value);
+    let len = m.push(name, Object::Value(value))?;
+    apply_redis_expire(&m, name, expire);
+    Ok(len)
 }
 
 pub fn add_map(name: &str) -> Result<()> {
@@ -456,8 +472,30 @@ pub fn add_map(name: &str) -> Result<()> {
 
 pub fn insert(name: &str, key: &str, value: Dynamic) -> Result<()> {
     let (m, name) = get_mount(name)?;
+    let mut value = value;
+    let expire = take_dynamic_expire(&mut value);
     let _ = m.insert(name, key, Object::Value(value));
+    apply_redis_expire(&m, name, expire);
     Ok(())
+}
+
+fn take_object_expire(obj: &mut Object) -> Option<i64> {
+    if let Object::Value(value) = obj { take_dynamic_expire(value) } else { None }
+}
+
+fn take_dynamic_expire(value: &mut Dynamic) -> Option<i64> {
+    value.remove_dynamic("@expire").and_then(|expire| expire.as_int()).filter(|expire| *expire > 0)
+}
+
+fn apply_redis_expire(mount: &Mount<Object>, name: &str, expire: Option<i64>) {
+    let Some(expire) = expire else {
+        return;
+    };
+    if let Mount::Redis { client, rl: _ } = mount
+        && let Ok(mut conn) = client.get_connection()
+    {
+        let _ = conn.expire::<&str, ()>(name, expire);
+    }
 }
 
 pub fn get_key(name: &str, key: &str) -> Result<Dynamic> {
@@ -611,5 +649,22 @@ mod tests {
         let result = send_msg("local/fight", fight_request()).unwrap();
         let rounds = result.get_dynamic("round_count").and_then(|v| v.as_int()).unwrap_or_default();
         assert!(rounds > 0);
+    }
+
+    #[test]
+    fn take_dynamic_expire_strips_positive_expire_metadata() {
+        let mut value = dynamic::map!("@expire"=> 30, "name"=> "zust");
+
+        assert_eq!(take_dynamic_expire(&mut value), Some(30));
+        assert!(!value.contains("@expire"));
+        assert_eq!(value.get_dynamic("name").unwrap().as_str(), "zust");
+    }
+
+    #[test]
+    fn take_dynamic_expire_ignores_non_positive_expire_metadata() {
+        let mut value = dynamic::map!("@expire"=> 0, "name"=> "zust");
+
+        assert_eq!(take_dynamic_expire(&mut value), None);
+        assert!(!value.contains("@expire"));
     }
 }

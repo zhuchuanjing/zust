@@ -64,7 +64,7 @@ extern "C" fn root_len(name: *const Dynamic) -> i64 {
 }
 
 extern "C" fn root_push(name: *const Dynamic, value: *const Dynamic) -> i64 {
-    unsafe { if let Ok((m, name)) = get_mount(&(*name).as_str()) { m.push(name, std::ptr::read(value).into()).map(|idx| idx as i64).unwrap_or(-1) } else { -1 } }
+    unsafe { root::push(&(*name).as_str(), std::ptr::read(value)).map(|idx| idx as i64).unwrap_or(-1) }
 }
 
 extern "C" fn root_get_idx(name: *const Dynamic, idx: i64) -> *const Dynamic {
@@ -83,9 +83,7 @@ extern "C" fn root_remove_idx(name: *const Dynamic, idx: i64) -> *const Dynamic 
 
 extern "C" fn root_insert(name: *const Dynamic, key: *const Dynamic, value: *const Dynamic) {
     unsafe {
-        if let Ok((m, name)) = get_mount(&(*name).as_str()) {
-            let _ = m.insert(name, &(*key).as_str(), std::ptr::read(value).into());
-        }
+        let _ = root::insert(&(*name).as_str(), &(*key).as_str(), std::ptr::read(value));
     }
 }
 
@@ -127,7 +125,7 @@ pub const ROOT_NATIVE: [(&str, &[Type], Type, *const u8); 18] = [
     ("add", &[Type::Any, Type::Any], Type::I32, root_add as *const u8),
     ("dir", &[Type::Any], Type::Any, root_dir as *const u8),
     ("remove", &[Type::Any], Type::Any, root_remove as *const u8),
-    ("contains", &[Type::Any, Type::Any], Type::I32, root_contains as *const u8),
+    ("contains", &[Type::Any], Type::I32, root_contains as *const u8),
     ("send", &[Type::Any, Type::Any], Type::Any, root_send as *const u8),
     ("send_idx", &[Type::Any, Type::I64, Type::Any], Type::Void, root_send_idx as *const u8),
     ("get", &[Type::Any], Type::Any, root_get as *const u8),

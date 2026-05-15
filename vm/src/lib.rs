@@ -14,6 +14,7 @@ use cranelift::prelude::types;
 use dynamic::Type;
 pub use rt::JITRunTime;
 use smol_str::SmolStr;
+mod http_module;
 mod llm_module;
 mod root_module;
 
@@ -97,7 +98,7 @@ unsafe impl Send for JITRunTime {}
 unsafe impl Sync for JITRunTime {}
 
 //直接在这里增加一行 就可以导入一个模块
-static mut MODULES: &[(&str, &[(&str, &[Type], Type, *const u8)])] = &[("llm", &llm_module::LLM_NATIVE), ("root", &root_module::ROOT_NATIVE)];
+static mut MODULES: &[(&str, &[(&str, &[Type], Type, *const u8)])] = &[("llm", &llm_module::LLM_NATIVE), ("root", &root_module::ROOT_NATIVE), ("http", &http_module::HTTP_NATIVE)];
 
 pub static JIT: LazyLock<Arc<RwLock<JITRunTime>>> = LazyLock::new(|| {
     let jit = JITRunTime::new(|b| {

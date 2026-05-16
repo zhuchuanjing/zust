@@ -500,8 +500,11 @@ impl Compiler {
         Expr::new(ExprKind::Binary { left: Box::new(left), op: BinaryOp::Idx, right: Box::new(right) }, span)
     }
 
-    fn type_field_access_expr(&mut self, left: Expr, key: &str, span: Span) -> Option<Expr> {
+    fn type_field_access_expr(&mut self, left: Expr, key: &str, span: Span, prefer_dynamic_field: bool) -> Option<Expr> {
         let ty = self.infer_expr(&left).ok()?;
+        if prefer_dynamic_field && ty.is_any() {
+            return Some(self.literal_field_access_expr(left, key, span));
+        }
         let (idx, field_ty) = self.get_field(&ty, key).ok()?;
         Some(self.field_access_expr(left, idx, field_ty, key, span))
     }
@@ -521,7 +524,7 @@ impl Compiler {
             return Ok(None);
         };
         let left = self.eval(left, stmts, cap)?;
-        if let Some(field) = self.type_field_access_expr(left.clone(), &method, obj.span) {
+        if let Some(field) = self.type_field_access_expr(left.clone(), &method, obj.span, false) {
             return Ok(Some(field));
         }
         if let Some(method_fn) = self.global_method_access_expr(left.clone(), &method, obj.span)? {
@@ -798,7 +801,7 @@ impl Compiler {
                 let left = self.eval(left, stmts, cap)?;
                 if *op == BinaryOp::Idx {
                     if let Some(key) = self.get_value(right).and_then(|v| if v.is_str() { Some(v.as_str().to_string()) } else { None }) {
-                        if let Some(field) = self.type_field_access_expr(left.clone(), &key, expr.span) {
+                        if let Some(field) = self.type_field_access_expr(left.clone(), &key, expr.span, true) {
                             return Ok(field);
                         }
                         return Ok(self.literal_field_access_expr(left, &key, expr.span));

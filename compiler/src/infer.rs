@@ -38,6 +38,9 @@ impl Compiler {
                         let right_ty = if right.is_value() || right.is_const() {
                             let right_value = if let ExprKind::Const(c) = &right.kind { self.consts[*c].clone() } else { right.clone().value()? };
                             if right_value.is_str() {
+                                if left_ty.is_any() {
+                                    return Ok(Type::Any);
+                                }
                                 if let Ok(field) = self.symbols.get_field(&left_ty, right_value.as_str()) {
                                     return if let Type::Fn { ret, .. } = field.1 { Ok(ret.as_ref().clone()) } else { Ok(field.1.clone()) };
                                 }

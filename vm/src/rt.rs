@@ -111,6 +111,11 @@ impl JITRunTime {
         Ok((self.call(ctx, self.get_method(&Type::Any, "clone")?, vec![value])?.0, Type::Any))
     }
 
+    fn get_null_value(&mut self, ctx: &mut BuildContext) -> Result<(Value, Type)> {
+        let const_idx = self.compiler.get_const(Dynamic::Null);
+        self.get_const_value(ctx, const_idx)
+    }
+
     pub fn get_dynamic(&self, expr: &Expr) -> Option<Dynamic> {
         if let ExprKind::Const(idx) = &expr.kind { self.compiler.consts.get(*idx).cloned() } else { None }
     }
@@ -704,7 +709,11 @@ impl JITRunTime {
                     }
                 } else {
                     let assign_expr = if op.is_assign() { Some(left.clone()) } else { None };
-                    let left = self.eval(ctx, left)?.get(ctx).ok_or_else(|| anyhow!("binary left has no value: {:?}", left))?;
+                    let left = match self.eval(ctx, left)?.get(ctx) {
+                        Some(left) => left,
+                        None if matches!(op, BinaryOp::And | BinaryOp::Or) => self.get_null_value(ctx)?,
+                        None => return Err(anyhow!("binary left has no value: {:?}", left)),
+                    };
                     if op == &BinaryOp::Idx {
                         if let Type::Struct { params: _, fields: _ } = &left.1 {
                             let idx = self.struct_field_index(&left.1, right)?;

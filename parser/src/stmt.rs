@@ -244,8 +244,11 @@ impl Parser {
             Stmt::new(StmtKind::Continue, Span::new(start, self.current_pos()))
         } else if self.keyword("return").is_ok() {
             self.whitespace()?;
-            let expr = self.get_expr().ok();
-            self.until(b';')?;
+            let expr = if matches!(self.get(), Ok(b';' | b'}')) { None } else { Some(self.get_expr()?) };
+            self.whitespace()?;
+            if self.take(b';').is_err() && !matches!(self.get(), Ok(b'}')) {
+                self.until(b';')?;
+            }
             Stmt::new(StmtKind::Return(expr), Span::new(start, self.current_pos()))
         } else if self.keyword("if").is_ok() {
             self.if_block()?

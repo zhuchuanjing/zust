@@ -546,6 +546,12 @@ mod tests {
                 let first = if steps.len() > 0 { steps[0] } else { {} };
                 first.ja || "すみません"
             }
+
+            pub fn assign_first_note(steps) {
+                let first = {};
+                first = if steps.len() > 0 { steps[0] } else { {} };
+                first.note || "fallback"
+            }
             "#
             .as_bytes()
             .to_vec(),
@@ -567,6 +573,220 @@ mod tests {
         assert_eq!(compiled.ret_ty(), &Type::Any);
         let first_ja: extern "C" fn(*const Dynamic) -> *const Dynamic = unsafe { std::mem::transmute(compiled.ptr()) };
         assert_eq!(unsafe { &*first_ja(&empty_steps) }.as_str(), "すみません");
+
+        let compiled = vm.get_fn("vm_if_empty_object_branch::assign_first_note", &[Type::Any])?;
+        assert_eq!(compiled.ret_ty(), &Type::Any);
+        let assign_first_note: extern "C" fn(*const Dynamic) -> *const Dynamic = unsafe { std::mem::transmute(compiled.ptr()) };
+        assert_eq!(unsafe { &*assign_first_note(&empty_steps) }.as_str(), "fallback");
+        assert_eq!(unsafe { &*assign_first_note(&steps) }.as_str(), "hello");
+        Ok(())
+    }
+
+    #[test]
+    fn list_literal_can_be_function_tail_expression() -> anyhow::Result<()> {
+        let vm = Vm::with_all()?;
+        vm.import_code(
+            "vm_tail_list_literal",
+            r#"
+            pub fn numbers() {
+                [1, 2, 3]
+            }
+
+            pub fn maps() {
+                [
+                    {note: "first"},
+                    {note: "second"}
+                ]
+            }
+
+            pub fn object_with_maps() {
+                {
+                    steps: [
+                        {note: "first"},
+                        {note: "second"}
+                    ]
+                }
+            }
+
+            pub fn return_maps() {
+                return [
+                    {note: "first"},
+                    {note: "second"}
+                ];
+            }
+
+            pub fn return_maps_without_semicolon() {
+                return [
+                    {note: "first"},
+                    {note: "second"}
+                ]
+            }
+
+            pub fn tail_bare_variable() {
+                let value = [
+                    {note: "first"},
+                    {note: "second"}
+                ];
+                value
+            }
+
+            pub fn return_bare_variable_without_semicolon() {
+                let value = [
+                    {note: "first"},
+                    {note: "second"}
+                ];
+                return value
+            }
+
+            pub fn tail_object_variable() {
+                let result = {
+                    steps: [
+                        {note: "first"},
+                        {note: "second"}
+                    ]
+                };
+                result
+            }
+            "#
+            .as_bytes()
+            .to_vec(),
+        )?;
+
+        let compiled = vm.get_fn("vm_tail_list_literal::numbers", &[])?;
+        assert_eq!(compiled.ret_ty(), &Type::Any);
+        let numbers: extern "C" fn() -> *const Dynamic = unsafe { std::mem::transmute(compiled.ptr()) };
+        let result = unsafe { &*numbers() };
+        assert_eq!(result.len(), 3);
+        assert_eq!(result.get_idx(1).and_then(|value| value.as_int()), Some(2));
+
+        let compiled = vm.get_fn("vm_tail_list_literal::maps", &[])?;
+        assert_eq!(compiled.ret_ty(), &Type::Any);
+        let maps: extern "C" fn() -> *const Dynamic = unsafe { std::mem::transmute(compiled.ptr()) };
+        let result = unsafe { &*maps() };
+        assert_eq!(result.len(), 2);
+        assert_eq!(result.get_idx(1).and_then(|value| value.get_dynamic("note")).map(|value| value.as_str().to_string()), Some("second".to_string()));
+
+        let compiled = vm.get_fn("vm_tail_list_literal::object_with_maps", &[])?;
+        assert_eq!(compiled.ret_ty(), &Type::Any);
+        let object_with_maps: extern "C" fn() -> *const Dynamic = unsafe { std::mem::transmute(compiled.ptr()) };
+        let result = unsafe { &*object_with_maps() };
+        let steps = result.get_dynamic("steps").expect("steps");
+        assert_eq!(steps.len(), 2);
+        assert_eq!(steps.get_idx(0).and_then(|value| value.get_dynamic("note")).map(|value| value.as_str().to_string()), Some("first".to_string()));
+
+        let compiled = vm.get_fn("vm_tail_list_literal::return_maps", &[])?;
+        assert_eq!(compiled.ret_ty(), &Type::Any);
+        let return_maps: extern "C" fn() -> *const Dynamic = unsafe { std::mem::transmute(compiled.ptr()) };
+        let result = unsafe { &*return_maps() };
+        assert_eq!(result.len(), 2);
+        assert_eq!(result.get_idx(1).and_then(|value| value.get_dynamic("note")).map(|value| value.as_str().to_string()), Some("second".to_string()));
+
+        let compiled = vm.get_fn("vm_tail_list_literal::return_maps_without_semicolon", &[])?;
+        assert_eq!(compiled.ret_ty(), &Type::Any);
+        let return_maps_without_semicolon: extern "C" fn() -> *const Dynamic = unsafe { std::mem::transmute(compiled.ptr()) };
+        let result = unsafe { &*return_maps_without_semicolon() };
+        assert_eq!(result.len(), 2);
+        assert_eq!(result.get_idx(0).and_then(|value| value.get_dynamic("note")).map(|value| value.as_str().to_string()), Some("first".to_string()));
+
+        let compiled = vm.get_fn("vm_tail_list_literal::tail_bare_variable", &[])?;
+        assert_eq!(compiled.ret_ty(), &Type::Any);
+        let tail_bare_variable: extern "C" fn() -> *const Dynamic = unsafe { std::mem::transmute(compiled.ptr()) };
+        let result = unsafe { &*tail_bare_variable() };
+        assert_eq!(result.len(), 2);
+        assert_eq!(result.get_idx(1).and_then(|value| value.get_dynamic("note")).map(|value| value.as_str().to_string()), Some("second".to_string()));
+
+        let compiled = vm.get_fn("vm_tail_list_literal::return_bare_variable_without_semicolon", &[])?;
+        assert_eq!(compiled.ret_ty(), &Type::Any);
+        let return_bare_variable_without_semicolon: extern "C" fn() -> *const Dynamic = unsafe { std::mem::transmute(compiled.ptr()) };
+        let result = unsafe { &*return_bare_variable_without_semicolon() };
+        assert_eq!(result.len(), 2);
+        assert_eq!(result.get_idx(0).and_then(|value| value.get_dynamic("note")).map(|value| value.as_str().to_string()), Some("first".to_string()));
+
+        let compiled = vm.get_fn("vm_tail_list_literal::tail_object_variable", &[])?;
+        assert_eq!(compiled.ret_ty(), &Type::Any);
+        let tail_object_variable: extern "C" fn() -> *const Dynamic = unsafe { std::mem::transmute(compiled.ptr()) };
+        let result = unsafe { &*tail_object_variable() };
+        let steps = result.get_dynamic("steps").expect("steps");
+        assert_eq!(steps.len(), 2);
+        assert_eq!(steps.get_idx(1).and_then(|value| value.get_dynamic("note")).map(|value| value.as_str().to_string()), Some("second".to_string()));
+        Ok(())
+    }
+
+    #[test]
+    fn repeated_deep_step_literals_import_successfully() -> anyhow::Result<()> {
+        fn extra_page_literal(depth: usize) -> String {
+            let mut value = "{leaf: \"done\"}".to_string();
+            for idx in 0..depth {
+                value = format!("{{kind: \"page\", idx: {idx}, children: [{value}], meta: {{title: \"extra\", visible: true}}}}");
+            }
+            value
+        }
+
+        let extra = extra_page_literal(48);
+        let code = format!(
+            r#"
+            pub fn script() {{
+                return [
+                    {{ja: "一つ目", note: "first", extra: {extra}}},
+                    {{ja: "二つ目", note: "second", extra: {extra}}},
+                    {{ja: "三つ目", note: "third", extra: {extra}}}
+                ]
+            }}
+            "#
+        );
+
+        let vm = Vm::with_all()?;
+        vm.import_code("vm_repeated_deep_step_literals", code.into_bytes())?;
+        let compiled = vm.get_fn("vm_repeated_deep_step_literals::script", &[])?;
+        assert_eq!(compiled.ret_ty(), &Type::Any);
+        let script: extern "C" fn() -> *const Dynamic = unsafe { std::mem::transmute(compiled.ptr()) };
+        let result = unsafe { &*script() };
+        assert_eq!(result.len(), 3);
+        assert_eq!(result.get_idx(2).and_then(|value| value.get_dynamic("note")).map(|value| value.as_str().to_string()), Some("third".to_string()));
+        Ok(())
+    }
+
+    #[test]
+    fn object_last_field_call_does_not_need_trailing_comma() -> anyhow::Result<()> {
+        let vm = Vm::with_all()?;
+        vm.import_code(
+            "vm_object_last_call_field",
+            r#"
+            pub fn extra_page() {
+                {
+                    title: "extra",
+                    pages: [
+                        {note: "nested"}
+                    ]
+                }
+            }
+
+            pub fn data() {
+                return [
+                    {
+                        note: "first",
+                        choices: ["a", "b"],
+                        extras: extra_page()
+                    },
+                    {
+                        note: "second",
+                        choices: ["c"],
+                        extras: extra_page()
+                    }
+                ]
+            }
+            "#
+            .as_bytes()
+            .to_vec(),
+        )?;
+
+        let compiled = vm.get_fn("vm_object_last_call_field::data", &[])?;
+        assert_eq!(compiled.ret_ty(), &Type::Any);
+        let data: extern "C" fn() -> *const Dynamic = unsafe { std::mem::transmute(compiled.ptr()) };
+        let result = unsafe { &*data() };
+        assert_eq!(result.len(), 2);
+        let first = result.get_idx(0).expect("first step");
+        assert_eq!(first.get_dynamic("extras").and_then(|extras| extras.get_dynamic("title")).map(|title| title.as_str().to_string()), Some("extra".to_string()));
         Ok(())
     }
 

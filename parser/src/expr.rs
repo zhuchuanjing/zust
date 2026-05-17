@@ -566,6 +566,82 @@ impl Parser {
         Ok(Expr::new(ExprKind::Dict(crate::parse_list!(self, Vec::new(), b'}', b',', self.kv()?)), self.span_from(start)))
     }
 
+    fn static_dynamic_literal_expr(&mut self) -> Result<Expr> {
+        let start = self.current_pos();
+        let value = self.static_dynamic_value()?;
+        Ok(Expr::new(ExprKind::Value(value), self.span_from(start)))
+    }
+
+    fn static_dynamic_value(&mut self) -> Result<Dynamic> {
+        self.whitespace()?;
+        if self.get()? == b'[' {
+            return self.static_dynamic_list();
+        }
+        if self.get()? == b'{' {
+            return self.static_dynamic_map();
+        }
+        if self.take(b'-').is_ok() {
+            return Ok(-self.number()?);
+        }
+        if let Ok(text) = self.text() {
+            return Ok(Dynamic::String(text));
+        }
+        if let Ok(number) = self.number() {
+            return Ok(number);
+        }
+        if self.keyword("true").is_ok() {
+            return Ok(Dynamic::Bool(true));
+        }
+        if self.keyword("false").is_ok() {
+            return Ok(Dynamic::Bool(false));
+        }
+        if self.keyword("null").is_ok() {
+            return Ok(Dynamic::Null);
+        }
+        Err(ExprErr::ExpectExpr.into())
+    }
+
+    fn static_dynamic_list(&mut self) -> Result<Dynamic> {
+        self.take(b'[')?;
+        let mut values = Vec::new();
+        loop {
+            self.whitespace()?;
+            if self.take(b']').is_ok() {
+                break;
+            }
+            values.push(self.static_dynamic_value()?);
+            self.whitespace()?;
+            if self.take(b',').is_ok() {
+                continue;
+            }
+            self.until(b']')?;
+            break;
+        }
+        Ok(Dynamic::list(values))
+    }
+
+    fn static_dynamic_map(&mut self) -> Result<Dynamic> {
+        self.take(b'{')?;
+        let mut values = std::collections::BTreeMap::new();
+        loop {
+            self.whitespace()?;
+            if self.take(b'}').is_ok() {
+                break;
+            }
+            let key = if let Ok(key) = self.ident() { key } else { self.string()? };
+            self.until(b':')?;
+            let value = self.static_dynamic_value()?;
+            values.insert(key, value);
+            self.whitespace()?;
+            if self.take(b',').is_ok() {
+                continue;
+            }
+            self.until(b'}')?;
+            break;
+        }
+        Ok(Dynamic::map(values))
+    }
+
     pub fn get_expr(&mut self) -> Result<Expr> {
         self.expr(None, None).map(|(e, _)| e)
     }
@@ -609,6 +685,9 @@ impl Parser {
             let value = self.expr_with_min_weight(None, None, BinaryOp::Mul.weight() + 1, allow_struct_literal)?.0;
             Ok((Expr::new(ExprKind::Unary { op: UnaryOp::Neg, value: Box::new(value) }, Span::new(start, self.current_pos())), false))
         } else if ch == b'[' {
+            if let Ok(expr) = try_parse!(self, self.static_dynamic_literal_expr()) {
+                return Ok((expr, false));
+            }
             let start = self.current_pos();
             self.pos += 1;
             self.whitespace()?;
@@ -637,10 +716,15 @@ impl Parser {
             }
         } else if ch == b'{'
             && (left.is_none() || left_op.is_some())
+            && let Ok(expr) = try_parse!(self, self.static_dynamic_literal_expr())
+        {
+            Ok((expr, false))
+        } else if ch == b'{'
+            && (left.is_none() || left_op.is_some())
             && let Ok(dict) = try_parse!(self, self.dict())
         {
             Ok((dict, false))
-        } else if left.is_none() && self.keyword("if").is_ok() {
+        } else if (left.is_none() || left_op.is_some()) && self.keyword("if").is_ok() {
             let stmt = self.if_block()?;
             Ok((Expr::new(ExprKind::Stmt(Box::new(stmt)), Span::new(start, self.current_pos())), true))
         } else if ch == b'|' && left.is_none() {

@@ -707,6 +707,41 @@ impl Compiler {
         Expr::new(ExprKind::Var(temp), span)
     }
 
+    fn static_composite_literal(&self, expr: &Expr) -> Result<Option<Dynamic>> {
+        match &expr.kind {
+            ExprKind::List(items) | ExprKind::Tuple(items) => {
+                let mut values = Vec::with_capacity(items.len());
+                for item in items {
+                    let Some(value) = self.static_literal_value(item)? else {
+                        return Ok(None);
+                    };
+                    values.push(value);
+                }
+                Ok(Some(Dynamic::list(values)))
+            }
+            ExprKind::Dict(items) => {
+                let mut values = BTreeMap::new();
+                for (key, item) in items {
+                    let Some(value) = self.static_literal_value(item)? else {
+                        return Ok(None);
+                    };
+                    values.insert(key.clone(), value);
+                }
+                Ok(Some(Dynamic::map(values)))
+            }
+            _ => Ok(None),
+        }
+    }
+
+    fn static_literal_value(&self, expr: &Expr) -> Result<Option<Dynamic>> {
+        match &expr.kind {
+            ExprKind::Value(value) => Ok(Some(value.clone())),
+            ExprKind::Const(idx) => Ok(self.consts.get(*idx).cloned()),
+            ExprKind::Typed { value, ty } if ty.is_native() => Ok(self.static_literal_value(value)?.map(|value| ty.force(value)).transpose()?),
+            _ => self.static_composite_literal(expr),
+        }
+    }
+
     fn eval_stmt_expr(&mut self, stmt: &Stmt, stmts: &mut Vec<Stmt>, cap: &mut Capture, span: Span) -> Result<Expr> {
         self.compile_stmt(stmt.clone(), stmts, cap)?;
         let expr_ty = if let Some(stmt) = stmts.last() { if let StmtKind::Expr(expr, _) = &stmt.kind { self.infer_expr(expr)? } else { self.infer_stmt(stmt)? } } else { Type::Any };
@@ -864,6 +899,10 @@ impl Compiler {
                 Ok(Expr::new(ExprKind::Range { start, stop, inclusive: *inclusive }, expr.span))
             }
             ExprKind::List(list) | ExprKind::Tuple(list) => {
+                if let Some(value) = self.static_composite_literal(expr)? {
+                    let idx = self.get_const(value);
+                    return Ok(Expr::new(ExprKind::Const(idx), expr.span));
+                }
                 let mut v = Vec::new();
                 let mut items = Vec::new();
                 for (idx, item) in list.iter().enumerate() {
@@ -888,6 +927,10 @@ impl Compiler {
                 Ok(Expr::new(ExprKind::Repeat { value: Box::new(self.eval(value, stmts, cap)?), len: Type::ConstInt(len) }, expr.span))
             }
             ExprKind::Dict(dict) => {
+                if let Some(value) = self.static_composite_literal(expr)? {
+                    let idx = self.get_const(value);
+                    return Ok(Expr::new(ExprKind::Const(idx), expr.span));
+                }
                 let mut dyn_kv = Vec::new();
                 let mut m = BTreeMap::new();
                 for (k, v) in dict {

@@ -14,6 +14,7 @@ use cranelift::prelude::types;
 use dynamic::Type;
 pub use rt::JITRunTime;
 use smol_str::SmolStr;
+mod db_module;
 mod http_module;
 mod llm_module;
 mod root_module;
@@ -198,6 +199,10 @@ impl JITRunTime {
         add_native_module_fns(self, "http", &http_module::HTTP_NATIVE)
     }
 
+    pub fn add_db(&mut self) -> Result<()> {
+        add_native_module_fns(self, "db", &db_module::DB_NATIVE)
+    }
+
     pub fn add_all(&mut self) -> Result<()> {
         self.add_std()?;
         self.add_any()?;
@@ -205,6 +210,7 @@ impl JITRunTime {
         self.add_llm()?;
         self.add_root()?;
         self.add_http()?;
+        self.add_db()?;
         Ok(())
     }
 }
@@ -285,6 +291,10 @@ impl Vm {
 
     pub fn add_http(&self) -> Result<()> {
         self.jit.lock().unwrap().add_http()
+    }
+
+    pub fn add_db(&self) -> Result<()> {
+        self.jit.lock().unwrap().add_db()
     }
 
     pub fn add_all(&self) -> Result<()> {
@@ -517,6 +527,46 @@ mod tests {
         let assigned_preview: extern "C" fn() -> *const Dynamic = unsafe { std::mem::transmute(compiled.ptr()) };
         let choice = unsafe { &*assigned_preview() };
         assert_eq!(choice.get_dynamic("preview").unwrap().as_str(), "tax_free");
+        Ok(())
+    }
+
+    #[test]
+    fn empty_object_literal_in_if_branch_stays_dynamic() -> anyhow::Result<()> {
+        let vm = Vm::with_all()?;
+        vm.import_code(
+            "vm_if_empty_object_branch",
+            r#"
+            pub fn first_note(steps) {
+                let first = if steps.len() > 0 { steps[0] } else { {} };
+                let first_note = first.note || "fallback";
+                first_note
+            }
+
+            pub fn first_ja(steps) {
+                let first = if steps.len() > 0 { steps[0] } else { {} };
+                first.ja || "すみません"
+            }
+            "#
+            .as_bytes()
+            .to_vec(),
+        )?;
+
+        let compiled = vm.get_fn("vm_if_empty_object_branch::first_note", &[Type::Any])?;
+        assert_eq!(compiled.ret_ty(), &Type::Any);
+        let first_note: extern "C" fn(*const Dynamic) -> *const Dynamic = unsafe { std::mem::transmute(compiled.ptr()) };
+
+        let empty_steps = Dynamic::list(Vec::new());
+        assert_eq!(unsafe { &*first_note(&empty_steps) }.as_str(), "fallback");
+
+        let mut step = std::collections::BTreeMap::new();
+        step.insert("note".into(), "hello".into());
+        let steps = Dynamic::list(vec![Dynamic::map(step)]);
+        assert_eq!(unsafe { &*first_note(&steps) }.as_str(), "hello");
+
+        let compiled = vm.get_fn("vm_if_empty_object_branch::first_ja", &[Type::Any])?;
+        assert_eq!(compiled.ret_ty(), &Type::Any);
+        let first_ja: extern "C" fn(*const Dynamic) -> *const Dynamic = unsafe { std::mem::transmute(compiled.ptr()) };
+        assert_eq!(unsafe { &*first_ja(&empty_steps) }.as_str(), "すみません");
         Ok(())
     }
 

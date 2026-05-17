@@ -311,7 +311,9 @@ impl Parser {
             self.stmt(true)?
         } else {
             let expr = if self.get()? == b'{' {
-                if let Ok(block) = try_parse!(self, self.block()) {
+                if self.looks_like_empty_dict() {
+                    self.dict()?
+                } else if let Ok(block) = try_parse!(self, self.block()) {
                     let _ = self.spans.pop();
                     return Ok(block);
                 } else if let Ok(dict) = try_parse!(self, self.dict()) {

@@ -100,6 +100,165 @@ pub struct BigFloat<N> {
 
 See [zusts/bigfloat.zs](zusts/bigfloat.zs) and the GPU Mandelbrot examples under [zusts/gpu](zusts/gpu).
 
+## Runtime Modules
+
+`Vm::with_all()` registers the standard runtime modules listed below. These functions use `Dynamic` at the boundary, so maps, lists, strings, bytes, and numbers can be passed directly from Zust scripts.
+
+### `std`
+
+The standard functions are available without a module prefix:
+
+- `print(value)`: print a dynamic value.
+- `import(module, path)`: import another `.zs` file or a source object stored in `root`.
+- `uuid()`: return a UUID string.
+- `rand(start, stop)`: return a random integer or float between `start` and `stop`.
+
+`std::__struct_alloc` and `std::__struct_from_ptr` are internal helpers used by generated struct code.
+
+### `Any`
+
+Dynamic values expose common methods:
+
+- Type and copy helpers: `is_map()`, `is_list()`, `clone()`, `len()`, `to_string()`.
+- List and string helpers: `push(value)`, `pop()`, `split(sep)`, `slice(start, stop, inclusive)`.
+- Map and index helpers: `get_idx(idx)`, `set_idx(idx, value)`, `get_key(key)`, `set_key(key, value)`, `contains(value)`, `starts_with(prefix)`.
+- Iteration helpers: `iter()`, `next()`.
+- Conversion helpers: `Any::from_i64`, `Any::to_i64`, `Any::from_bool`, `Any::to_bool`, `Any::from_f64`, `Any::to_f64`.
+
+Most normal script syntax, such as `list[idx]`, `map.key`, `value.len()`, and dynamic arithmetic, is lowered through these helpers.
+
+### `root`
+
+`root` is an addressable object tree. The default mount is `local`, backed by memory. Redis mounts are also supported.
+
+```zust
+root::add("local/user/1", {name: "Zust", points: 10});
+let user = root::get("local/user/1");
+
+root::add_list("local/events");
+root::push("local/events", {kind: "login"});
+
+root::add_map("local/users");
+root::insert("local/users", "alice", {age: 20});
+```
+
+Functions:
+
+- `root::mount(name, url)`: mount a Redis-backed root path.
+- `root::add(path, value)`, `root::get(path)`, `root::remove(path)`, `root::contains(path)`.
+- `root::dir(path)`, `root::len(path)`.
+- `root::add_list(path)`, `root::push(path, value)`, `root::get_idx(path, idx)`, `root::remove_idx(path, idx)`.
+- `root::add_map(path)`, `root::insert(path, key, value)`, `root::get_key(path, key)`, `root::remove_key(path, key)`.
+- `root::send(path, value)`, `root::send_idx(path, idx, value)`: send a message to a native or script handler.
+- `root::add_fn(path, fn_name)`: register a compiled Zust function as a root handler.
+
+### `http`
+
+`http` provides a small dynamic HTTP client:
+
+```zust
+let page = http::get("https://example.com");
+
+let response = http::request({
+    method: "POST",
+    url: "https://api.example.com/items",
+    json: {name: "zust"},
+    headers: {"x-client": "zust"}
+});
+```
+
+Functions:
+
+- `http::get(url)`.
+- `http::post(url, body)`.
+- `http::request(options)`.
+
+Responses are maps with `status`, `ok`, `url`, `@headers`, and `body`. JSON bodies are decoded into `Dynamic`; text and bytes are returned as strings or bytes.
+
+### `llm`
+
+`llm` wraps generic model, image, audio, and TTS requests. The first argument is provider configuration; the later arguments are request payloads and optional notifier objects.
+
+- `llm::complete(openai, value)`.
+- `llm::image(openai, value, notifier)`.
+- `llm::audio(openai, value)`.
+- `llm::tts(openai, value)`.
+- `llm::deep(openai, value, notifier)`: start an async completion task and notify progress through `root`.
+
+### `db`
+
+`db` uses `sqlx::AnyPool` and currently enables PostgreSQL and MySQL. Connection URLs are stored in `root`, usually under `local`.
+
+```zust
+root::add("local/db", "postgres://user@127.0.0.1/postgres");
+```
+
+When a database path is resolved, `db` first checks the complete path. If the complete path stores a URL, that path is the database connection name. If not, it walks upward until it finds a URL; the remaining suffix is the table name. For example, `local/db/user` uses the connection at `local/db` and table `user`.
+
+Create and drop tables:
+
+```zust
+db::create("local/db/user", {
+    id: "BIGINT PRIMARY KEY",
+    name: "TEXT",
+    email: "TEXT",
+
+    "@indexes": [
+        ["name"],
+        {name: "uniq_user_email", columns: ["email"], unique: true}
+    ]
+});
+
+db::drop("local/db/user");
+```
+
+Index keys may be `@index`, `@indexes`, `index`, `indexes`, or `索引`. Index definitions may be a string, a list of column names, or a map with `name`, `columns`, and `unique`.
+
+Query and execute SQL:
+
+```zust
+let rows = db::select(
+    "local/db",
+    "select id, name from user where id = :id",
+    {id: 1}
+);
+
+let changed = db::exec(
+    "local/db",
+    "update user set name = ? where id = ?",
+    ["new-name", 1]
+);
+```
+
+Binding rules:
+
+- `data` as a map binds named parameters such as `:id`.
+- `data` as a list binds ordered `?` parameters.
+- PostgreSQL placeholders are rewritten to `$1`, `$2`, and so on.
+- MySQL uses `?` placeholders.
+- `select` returns `List<Map>`.
+- `exec` returns affected row count, or `-1` on failure.
+
+Transactions use a list of `[sql, data]` steps. Each step shares the same binding rules as `exec`. The return value is the total affected row count; a failure rolls back the transaction and returns `-1`.
+
+```zust
+let changed = db::transaction("local/db", [
+    ["insert into user (id, name) values (:id, :name)", {id: 1, name: "zhu"}],
+    ["update user set name = ? where id = ?", ["zust", 1]]
+]);
+```
+
+### `spirv`
+
+The SPIR-V and Metal backends register GPU-oriented builtins for shader-style programs:
+
+- `spirv::group_id() -> vec3<u32>`.
+- `spirv::local_id() -> vec3<u32>`.
+- `spirv::barrier()`.
+- `spirv::atomic_add(value, delta)`.
+
+See the GPU examples under [zusts/gpu](zusts/gpu).
+
 ## Minimal VM Example
 
 The smallest host-side flow is:

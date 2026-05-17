@@ -350,6 +350,19 @@ impl Parser {
         result
     }
 
+    pub(crate) fn looks_like_empty_dict(&mut self) -> bool {
+        let save_pos = self.pos;
+        let result = (|| -> Result<bool> {
+            self.whitespace()?;
+            self.take(b'{')?;
+            self.whitespace()?;
+            Ok(self.take(b'}').is_ok())
+        })()
+        .unwrap_or(false);
+        self.pos = save_pos;
+        result
+    }
+
     fn postfix_expr(&mut self, start: usize, mut expr: Expr) -> Result<Expr> {
         while !self.is_eof() && [b'.', b'[', b'('].contains(&self.get()?) {
             if self.ahead()? == b'.' && self.get()? == b'.' {

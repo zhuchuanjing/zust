@@ -6,13 +6,13 @@ publish = false
 
 [dependencies]
 dynamic = { package = "zust-dynamic", version = "0.9.4", path = "../dynamic" }
-parser = { package = "zust-parser", version = "0.9.2", path = "../parser" }
-compiler = { package = "zust-compiler", version = "0.9.4", path = "../compiler" }
+parser = { package = "zust-parser", version = "0.9.3", path = "../parser" }
+compiler = { package = "zust-compiler", version = "0.9.5", path = "../compiler" }
 root = { package = "zust-root", version = "0.9.2", path = "../root" }
-vm = { package = "zust-vm", version = "0.9.9", path = "../vm", features = ["ir-disassembly"] }
+vm = { package = "zust-vm", version = "0.9.10", path = "../vm", features = ["ir-disassembly"] }
 vm-spirv = { package = "zust-vm-spirv", version = "0.9.2", path = "../vm-spirv" }
 vulkan = { package = "zust-vulkan", version = "0.9.2", path = "../vulkan" }
-llm = { package = "zust-llm", version = "0.9.2", path = "../llm" }
+llm = { package = "zust-llm", version = "0.9.4", path = "../llm" }
 anyhow = "1.0.102"
 smol_str = "0.3.6"
 cranelift = "0.131.1"

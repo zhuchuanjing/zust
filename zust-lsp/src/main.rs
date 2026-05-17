@@ -399,6 +399,11 @@ fn lsp_externs() -> Vec<LspExtern> {
         LspExtern { full_name: "llm::audio", arg_tys: vec![Type::Any, Type::Any], ret_ty: Type::Any },
         LspExtern { full_name: "llm::tts", arg_tys: vec![Type::Any, Type::Any], ret_ty: Type::Any },
         LspExtern { full_name: "llm::deep", arg_tys: vec![Type::Any, Type::Any, Type::Any], ret_ty: Type::Any },
+        LspExtern { full_name: "db::create", arg_tys: vec![Type::Any, Type::Any], ret_ty: Type::Bool },
+        LspExtern { full_name: "db::drop", arg_tys: vec![Type::Any], ret_ty: Type::Bool },
+        LspExtern { full_name: "db::select", arg_tys: vec![Type::Any, Type::Any, Type::Any], ret_ty: Type::Any },
+        LspExtern { full_name: "db::exec", arg_tys: vec![Type::Any, Type::Any, Type::Any], ret_ty: Type::I64 },
+        LspExtern { full_name: "db::transaction", arg_tys: vec![Type::Any, Type::Any], ret_ty: Type::I64 },
     ]
 }
 

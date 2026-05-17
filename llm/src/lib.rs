@@ -6,20 +6,33 @@ pub fn to_markdown(d: &Dynamic, buf: &mut String) {
         //简单的 Vec<float> Vec<int> 按照 json
         d.to_json(buf);
     } else if let Dynamic::Map(m) = d {
-        for (key, v) in m.read().unwrap().iter() {
-            buf.push_str(&format!("#### ```{}```\n", key));
-            to_markdown(v, buf);
-            buf.push('\n');
+        if let Ok(map) = m.read() {
+            for (key, v) in map.iter() {
+                buf.push_str(&format!("#### ```{}```\n", key));
+                to_markdown(v, buf);
+                buf.push('\n');
+            }
+        } else {
+            buf.push_str(&d.to_string());
         }
     } else if let Dynamic::Bytes(bytes) = d {
-        buf.push_str(&format!("[{}...]", hex::encode(&bytes[..8])));
+        if bytes.len() >= 8 {
+            buf.push_str(&format!("[{}...]", hex::encode(&bytes[..8])));
+        } else {
+            buf.push_str(&d.to_string());
+        }
     } else {
         let len = d.len();
         if len >= 1 {
             for idx in 0..len {
-                buf.push_str("- ");
-                to_markdown(&d.get_idx(idx).unwrap(), buf);
-                buf.push_str("\n");
+                if let Some(item) = d.get_idx(idx) {
+                    buf.push_str("- ");
+                    to_markdown(&item, buf);
+                    buf.push('\n');
+                } else {
+                    buf.push_str(&d.to_string());
+                    break;
+                }
             }
         } else {
             buf.push_str(&d.to_string());

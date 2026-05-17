@@ -457,7 +457,8 @@ mod tests {
 
     #[test]
     fn dynamic_field_value_participates_in_or_expression() -> anyhow::Result<()> {
-        import_code(
+        let vm = Vm::with_all()?;
+        vm.import_code(
             "vm_dynamic_field_or",
             r#"
             pub fn next_or_start() {
@@ -496,24 +497,24 @@ mod tests {
             .to_vec(),
         )?;
 
-        let (fn_ptr, ret_ty) = get_fn("vm_dynamic_field_or::direct_next", &[])?;
-        assert_eq!(ret_ty, Type::Any);
-        let direct_next: extern "C" fn() -> *const Dynamic = unsafe { std::mem::transmute(fn_ptr) };
+        let compiled = vm.get_fn("vm_dynamic_field_or::direct_next", &[])?;
+        assert_eq!(compiled.ret_ty(), &Type::Any);
+        let direct_next: extern "C" fn() -> *const Dynamic = unsafe { std::mem::transmute(compiled.ptr()) };
         assert_eq!(unsafe { &*direct_next() }.as_str(), "color");
 
-        let (fn_ptr, ret_ty) = get_fn("vm_dynamic_field_or::bracket_next", &[])?;
-        assert_eq!(ret_ty, Type::Any);
-        let bracket_next: extern "C" fn() -> *const Dynamic = unsafe { std::mem::transmute(fn_ptr) };
+        let compiled = vm.get_fn("vm_dynamic_field_or::bracket_next", &[])?;
+        assert_eq!(compiled.ret_ty(), &Type::Any);
+        let bracket_next: extern "C" fn() -> *const Dynamic = unsafe { std::mem::transmute(compiled.ptr()) };
         assert_eq!(unsafe { &*bracket_next() }.as_str(), "color");
 
-        let (fn_ptr, ret_ty) = get_fn("vm_dynamic_field_or::next_or_start", &[])?;
-        assert_eq!(ret_ty, Type::Any);
-        let next_or_start: extern "C" fn() -> *const Dynamic = unsafe { std::mem::transmute(fn_ptr) };
+        let compiled = vm.get_fn("vm_dynamic_field_or::next_or_start", &[])?;
+        assert_eq!(compiled.ret_ty(), &Type::Any);
+        let next_or_start: extern "C" fn() -> *const Dynamic = unsafe { std::mem::transmute(compiled.ptr()) };
         assert_eq!(unsafe { &*next_or_start() }.as_str(), "color");
 
-        let (fn_ptr, ret_ty) = get_fn("vm_dynamic_field_or::assigned_preview", &[])?;
-        assert_eq!(ret_ty, Type::Any);
-        let assigned_preview: extern "C" fn() -> *const Dynamic = unsafe { std::mem::transmute(fn_ptr) };
+        let compiled = vm.get_fn("vm_dynamic_field_or::assigned_preview", &[])?;
+        assert_eq!(compiled.ret_ty(), &Type::Any);
+        let assigned_preview: extern "C" fn() -> *const Dynamic = unsafe { std::mem::transmute(compiled.ptr()) };
         let choice = unsafe { &*assigned_preview() };
         assert_eq!(choice.get_dynamic("preview").unwrap().as_str(), "tax_free");
         Ok(())

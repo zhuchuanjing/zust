@@ -765,7 +765,13 @@ impl Compiler {
                     let items = list.iter().map(|item| self.eval(item, stmts, cap)).collect::<Result<Vec<_>>>()?;
                     Ok(Expr::new(ExprKind::Typed { value: Box::new(Expr::new(ExprKind::List(items), expr.span)), ty }, expr.span))
                 } else if value.is_value() {
-                    Ok(Expr::new(ExprKind::Value(ty.force(value.clone().value()?)?), expr.span))
+                    let value = value.clone().value()?;
+                    if ty.is_str() && value.is_str() {
+                        log::warn!("常量 String 只能作为动态值使用，已忽略 string 类型约束");
+                        Ok(Expr::new(ExprKind::Const(self.get_const(value)), expr.span))
+                    } else {
+                        Ok(Expr::new(ExprKind::Value(ty.force(value)?), expr.span))
+                    }
                 } else {
                     Ok(Expr::new(ExprKind::Typed { value: Box::new(self.eval(value, stmts, cap)?), ty }, expr.span))
                 }
@@ -911,14 +917,33 @@ impl Compiler {
     fn compile_stmt(&mut self, stmt: Stmt, compiled: &mut Vec<Stmt>, cap: &mut Capture) -> Result<()> {
         let stmt_span = stmt.span;
         match stmt.kind {
-            StmtKind::Let { pat, value } => {
+            StmtKind::Let { mut pat, value } => {
+                let value = *value;
+                let string_literal_constraint = matches!(
+                    (&pat.kind, &value.kind),
+                    (
+                        PatternKind::Ident { ty: Type::Str, .. },
+                        StmtKind::Expr(
+                            Expr {
+                                kind: ExprKind::Value(value),
+                                ..
+                            },
+                            _
+                        )
+                    ) if value.is_str()
+                );
+                if string_literal_constraint {
+                    log::warn!("常量 String 只能作为动态值使用，已忽略 string 类型约束");
+                    if let PatternKind::Ident { ty, .. } = &mut pat.kind {
+                        *ty = Type::Any;
+                    }
+                }
                 let annotated_ty = if let PatternKind::Ident { ty, .. } = &pat.kind {
                     let ty = self.symbols.get_type(ty)?;
                     if ty.is_any() { None } else { Some(ty) }
                 } else {
                     None
                 };
-                let value = *value;
                 if let Some(ty) = annotated_ty {
                     if let StmtKind::Expr(expr, close) = value.kind {
                         let span = expr.span;

@@ -10,7 +10,7 @@ pub enum LocalVar {
     None,
     Variable { var: Variable, ty: Type },
     Value { val: Value, ty: Type },
-    Closure(u32),
+    Closure { id: u32, captures: Vec<(Value, Type)> },
 }
 
 impl Into<LocalVar> for (Value, Type) {
@@ -57,7 +57,7 @@ impl LocalVar {
     }
 
     pub fn is_closure(&self) -> bool {
-        if let Self::Closure(_) = self { true } else { false }
+        if let Self::Closure { .. } = self { true } else { false }
     }
 
     pub fn get_ty(&self) -> Type {

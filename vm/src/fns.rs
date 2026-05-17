@@ -107,6 +107,9 @@ impl JITRunTime {
                 FnVariant::Compiled(fns) => {
                     for (ty, fn_id) in fns.iter() {
                         if let Type::Fn { tys, ret } = ty.clone() {
+                            if tys.len() != want_tys.len() {
+                                continue;
+                            }
                             let mut real_types = Vec::new();
                             for (ty1, ty2) in tys.iter().zip(want_tys.iter()) {
                                 if ty1 != ty2 {

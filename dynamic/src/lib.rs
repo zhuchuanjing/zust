@@ -372,6 +372,7 @@ impl TryFrom<Dynamic> for bool {
     type Error = DynamicErr;
     fn try_from(value: Dynamic) -> Result<Self, Self::Error> {
         match value {
+            Dynamic::Bool(v) => Ok(v),
             Dynamic::U8(v) => Ok(v != 0),
             Dynamic::U16(v) => Ok(v != 0),
             Dynamic::U32(v) => Ok(v != 0),
@@ -993,6 +994,7 @@ impl Dynamic {
 
     pub fn len(&self) -> usize {
         match self {
+            Self::String(value) => value.len(),
             Self::List(list) => list.read().unwrap().len(),
             Self::Bytes(bytes) => bytes.len(),
             Self::VecI8(vec) => vec.len(),

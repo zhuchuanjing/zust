@@ -1,6 +1,4 @@
-#[cfg(feature = "ir-disassembly")]
-use compiler::Symbol;
-use compiler::{Capture, Compiler};
+use compiler::{Capture, Compiler, Symbol};
 use dynamic::{Dynamic, Type};
 use parser::{BinaryOp, Expr, ExprKind, PatternKind, Span, Stmt, StmtKind, UnaryOp};
 use std::collections::{BTreeMap, HashMap, VecDeque};
@@ -502,7 +500,7 @@ impl JITRunTime {
             StmtKind::Expr(expr, _) => {
                 if let Some((idx, ty)) = Self::expr_assigned_var(expr) {
                     match ctx.get_var(idx).ok() {
-                        Some(LocalVar::Variable { .. }) | Some(LocalVar::Closure(_)) => {}
+                        Some(LocalVar::Variable { .. }) | Some(LocalVar::Closure { .. }) => {}
                         Some(LocalVar::Value { val, ty }) => {
                             ctx.set_var(idx, LocalVar::Value { val, ty })?;
                         }
@@ -549,6 +547,10 @@ impl JITRunTime {
 
     fn assign(&mut self, ctx: &mut BuildContext, left: &Expr, value: LocalVar) -> Result<(Value, Type)> {
         if let ExprKind::Var(idx) = &left.kind {
+            if value.is_closure() {
+                ctx.set_var(*idx, value)?;
+                return self.get_null_value(ctx);
+            }
             let value_ty = value.get_ty();
             if let Some(ty) = ctx.get_var_ty(*idx) {
                 if ty.is_struct() || ty.is_array() {
@@ -579,7 +581,11 @@ impl JITRunTime {
             } else {
                 ctx.set_var(*idx, value)?;
             }
-            let val = ctx.get_var(*idx)?.get(ctx).ok_or(anyhow!("assigned variable has no value"))?;
+            let assigned = ctx.get_var(*idx)?;
+            if assigned.is_closure() {
+                return self.get_null_value(ctx);
+            }
+            let val = assigned.get(ctx).ok_or(anyhow!("assigned variable has no value"))?;
             return Ok(val);
         } else if left.is_idx() {
             let value = value.get(ctx).unwrap();
@@ -642,14 +648,29 @@ impl JITRunTime {
         }
     }
 
+    fn closure_value(&self, ctx: &mut BuildContext, id: u32) -> Result<LocalVar> {
+        let captures = match self.compiler.symbols.get_symbol(id)?.1 {
+            Symbol::Fn { cap, .. } => cap.vars.iter().map(|idx| ctx.get_var(*idx as u32)?.get(ctx).ok_or_else(|| anyhow!("捕获变量 {} 没有值", idx))).collect::<Result<Vec<_>>>()?,
+            _ => Vec::new(),
+        };
+        Ok(LocalVar::Closure { id, captures })
+    }
+
     pub(crate) fn call_fn(&mut self, ctx: &mut BuildContext, id: u32, obj: Option<Expr>, params: &Vec<Expr>) -> Result<LocalVar> {
         self.call_fn_with_params(ctx, id, &[], obj, params)
     }
 
     pub(crate) fn call_fn_with_params(&mut self, ctx: &mut BuildContext, id: u32, generic_args: &[Type], obj: Option<Expr>, params: &Vec<Expr>) -> Result<LocalVar> {
+        self.call_fn_with_capture_values(ctx, id, generic_args, obj, params, None)
+    }
+
+    pub(crate) fn call_fn_with_capture_values(&mut self, ctx: &mut BuildContext, id: u32, generic_args: &[Type], obj: Option<Expr>, params: &Vec<Expr>, capture_values: Option<Vec<(Value, Type)>>) -> Result<LocalVar> {
         let mut args: Vec<(Value, Type)> = if let Some(obj) = obj { vec![self.eval(ctx, &obj)?.get(ctx).unwrap()] } else { Vec::new() };
         for p in params {
             args.push(self.eval(ctx, p)?.get(ctx).unwrap());
+        }
+        if let Some(captures) = &capture_values {
+            args.extend(captures.iter().cloned());
         }
         let fn_name = self.compiler.symbols.get_symbol(id).map(|(name, _)| name.clone())?;
         if fn_name.as_str().ends_with("Vec::swap")
@@ -660,7 +681,8 @@ impl JITRunTime {
             self.swap_vec_index(ctx, base, left_idx, right_idx, &elem_ty)?;
             return Ok(LocalVar::None);
         }
-        let arg_tys: Vec<Type> = args.iter().map(|(_, ty)| ty.clone()).collect();
+        let visible_arg_len = args.len() - capture_values.as_ref().map(|captures| captures.len()).unwrap_or(0);
+        let arg_tys: Vec<Type> = args.iter().take(visible_arg_len).map(|(_, ty)| ty.clone()).collect();
         let fn_info = match if generic_args.is_empty() { self.get_fn(id, &arg_tys) } else { Err(anyhow!("generic function needs specialization")) } {
             Ok(info) => info,
             Err(_) => self.gen_fn_with_params(Some(ctx), id, &arg_tys, generic_args).map_err(|e| {
@@ -671,8 +693,10 @@ impl JITRunTime {
         match &fn_info {
             FnInfo::Call { fn_id: _, arg_tys: want_tys, caps, ret } => {
                 let mut args = self.adjust_args(ctx, args, want_tys)?;
-                for c in caps {
-                    args.push(ctx.get_var(*c as u32)?.get(ctx).unwrap().0);
+                if capture_values.is_none() {
+                    for c in caps {
+                        args.push(ctx.get_var(*c as u32)?.get(ctx).unwrap().0);
+                    }
                 }
                 if ret.is_void() {
                     self.call_for_side_effect(ctx, fn_info, args)?;
@@ -813,8 +837,8 @@ impl JITRunTime {
                         }
                     } else {
                         let val = self.eval(ctx, obj)?;
-                        if let LocalVar::Closure(id) = val {
-                            return self.call_fn(ctx, id, None, params);
+                        if let LocalVar::Closure { id, captures } = val {
+                            return self.call_fn_with_capture_values(ctx, id, &[], None, params, Some(captures));
                         }
                         panic!("暂未实现 {:?}", val)
                     }
@@ -831,7 +855,11 @@ impl JITRunTime {
                 {
                     return Ok((self.init_array_from_items(ctx, items, ty)?, ty.clone()).into());
                 }
-                let vt = if let Some(vt) = self.eval(ctx, value)?.get(ctx) {
+                let evaluated = self.eval(ctx, value)?;
+                if evaluated.is_closure() {
+                    return Ok(evaluated);
+                }
+                let vt = if let Some(vt) = evaluated.get(ctx) {
                     vt
                 } else if ty.is_any() {
                     let idx = self.compiler.get_const(Dynamic::Null);
@@ -863,8 +891,8 @@ impl JITRunTime {
                 self.init_repeat_array(ctx, value, len).map(|r| r.into())
             }
             ExprKind::Const(idx) => self.get_const_value(ctx, *idx).map(|v| v.into()),
-            ExprKind::Id(id, _) => Ok(LocalVar::Closure(*id)),
-            ExprKind::AssocId { id, .. } => Ok(LocalVar::Closure(*id)),
+            ExprKind::Id(id, _) => self.closure_value(ctx, *id),
+            ExprKind::AssocId { id, .. } => self.closure_value(ctx, *id),
             expr => {
                 //结构就是一块固定大小 的内存(或者是动态大小 最后一个数据成员可扩展 跟 C 结构一样)
                 panic!("未实现 {:?}", expr)

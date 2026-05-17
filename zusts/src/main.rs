@@ -5,6 +5,15 @@ use std::path::PathBuf;
 use std::time::Instant;
 use vulkano::buffer::BufferContents;
 
+const SYNTAX_BOOL_TESTS: &[&str] = &[
+    "syntax_suite::test_literals_types_and_comments",
+    "syntax_suite::test_unary_binary_and_assigns",
+    "syntax_suite::test_control_flow",
+    "syntax_suite::test_patterns_lists_dicts_and_fields",
+    "syntax_suite::test_structs_impls_generics_and_assoc",
+    "syntax_suite::test_closures_arrays_ranges_and_calls",
+];
+
 fn main() -> Result<()> {
     let vm = vm::Vm::with_all()?;
 
@@ -15,12 +24,16 @@ fn main() -> Result<()> {
     // 导入保留在开源仓库中的示例文件
     vm_import_file(&vm, "test", "test.zs")?;
     vm_import_file(&vm, "qsort", "qsort.zs")?;
+    vm_import_file(&vm, "syntax_suite", "syntax_suite.zs")?;
     vm_import_file(&vm, "test_recursive_bug", "bug_tests/test_recursive_bug.zs")?;
     vm_import_file(&vm, "test_is_list_minimal", "bug_tests/test_is_list_minimal.zs")?;
 
     println!("示例模块加载完成\n");
 
     // 运行保留下来的回归示例
+    for name in SYNTAX_BOOL_TESTS {
+        run_bool_test(&vm, name)?;
+    }
     run_test(&vm, "test_recursive_bug::run_all_tests", &[])?;
     run_test(&vm, "test_is_list_minimal::run_all_tests", &[])?;
 
@@ -57,6 +70,16 @@ fn run_test(vm: &vm::Vm, fn_name: &str, tys: &[Type]) -> Result<()> {
             Err(e)
         }
     }
+}
+
+fn run_bool_test(vm: &vm::Vm, fn_name: &str) -> Result<()> {
+    let compiled = vm.get_fn(fn_name, &[])?;
+    anyhow::ensure!(compiled.ret_ty() == &Type::Bool, "{fn_name} should return bool, got {:?}", compiled.ret_ty());
+    let test_fn: extern "C" fn() -> bool = unsafe { std::mem::transmute(compiled.ptr()) };
+    let result = test_fn();
+    anyhow::ensure!(result, "{fn_name} returned false");
+    println!("[{}] 结果: true", fn_name);
+    Ok(())
 }
 
 // ---- SPIR-V Pathfind Shader ----
@@ -206,6 +229,21 @@ fn run_pathfind_shader() -> Result<()> {
     println!("已写入 {}", PATH_OUTPUT);
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn syntax_suite_regression() -> Result<()> {
+        let vm = vm::Vm::with_all()?;
+        vm_import_file(&vm, "syntax_suite", "syntax_suite.zs")?;
+        for name in SYNTAX_BOOL_TESTS {
+            run_bool_test(&vm, name)?;
+        }
+        Ok(())
+    }
 }
 
 fn trace_path(grid: &[f32], sx: usize, sy: usize, ex: usize, ey: usize) -> Vec<(usize, usize)> {

@@ -7,7 +7,7 @@ mod fns;
 use anyhow::{Result, anyhow};
 pub use fns::{FnInfo, FnVariant};
 mod context;
-use context::BuildContext;
+pub use context::BuildContext;
 
 mod rt;
 use cranelift::prelude::types;
@@ -18,7 +18,8 @@ mod http_module;
 mod llm_module;
 mod root_module;
 
-use std::sync::{OnceLock, RwLock};
+use std::cell::RefCell;
+use std::sync::{Mutex, OnceLock, Weak};
 static PTR_TYPE: OnceLock<types::Type> = OnceLock::new();
 pub fn ptr_type() -> types::Type {
     PTR_TYPE.get().cloned().unwrap()
@@ -48,138 +49,358 @@ use compiler::Symbol;
 use cranelift::prelude::*;
 
 pub fn init_jit(mut jit: JITRunTime) -> Result<JITRunTime> {
-    jit.compiler.symbols.add_module("std".into()); //开始导入标准库,可以直接访问
-    for std in STD {
-        jit.add_native(std.0, std.0, std.1, std.2)?;
-    }
-
-    let mut fields = Vec::new();
-    for (name, arg_tys, ret_ty, _) in ANY {
-        let id = jit.add_native(name, name, arg_tys, ret_ty)?;
-        let (_, field_name) = name.split_once("::").unwrap();
-        fields.push((field_name.into(), Type::Symbol { id, params: Vec::new() }));
-    }
-    jit.compiler.add_symbol("Any", Symbol::Struct(Type::Struct { params: Vec::new(), fields }, true));
-
-    jit.compiler.add_symbol("Vec", Symbol::Struct(Type::Struct { params: Vec::new(), fields: Vec::new() }, true));
-    let vec_def = Type::Symbol { id: jit.get_id("Vec")?, params: Vec::new() };
-    jit.add_inline("Vec::swap", vec![vec_def.clone(), Type::I64, Type::I64], Type::Void, |ctx: Option<&mut BuildContext>, args: Vec<Value>| {
-        if let Some(ctx) = ctx {
-            let width = ctx.builder.ins().iconst(types::I64, 4);
-            let offset_val = ctx.builder.ins().imul(args[1], width); // i * 4 i32大小四字节
-            let final_addr = ctx.builder.ins().iadd(args[0], offset_val); // base + (i*4)
-            let dest = ctx.builder.ins().imul(args[2], width);
-            let dest_addr = ctx.builder.ins().iadd(args[0], dest); // base + (i*4)
-            let dest_val = ctx.builder.ins().load(types::I32, MemFlags::trusted(), dest_addr, 0);
-            let v = ctx.builder.ins().load(types::I32, MemFlags::trusted(), final_addr, 0);
-            ctx.builder.ins().store(MemFlags::trusted(), v, dest_addr, 0);
-            ctx.builder.ins().store(MemFlags::trusted(), dest_val, final_addr, 0);
-        }
-        Err(anyhow!("无返回值"))
-    })?;
-
-    jit.add_inline("Vec::get_idx", vec![vec_def.clone(), Type::I64], Type::I32, |ctx: Option<&mut BuildContext>, args: Vec<Value>| {
-        if let Some(ctx) = ctx {
-            let width = ctx.builder.ins().iconst(types::I64, 4);
-            let offset_val = ctx.builder.ins().imul(args[1], width); // i * 4 i32大小四字节
-            let final_addr = ctx.builder.ins().iadd(args[0], offset_val);
-            Ok((Some(ctx.builder.ins().load(types::I32, MemFlags::trusted(), final_addr, 0)), Type::I32))
-        } else {
-            Ok((None, Type::I32))
-        }
-    })?;
+    jit.add_all()?;
     Ok(jit)
 }
 
 use std::sync::Arc;
-
-use std::sync::LazyLock;
 unsafe impl Send for JITRunTime {}
 unsafe impl Sync for JITRunTime {}
 
-//直接在这里增加一行 就可以导入一个模块
-static mut MODULES: &[(&str, &[(&str, &[Type], Type, *const u8)])] = &[("llm", &llm_module::LLM_NATIVE), ("root", &root_module::ROOT_NATIVE), ("http", &http_module::HTTP_NATIVE)];
-
-pub static JIT: LazyLock<Arc<RwLock<JITRunTime>>> = LazyLock::new(|| {
-    let jit = JITRunTime::new(|b| {
-        //这里注册所有的外部符号
-        for (name, _, _, fn_ptr) in STD {
-            b.symbol(name, fn_ptr);
-        }
-        for (name, _, _, fn_ptr) in ANY {
-            b.symbol(name, fn_ptr);
-        }
-        for (name, fns) in unsafe { MODULES.into_iter() } {
-            for (fn_name, _, _, fn_ptr) in *fns {
-                let full_name = format!("{}::{}", *name, *fn_name);
-                b.symbol(&full_name, *fn_ptr);
-            }
-        }
-    });
-    let mut jit = init_jit(jit).unwrap();
-    for (name, fns) in unsafe { MODULES.into_iter() } {
-        jit.compiler.symbols.add_module((*name).into());
-        for r in fns.into_iter() {
-            let full_name = format!("{}::{}", *name, r.0);
-            jit.add_native(&&full_name, r.0, r.1, r.2.clone()).unwrap();
-        }
-        jit.compiler.symbols.pop_module();
-    }
-    Arc::new(RwLock::new(jit))
-});
-
-pub fn import_code(name: &str, code: Vec<u8>) -> Result<()> {
-    JIT.write().unwrap().import_code(name, code)
+thread_local! {
+    static CURRENT_VM: RefCell<Option<Weak<Mutex<JITRunTime>>>> = const { RefCell::new(None) };
 }
 
-pub fn import(name: &str, path: &str) -> Result<()> {
-    if root::contains(path) {
-        //优先从 root 文件系统里面 import
-        let code = root::get(path).unwrap();
-        if code.is_str() {
-            JIT.write().unwrap().import_code(name, code.as_str().as_bytes().to_vec())
-        } else {
-            JIT.write().unwrap().import_code(name, code.get_dynamic("code").ok_or(anyhow!("{:?} 没有 code 成员", code))?.as_str().as_bytes().to_vec())
+fn set_current_vm(vm: &Vm) {
+    CURRENT_VM.with(|current| {
+        *current.borrow_mut() = Some(Arc::downgrade(&vm.jit));
+    });
+}
+
+fn with_current_vm<T>(f: impl FnOnce(&Vm) -> Result<T>) -> Result<T> {
+    CURRENT_VM.with(|current| {
+        let jit = current.borrow().as_ref().and_then(Weak::upgrade).ok_or_else(|| anyhow!("当前线程没有 VM"))?;
+        let vm = Vm { jit };
+        f(&vm)
+    })
+}
+
+pub(crate) fn import_current(name: &str, path: &str) -> Result<()> {
+    with_current_vm(|vm| vm.import(name, path))
+}
+
+pub(crate) fn get_current_fn_ptr(name: &str, arg_tys: &[Type]) -> Result<(*const u8, Type)> {
+    with_current_vm(|vm| vm.get_fn_ptr(name, arg_tys))
+}
+
+fn add_method_field(jit: &mut JITRunTime, def: &str, method: &str, id: u32) -> Result<()> {
+    let def_id = jit.get_id(def)?;
+    if let Some((_, define)) = jit.compiler.symbols.get_symbol_mut(def_id) {
+        if let Symbol::Struct(Type::Struct { params, fields }, _) = define {
+            fields.push((method.into(), Type::Symbol { id, params: params.clone() }));
         }
-    } else {
-        JIT.write().unwrap().compiler.import_file(name, path)?;
+    }
+    Ok(())
+}
+
+fn add_native_module_fns(jit: &mut JITRunTime, module: &str, fns: &[(&str, &[Type], Type, *const u8)]) -> Result<()> {
+    jit.add_module(module);
+    for (name, arg_tys, ret_ty, fn_ptr) in fns {
+        let full_name = format!("{}::{}", module, name);
+        jit.add_native_ptr(&full_name, name, arg_tys, ret_ty.clone(), *fn_ptr)?;
+    }
+    jit.pop_module();
+    Ok(())
+}
+
+impl JITRunTime {
+    pub fn add_module(&mut self, name: &str) {
+        self.compiler.symbols.add_module(name.into());
+    }
+
+    pub fn pop_module(&mut self) {
+        self.compiler.symbols.pop_module();
+    }
+
+    pub fn add_type(&mut self, name: &str, ty: Type, is_pub: bool) -> u32 {
+        self.compiler.add_symbol(name, Symbol::Struct(ty, is_pub))
+    }
+
+    pub fn add_empty_type(&mut self, name: &str) -> Result<u32> {
+        match self.get_id(name) {
+            Ok(id) => Ok(id),
+            Err(_) => Ok(self.add_type(name, Type::Struct { params: Vec::new(), fields: Vec::new() }, true)),
+        }
+    }
+
+    pub fn add_native_module_ptr(&mut self, module: &str, name: &str, arg_tys: &[Type], ret_ty: Type, fn_ptr: *const u8) -> Result<u32> {
+        self.add_module(module);
+        let full_name = format!("{}::{}", module, name);
+        let result = self.add_native_ptr(&full_name, name, arg_tys, ret_ty, fn_ptr);
+        self.pop_module();
+        result
+    }
+
+    pub fn add_native_method_ptr(&mut self, def: &str, method: &str, arg_tys: &[Type], ret_ty: Type, fn_ptr: *const u8) -> Result<u32> {
+        self.add_empty_type(def)?;
+        let full_name = format!("{}::{}", def, method);
+        let id = self.add_native_ptr(&full_name, &full_name, arg_tys, ret_ty, fn_ptr)?;
+        add_method_field(self, def, method, id)?;
+        Ok(id)
+    }
+
+    pub fn add_std(&mut self) -> Result<()> {
+        self.add_module("std");
+        for (name, arg_tys, ret_ty, fn_ptr) in STD {
+            self.add_native_ptr(name, name, arg_tys, ret_ty, fn_ptr)?;
+        }
+        Ok(())
+    }
+
+    pub fn add_any(&mut self) -> Result<()> {
+        for (name, arg_tys, ret_ty, fn_ptr) in ANY {
+            let (_, method) = name.split_once("::").ok_or_else(|| anyhow!("非法 Any 方法名 {}", name))?;
+            self.add_native_method_ptr("Any", method, arg_tys, ret_ty, fn_ptr)?;
+        }
+        Ok(())
+    }
+
+    pub fn add_vec(&mut self) -> Result<()> {
+        self.add_empty_type("Vec")?;
+        let vec_def = Type::Symbol { id: self.get_id("Vec")?, params: Vec::new() };
+        self.add_inline("Vec::swap", vec![vec_def.clone(), Type::I64, Type::I64], Type::Void, |ctx: Option<&mut BuildContext>, args: Vec<Value>| {
+            if let Some(ctx) = ctx {
+                let width = ctx.builder.ins().iconst(types::I64, 4);
+                let offset_val = ctx.builder.ins().imul(args[1], width); // i * 4 i32大小四字节
+                let final_addr = ctx.builder.ins().iadd(args[0], offset_val); // base + (i*4)
+                let dest = ctx.builder.ins().imul(args[2], width);
+                let dest_addr = ctx.builder.ins().iadd(args[0], dest); // base + (i*4)
+                let dest_val = ctx.builder.ins().load(types::I32, MemFlags::trusted(), dest_addr, 0);
+                let v = ctx.builder.ins().load(types::I32, MemFlags::trusted(), final_addr, 0);
+                ctx.builder.ins().store(MemFlags::trusted(), v, dest_addr, 0);
+                ctx.builder.ins().store(MemFlags::trusted(), dest_val, final_addr, 0);
+            }
+            Err(anyhow!("无返回值"))
+        })?;
+
+        self.add_inline("Vec::get_idx", vec![vec_def.clone(), Type::I64], Type::I32, |ctx: Option<&mut BuildContext>, args: Vec<Value>| {
+            if let Some(ctx) = ctx {
+                let width = ctx.builder.ins().iconst(types::I64, 4);
+                let offset_val = ctx.builder.ins().imul(args[1], width); // i * 4 i32大小四字节
+                let final_addr = ctx.builder.ins().iadd(args[0], offset_val);
+                Ok((Some(ctx.builder.ins().load(types::I32, MemFlags::trusted(), final_addr, 0)), Type::I32))
+            } else {
+                Ok((None, Type::I32))
+            }
+        })?;
+        Ok(())
+    }
+
+    pub fn add_llm(&mut self) -> Result<()> {
+        add_native_module_fns(self, "llm", &llm_module::LLM_NATIVE)
+    }
+
+    pub fn add_root(&mut self) -> Result<()> {
+        add_native_module_fns(self, "root", &root_module::ROOT_NATIVE)
+    }
+
+    pub fn add_http(&mut self) -> Result<()> {
+        add_native_module_fns(self, "http", &http_module::HTTP_NATIVE)
+    }
+
+    pub fn add_all(&mut self) -> Result<()> {
+        self.add_std()?;
+        self.add_any()?;
+        self.add_vec()?;
+        self.add_llm()?;
+        self.add_root()?;
+        self.add_http()?;
         Ok(())
     }
 }
 
-pub fn infer(name: &str, arg_tys: &[Type]) -> Result<Type> {
-    JIT.write().unwrap().get_type(name, arg_tys)
+#[derive(Clone)]
+pub struct Vm {
+    jit: Arc<Mutex<JITRunTime>>,
 }
 
-pub fn get_fn(name: &str, arg_tys: &[Type]) -> Result<(*const u8, Type)> {
-    JIT.write().unwrap().get_fn_ptr(name, arg_tys)
+#[derive(Clone)]
+pub struct CompiledFn {
+    ptr: usize,
+    ret: Type,
+    owner: Vm,
 }
 
-pub fn load(code: Vec<u8>, arg_name: SmolStr) -> Result<(i64, Type)> {
-    JIT.write().unwrap().load(code, arg_name)
+impl CompiledFn {
+    pub fn ptr(&self) -> *const u8 {
+        set_current_vm(&self.owner);
+        self.ptr as *const u8
+    }
+
+    pub fn ret_ty(&self) -> &Type {
+        &self.ret
+    }
+
+    pub fn owner(&self) -> &Vm {
+        &self.owner
+    }
 }
 
-pub fn get_symbol(name: &str, params: Vec<Type>) -> Result<Type> {
-    Ok(Type::Symbol { id: JIT.read().unwrap().get_id(name)?, params })
+impl Vm {
+    pub fn new() -> Self {
+        Self { jit: Arc::new(Mutex::new(JITRunTime::new(|_| {}))) }
+    }
+
+    pub fn with_all() -> Result<Self> {
+        let vm = Self::new();
+        vm.add_all()?;
+        Ok(vm)
+    }
+
+    pub fn add_module(&self, name: &str) {
+        self.jit.lock().unwrap().add_module(name)
+    }
+
+    pub fn pop_module(&self) {
+        self.jit.lock().unwrap().pop_module()
+    }
+
+    pub fn add_type(&self, name: &str, ty: Type, is_pub: bool) -> u32 {
+        self.jit.lock().unwrap().add_type(name, ty, is_pub)
+    }
+
+    pub fn add_empty_type(&self, name: &str) -> Result<u32> {
+        self.jit.lock().unwrap().add_empty_type(name)
+    }
+
+    pub fn add_std(&self) -> Result<()> {
+        self.jit.lock().unwrap().add_std()
+    }
+
+    pub fn add_any(&self) -> Result<()> {
+        self.jit.lock().unwrap().add_any()
+    }
+
+    pub fn add_vec(&self) -> Result<()> {
+        self.jit.lock().unwrap().add_vec()
+    }
+
+    pub fn add_llm(&self) -> Result<()> {
+        self.jit.lock().unwrap().add_llm()
+    }
+
+    pub fn add_root(&self) -> Result<()> {
+        self.jit.lock().unwrap().add_root()
+    }
+
+    pub fn add_http(&self) -> Result<()> {
+        self.jit.lock().unwrap().add_http()
+    }
+
+    pub fn add_all(&self) -> Result<()> {
+        self.jit.lock().unwrap().add_all()
+    }
+
+    pub fn add_native_ptr(&self, full_name: &str, name: &str, arg_tys: &[Type], ret_ty: Type, fn_ptr: *const u8) -> Result<u32> {
+        self.jit.lock().unwrap().add_native_ptr(full_name, name, arg_tys, ret_ty, fn_ptr)
+    }
+
+    pub fn add_native_module_ptr(&self, module: &str, name: &str, arg_tys: &[Type], ret_ty: Type, fn_ptr: *const u8) -> Result<u32> {
+        self.jit.lock().unwrap().add_native_module_ptr(module, name, arg_tys, ret_ty, fn_ptr)
+    }
+
+    pub fn add_native_method_ptr(&self, def: &str, method: &str, arg_tys: &[Type], ret_ty: Type, fn_ptr: *const u8) -> Result<u32> {
+        self.jit.lock().unwrap().add_native_method_ptr(def, method, arg_tys, ret_ty, fn_ptr)
+    }
+
+    pub fn add_inline(&self, name: &str, args: Vec<Type>, ret: Type, f: fn(Option<&mut BuildContext>, Vec<Value>) -> Result<(Option<Value>, Type)>) -> Result<u32> {
+        self.jit.lock().unwrap().add_inline(name, args, ret, f)
+    }
+
+    pub fn import_code(&self, name: &str, code: Vec<u8>) -> Result<()> {
+        self.jit.lock().unwrap().import_code(name, code)
+    }
+
+    pub fn import_file(&self, name: &str, path: &str) -> Result<()> {
+        self.jit.lock().unwrap().compiler.import_file(name, path)?;
+        Ok(())
+    }
+
+    pub fn import(&self, name: &str, path: &str) -> Result<()> {
+        if root::contains(path) {
+            let code = root::get(path).unwrap();
+            if code.is_str() {
+                self.import_code(name, code.as_str().as_bytes().to_vec())
+            } else {
+                self.import_code(name, code.get_dynamic("code").ok_or(anyhow!("{:?} 没有 code 成员", code))?.as_str().as_bytes().to_vec())
+            }
+        } else {
+            self.import_file(name, path)
+        }
+    }
+
+    pub fn infer(&self, name: &str, arg_tys: &[Type]) -> Result<Type> {
+        self.jit.lock().unwrap().get_type(name, arg_tys)
+    }
+
+    pub fn get_fn_ptr(&self, name: &str, arg_tys: &[Type]) -> Result<(*const u8, Type)> {
+        self.jit.lock().unwrap().get_fn_ptr(name, arg_tys)
+    }
+
+    pub fn get_fn(&self, name: &str, arg_tys: &[Type]) -> Result<CompiledFn> {
+        set_current_vm(self);
+        let (ptr, ret) = self.get_fn_ptr(name, arg_tys)?;
+        Ok(CompiledFn { ptr: ptr as usize, ret, owner: self.clone() })
+    }
+
+    pub fn load(&self, code: Vec<u8>, arg_name: SmolStr) -> Result<(i64, Type)> {
+        self.jit.lock().unwrap().load(code, arg_name)
+    }
+
+    pub fn get_symbol(&self, name: &str, params: Vec<Type>) -> Result<Type> {
+        Ok(Type::Symbol { id: self.jit.lock().unwrap().get_id(name)?, params })
+    }
+
+    pub fn disassemble(&self, name: &str) -> Result<String> {
+        self.jit.lock().unwrap().compiler.symbols.disassemble(name)
+    }
+
+    #[cfg(feature = "ir-disassembly")]
+    pub fn disassemble_ir(&self, name: &str) -> Result<String> {
+        self.jit.lock().unwrap().disassemble_ir(name)
+    }
 }
 
-pub fn disassemble(name: &str) -> Result<String> {
-    JIT.read().unwrap().compiler.symbols.disassemble(name)
-}
-
-#[cfg(feature = "ir-disassembly")]
-pub fn disassemble_ir(name: &str) -> Result<String> {
-    JIT.write().unwrap().disassemble_ir(name)
+impl Default for Vm {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{get_fn, import_code};
+    use super::Vm;
     use dynamic::{Dynamic, ToJson, Type};
+
+    extern "C" fn math_double(value: i64) -> i64 {
+        value * 2
+    }
+
+    #[test]
+    fn vm_can_add_native_after_jit_creation() -> anyhow::Result<()> {
+        let vm = Vm::new();
+        vm.add_native_module_ptr("math", "double", &[Type::I64], Type::I64, math_double as *const u8)?;
+        vm.import_code(
+            "vm_dynamic_native",
+            br#"
+            pub fn run(value: i64) {
+                math::double(value)
+            }
+            "#
+            .to_vec(),
+        )?;
+
+        let compiled = vm.get_fn("vm_dynamic_native::run", &[Type::I64])?;
+        assert_eq!(compiled.ret_ty(), &Type::I64);
+        let run: extern "C" fn(i64) -> i64 = unsafe { std::mem::transmute(compiled.ptr()) };
+        assert_eq!(run(21), 42);
+        Ok(())
+    }
 
     #[test]
     fn compares_any_with_string_literal_as_string() -> anyhow::Result<()> {
-        import_code(
+        let vm = Vm::with_all()?;
+        vm.import_code(
             "vm_string_compare_any",
             br#"
             pub fn any_ne_empty(chat_path) {
@@ -189,10 +410,10 @@ mod tests {
             .to_vec(),
         )?;
 
-        let (fn_ptr, ret_ty) = get_fn("vm_string_compare_any::any_ne_empty", &[Type::Any])?;
-        assert_eq!(ret_ty, Type::Bool);
+        let compiled = vm.get_fn("vm_string_compare_any::any_ne_empty", &[Type::Any])?;
+        assert_eq!(compiled.ret_ty(), &Type::Bool);
 
-        let any_ne_empty: extern "C" fn(*const Dynamic) -> bool = unsafe { std::mem::transmute(fn_ptr) };
+        let any_ne_empty: extern "C" fn(*const Dynamic) -> bool = unsafe { std::mem::transmute(compiled.ptr()) };
         let empty = Dynamic::from("");
         let non_empty = Dynamic::from("chat");
 
@@ -203,7 +424,8 @@ mod tests {
 
     #[test]
     fn compares_concrete_value_with_string_literal_as_string() -> anyhow::Result<()> {
-        import_code(
+        let vm = Vm::with_all()?;
+        vm.import_code(
             "vm_string_compare_imm",
             br#"
             pub fn int_eq_str(value: i64) {
@@ -217,14 +439,14 @@ mod tests {
             .to_vec(),
         )?;
 
-        let (fn_ptr, ret_ty) = get_fn("vm_string_compare_imm::int_eq_str", &[Type::I64])?;
-        assert_eq!(ret_ty, Type::Bool);
+        let compiled = vm.get_fn("vm_string_compare_imm::int_eq_str", &[Type::I64])?;
+        assert_eq!(compiled.ret_ty(), &Type::Bool);
 
-        let int_eq_str: extern "C" fn(i64) -> bool = unsafe { std::mem::transmute(fn_ptr) };
+        let int_eq_str: extern "C" fn(i64) -> bool = unsafe { std::mem::transmute(compiled.ptr()) };
 
-        let (fn_ptr, ret_ty) = get_fn("vm_string_compare_imm::int_to_str", &[Type::I64])?;
-        assert_eq!(ret_ty, Type::Any);
-        let int_to_str: extern "C" fn(i64) -> *const Dynamic = unsafe { std::mem::transmute(fn_ptr) };
+        let compiled = vm.get_fn("vm_string_compare_imm::int_to_str", &[Type::I64])?;
+        assert_eq!(compiled.ret_ty(), &Type::Any);
+        let int_to_str: extern "C" fn(i64) -> *const Dynamic = unsafe { std::mem::transmute(compiled.ptr()) };
         let text = int_to_str(42);
         assert_eq!(unsafe { &*text }.as_str(), "42");
 
@@ -299,7 +521,8 @@ mod tests {
 
     #[test]
     fn root_native_calls_do_not_take_ownership_of_dynamic_args() -> anyhow::Result<()> {
-        import_code(
+        let vm = Vm::with_all()?;
+        vm.import_code(
             "vm_root_clone_bridge",
             br#"
             pub fn add_then_reuse(arg) {
@@ -319,9 +542,9 @@ mod tests {
             .to_vec(),
         )?;
 
-        let (fn_ptr, ret_ty) = get_fn("vm_root_clone_bridge::add_then_reuse", &[Type::Any])?;
-        assert_eq!(ret_ty, Type::Any);
-        let add_then_reuse: extern "C" fn(*const Dynamic) -> *const Dynamic = unsafe { std::mem::transmute(fn_ptr) };
+        let compiled = vm.get_fn("vm_root_clone_bridge::add_then_reuse", &[Type::Any])?;
+        assert_eq!(compiled.ret_ty(), &Type::Any);
+        let add_then_reuse: extern "C" fn(*const Dynamic) -> *const Dynamic = unsafe { std::mem::transmute(compiled.ptr()) };
         let arg = Dynamic::Null;
         let result = add_then_reuse(&arg);
         let result = unsafe { &*result };

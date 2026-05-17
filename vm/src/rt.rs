@@ -3,7 +3,7 @@ use compiler::Symbol;
 use compiler::{Capture, Compiler};
 use dynamic::{Dynamic, Type};
 use parser::{BinaryOp, Expr, ExprKind, PatternKind, Span, Stmt, StmtKind, UnaryOp};
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 
 use crate::context::LocalVar;
 
@@ -14,11 +14,13 @@ use cranelift_module::{DataDescription, DataId, FuncId, Module};
 
 use anyhow::{Result, anyhow};
 use smol_str::SmolStr;
+use std::sync::{Arc, RwLock};
 
 pub struct JITRunTime {
     pub compiler: Compiler,
     pub fns: BTreeMap<u32, FnVariant>,
     pub sigs: Vec<(Vec<Type>, Signature, Type)>,
+    pub native_symbols: Arc<RwLock<HashMap<String, usize>>>,
     pub(crate) pending_fns: VecDeque<PendingFn>,
     pub(crate) compile_depth: usize,
     #[cfg(feature = "ir-disassembly")]
@@ -137,7 +139,10 @@ impl JITRunTime {
     }
 
     pub fn new<F: FnMut(&mut JITBuilder)>(mut f: F) -> Self {
+        let native_symbols = Arc::new(RwLock::new(HashMap::<String, usize>::new()));
+        let lookup_symbols = native_symbols.clone();
         let mut builder = JITBuilder::new(cranelift_module::default_libcall_names()).unwrap();
+        builder.symbol_lookup_fn(Box::new(move |name| lookup_symbols.read().unwrap().get(name).copied().map(|ptr| ptr as *const u8)));
         f(&mut builder);
         let module = JITModule::new(builder);
         PTR_TYPE.get_or_init(|| module.isa().pointer_type());
@@ -146,6 +151,7 @@ impl JITRunTime {
             compiler: Compiler::new(),
             fns,
             sigs: Vec::new(),
+            native_symbols,
             pending_fns: VecDeque::new(),
             compile_depth: 0,
             #[cfg(feature = "ir-disassembly")]

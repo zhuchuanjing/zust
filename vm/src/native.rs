@@ -76,7 +76,7 @@ extern "C" fn import(addr: *const Dynamic, path: *const Dynamic) -> bool {
     if addr.is_null() || path.is_null() {
         return false;
     }
-    super::import(unsafe { &*addr }.as_str(), unsafe { &*path }.as_str()).map_err(|e| println!("import {:?}", e)).is_ok()
+    super::import_current(unsafe { &*addr }.as_str(), unsafe { &*path }.as_str()).map_err(|e| println!("import {:?}", e)).is_ok()
 }
 
 extern "C" fn any_len(addr: *const Dynamic) -> i64 {
@@ -325,6 +325,11 @@ pub const ANY: [(&str, &[Type], Type, *const u8); 26] = [
 
 use std::rc::Rc;
 impl JITRunTime {
+    pub fn add_native_ptr(&mut self, full_name: &str, name: &str, arg_tys: &[Type], ret_ty: Type, fn_ptr: *const u8) -> Result<u32> {
+        self.native_symbols.write().unwrap().insert(full_name.to_string(), fn_ptr as usize);
+        self.add_native(full_name, name, arg_tys, ret_ty)
+    }
+
     pub fn add_native(&mut self, full_name: &str, name: &str, arg_tys: &[Type], ret_ty: Type) -> Result<u32> {
         let fn_ty = Type::Fn { tys: arg_tys.to_vec(), ret: Rc::new(ret_ty.clone()) };
         let id = self.compiler.add_symbol(name, compiler::Symbol::Native(fn_ty.clone()));

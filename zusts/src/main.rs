@@ -6,21 +6,23 @@ use std::time::Instant;
 use vulkano::buffer::BufferContents;
 
 fn main() -> Result<()> {
+    let vm = vm::Vm::with_all()?;
+
     println!("==============================================");
     println!("       Zust 示例运行器");
     println!("==============================================\n");
 
     // 导入保留在开源仓库中的示例文件
-    vm_import_file("test", "test.zs")?;
-    vm_import_file("qsort", "qsort.zs")?;
-    vm_import_file("test_recursive_bug", "bug_tests/test_recursive_bug.zs")?;
-    vm_import_file("test_is_list_minimal", "bug_tests/test_is_list_minimal.zs")?;
+    vm_import_file(&vm, "test", "test.zs")?;
+    vm_import_file(&vm, "qsort", "qsort.zs")?;
+    vm_import_file(&vm, "test_recursive_bug", "bug_tests/test_recursive_bug.zs")?;
+    vm_import_file(&vm, "test_is_list_minimal", "bug_tests/test_is_list_minimal.zs")?;
 
     println!("示例模块加载完成\n");
 
     // 运行保留下来的回归示例
-    run_test("test_recursive_bug::run_all_tests", &[])?;
-    run_test("test_is_list_minimal::run_all_tests", &[])?;
+    run_test(&vm, "test_recursive_bug::run_all_tests", &[])?;
+    run_test(&vm, "test_is_list_minimal::run_all_tests", &[])?;
 
     println!("\n==============================================");
     println!("       示例执行完成!");
@@ -38,14 +40,14 @@ fn zusts_path(path: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(path)
 }
 
-fn vm_import_file(name: &str, path: &str) -> Result<()> {
-    vm::import(name, zusts_path(path).to_str().expect("zust test path is valid utf-8")).with_context(|| format!("import {path} as {name}"))
+fn vm_import_file(vm: &vm::Vm, name: &str, path: &str) -> Result<()> {
+    vm.import(name, zusts_path(path).to_str().expect("zust test path is valid utf-8")).with_context(|| format!("import {path} as {name}"))
 }
 
-fn run_test(fn_name: &str, tys: &[Type]) -> Result<()> {
-    match vm::get_fn(fn_name, tys) {
-        Ok((fn_ptr, _)) => {
-            let test_fn: extern "C" fn() -> *mut Dynamic = unsafe { std::mem::transmute(fn_ptr) };
+fn run_test(vm: &vm::Vm, fn_name: &str, tys: &[Type]) -> Result<()> {
+    match vm.get_fn(fn_name, tys) {
+        Ok(compiled) => {
+            let test_fn: extern "C" fn() -> *mut Dynamic = unsafe { std::mem::transmute(compiled.ptr()) };
             let result = unsafe { Box::from_raw(test_fn()) };
             println!("[{}] 结果: {:?}", fn_name, result);
             Ok(())

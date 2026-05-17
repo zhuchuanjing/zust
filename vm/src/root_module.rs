@@ -97,7 +97,7 @@ extern "C" fn root_get_key(name: *const Dynamic, key: *const Dynamic) -> *const 
 extern "C" fn root_add_fn(name: *const Dynamic, fn_name: *const Dynamic) -> bool {
     let name = unsafe { (*name).clone() };
     let fn_name = unsafe { (*fn_name).clone() };
-    match crate::get_fn(fn_name.as_str(), &[Type::Any]) {
+    match crate::get_current_fn_ptr(fn_name.as_str(), &[Type::Any]) {
         Ok((fn_ptr, ty)) => {
             if let Ok((m, name)) = get_mount(name.as_str()) {
                 return m.add(name, Object::Func(fn_ptr as i64, ty.clone()));

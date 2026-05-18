@@ -141,6 +141,17 @@ fn main() -> Result<()> {
 cargo run -p vm --example minimal_vm
 ```
 
+## GPU VM 模块
+
+`Vm::with_all()` 会注册 `gpu` 模块，把现有 GPU 后端整理成三条入口：
+
+- `gpu::spirv_compile(options)` / `gpu::spirv_check(options)`：编译或检查 `Zust -> SPIR-V`。
+- `gpu::metal_compile(options)` / `gpu::metal_check(options)`：在 macOS 上编译或检查 `Zust -> Metal`。
+- `gpu::vulkan_run(options)`：加载 SPIR-V、绑定 buffer，并通过 Vulkan dispatch。
+- `gpu::metal_run(options)`：在 macOS 上加载 Metal shader 或从 Zust 编译后 dispatch。
+
+`options` 是普通动态 map，常用字段包括 `source` 或 `path`、`module`、`fn`、`workgroup_size`、`groups` 和 `args`。运行参数支持标量输入、typed vector buffer，以及用于结构体 ABI 参数的原始 `bytes` buffer。
+
 ## 目录结构
 
 ```text

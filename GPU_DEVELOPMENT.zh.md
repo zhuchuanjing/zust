@@ -151,6 +151,38 @@ bitonic.spvasm    可读的 SPIR-V 反汇编文本
 
 `.spvasm` 适合调试，用来确认 kernel 是否正确生成了计算入口、buffer 访问和控制流。
 
+### 4.1 通过 VM 的 gpu 模块编译和检查
+
+`Vm::with_all()` 会注册 `gpu` 模块。脚本侧可以直接检查或编译 shader，不需要自己调用 Rust 后端 crate：
+
+```zust
+let spirv = gpu::spirv_compile({
+    path: "zusts/gpu/poly.zs",
+    module: "poly",
+    fn: "main",
+    workgroup_size: [32u32, 32u32, 1u32],
+});
+
+if spirv.ok {
+    print(spirv.word_count);
+} else {
+    print(spirv.error);
+}
+```
+
+对应的检查入口是：
+
+```zust
+let check = gpu::spirv_check({
+    path: "zusts/gpu/poly.zs",
+    module: "poly",
+    fn: "main",
+    workgroup_size: [32u32, 32u32, 1u32],
+});
+```
+
+`gpu::spirv_compile` 返回 `words`、`bytes` 和 `disassembly`；`gpu::spirv_check` 只返回是否成功、入口、参数类型和返回类型。
+
 ## 5. 用 Vulkan 执行 SPIR-V
 
 仓库中的 `vulkan` crate 提供了运行 SPIR-V kernel 的辅助 runtime。
@@ -210,6 +242,24 @@ cargo run -p vulkan --example run_mandel
 
 这些示例会把 Zust GPU 程序编译成 SPIR-V，然后通过 Vulkan 在显卡上执行。
 
+VM 里也可以用 `gpu::vulkan_run` 做一次性加载和执行。`args` 中的参数顺序必须和 kernel 参数顺序一致：
+
+```zust
+let result = gpu::vulkan_run({
+    path: "zusts/gpu/my_kernel.zs",
+    module: "my_kernel",
+    fn: "main",
+    workgroup_size: [256u32, 1u32, 1u32],
+    groups: [1u32, 1u32, 1u32],
+    args: [
+        {kind: "input", type: "u32", value: 8u32},
+        {kind: "vec", type: "u32", values: [7u32, 3u32, 5u32, 1u32]},
+    ],
+});
+```
+
+对于结构体参数，可以在调用侧按 `#[repr(C)]` 布局打包成 bytes，并使用 `{kind: "vec", type: "bytes", value: bytes}` 传入。
+
 ## 6. 编译为 Metal shader
 
 在 macOS 和 Apple GPU 上，可以使用 `vm-metal` 后端。它会把 Zust kernel 编译成 Metal shader source。
@@ -235,6 +285,8 @@ std::fs::write("bitonic.metal", kernel.metal.source())?;
 cargo run -p vm-metal --example bitonic
 cargo run -p vm-metal --example run_mandel
 ```
+
+VM 模块提供对应的 `gpu::metal_compile`、`gpu::metal_check` 和 `gpu::metal_run`。这些函数只在 macOS 上可用；其他平台会返回 `ok: false` 和错误信息。
 
 Metal 路线适合 Apple 平台；Vulkan 路线适合具备 Vulkan 驱动和运行时的环境。
 

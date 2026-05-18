@@ -29,7 +29,8 @@ impl MetalCompiler {
                     && let ExprKind::List(items) = &value.kind
                 {
                     let values = items.iter().zip(fields.iter()).map(|(item, (_, field_ty))| self.gen_expr(item).and_then(|v| self.convert_code(v, field_ty.clone()))).collect::<Result<Vec<_>>>()?;
-                    return Ok(Value { code: format!("{}{{{}}}", self.msl_type(&ty), values.into_iter().map(|v| v.code).collect::<Vec<_>>().join(", ")), ty });
+                    let code = self.struct_literal_code(&ty, values)?;
+                    return Ok(Value { code, ty });
                 }
                 if let Type::Array(elem, len) = &ty
                     && let ExprKind::List(items) = &value.kind
@@ -97,6 +98,31 @@ impl MetalCompiler {
             }
             other => bail!("unsupported Metal expression: {other:?}"),
         }
+    }
+
+    fn struct_literal_code(&self, ty: &Type, values: Vec<Value>) -> Result<String> {
+        let Type::Struct { fields, .. } = self.resolve_type(ty) else {
+            bail!("Metal struct literal expected struct type, got {ty:?}");
+        };
+        if values.len() != fields.len() {
+            bail!("Metal struct literal field count {} does not match {}", values.len(), fields.len());
+        }
+        let (size, offsets) = Type::struct_layout(&fields);
+        let mut cursor = 0usize;
+        let mut parts = Vec::with_capacity(values.len());
+        for ((_, field_ty), offset, value) in fields.iter().zip(offsets).zip(values).map(|((field, offset), value)| (field, offset, value)) {
+            let offset = offset as usize;
+            if offset > cursor {
+                parts.push(format!("array<uchar, {}>{{}}", offset - cursor));
+            }
+            parts.push(value.code);
+            cursor = offset + field_ty.storage_width() as usize;
+        }
+        let size = size as usize;
+        if size > cursor {
+            parts.push(format!("array<uchar, {}>{{}}", size - cursor));
+        }
+        Ok(format!("{}{{{}}}", self.msl_type(ty), parts.join(", ")))
     }
 
     pub(crate) fn call_function(&mut self, obj: &Expr, params: &[Expr]) -> Result<Value> {

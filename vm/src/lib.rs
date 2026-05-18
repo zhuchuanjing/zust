@@ -15,9 +15,12 @@ use dynamic::Type;
 pub use rt::JITRunTime;
 use smol_str::SmolStr;
 mod db_module;
+mod gpu_layout;
+mod gpu_module;
 mod http_module;
 mod llm_module;
 mod root_module;
+pub use gpu_layout::{GpuFieldLayout, GpuStructLayout};
 
 use std::cell::RefCell;
 use std::sync::{Mutex, OnceLock, Weak};
@@ -203,6 +206,10 @@ impl JITRunTime {
         add_native_module_fns(self, "db", &db_module::DB_NATIVE)
     }
 
+    pub fn add_gpu(&mut self) -> Result<()> {
+        add_native_module_fns(self, "gpu", &gpu_module::GPU_NATIVE)
+    }
+
     pub fn add_all(&mut self) -> Result<()> {
         self.add_std()?;
         self.add_any()?;
@@ -211,6 +218,7 @@ impl JITRunTime {
         self.add_root()?;
         self.add_http()?;
         self.add_db()?;
+        self.add_gpu()?;
         Ok(())
     }
 }
@@ -297,6 +305,10 @@ impl Vm {
         self.jit.lock().unwrap().add_db()
     }
 
+    pub fn add_gpu(&self) -> Result<()> {
+        self.jit.lock().unwrap().add_gpu()
+    }
+
     pub fn add_all(&self) -> Result<()> {
         self.jit.lock().unwrap().add_all()
     }
@@ -359,6 +371,11 @@ impl Vm {
 
     pub fn get_symbol(&self, name: &str, params: Vec<Type>) -> Result<Type> {
         Ok(Type::Symbol { id: self.jit.lock().unwrap().get_id(name)?, params })
+    }
+
+    pub fn gpu_struct_layout(&self, name: &str, params: &[Type]) -> Result<GpuStructLayout> {
+        let jit = self.jit.lock().unwrap();
+        GpuStructLayout::from_symbol_table(&jit.compiler.symbols, name, params)
     }
 
     pub fn disassemble(&self, name: &str) -> Result<String> {
@@ -787,6 +804,39 @@ mod tests {
         assert_eq!(result.len(), 2);
         let first = result.get_idx(0).expect("first step");
         assert_eq!(first.get_dynamic("extras").and_then(|extras| extras.get_dynamic("title")).map(|title| title.as_str().to_string()), Some("extra".to_string()));
+        Ok(())
+    }
+
+    #[test]
+    fn gpu_struct_layout_packs_and_unpacks_dynamic_maps() -> anyhow::Result<()> {
+        let vm = Vm::with_all()?;
+        vm.import_code(
+            "vm_gpu_layout",
+            br#"
+            pub struct Params {
+                a: u32,
+                b: u32,
+                c: u32,
+            }
+            "#
+            .to_vec(),
+        )?;
+
+        let layout = vm.gpu_struct_layout("vm_gpu_layout::Params", &[])?;
+        assert_eq!(layout.size, 16);
+        assert_eq!(layout.fields.iter().map(|field| (field.name.as_str(), field.offset)).collect::<Vec<_>>(), vec![("a", 0), ("b", 4), ("c", 8)]);
+
+        let value = dynamic::map!("a"=> 1u32, "b"=> 2u32, "c"=> 3u32);
+        let bytes = layout.pack_map(&value)?;
+        assert_eq!(bytes.len(), 16);
+        assert_eq!(&bytes[0..4], &1u32.to_ne_bytes());
+        assert_eq!(&bytes[4..8], &2u32.to_ne_bytes());
+        assert_eq!(&bytes[8..12], &3u32.to_ne_bytes());
+
+        let read = layout.unpack_map(&bytes)?;
+        assert_eq!(read.get_dynamic("a").and_then(|value| value.as_uint()), Some(1));
+        assert_eq!(read.get_dynamic("b").and_then(|value| value.as_uint()), Some(2));
+        assert_eq!(read.get_dynamic("c").and_then(|value| value.as_uint()), Some(3));
         Ok(())
     }
 

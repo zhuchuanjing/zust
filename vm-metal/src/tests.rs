@@ -17,6 +17,33 @@ fn compiles_pathfind_to_metal_source() {
 }
 
 #[test]
+fn emits_padding_for_zust_struct_layout() {
+    let kernel = compile_source(
+        br#"
+        pub struct Params {
+            a: u32,
+            b: u32,
+            c: u32,
+        }
+
+        pub fn main(params: Params) {
+            return params.a + params.b + params.c;
+        }
+        "#,
+        "metal_struct_padding",
+        "main",
+    )
+    .unwrap();
+
+    let source = kernel.metal.source();
+    assert!(source.contains("struct Params"));
+    assert!(source.contains("uint a;"));
+    assert!(source.contains("uint b;"));
+    assert!(source.contains("uint c;"));
+    assert!(source.contains("array<uchar, 4> _zust_pad0;"));
+}
+
+#[test]
 fn compiles_default_math_builtins_to_metal_source() {
     let kernel = compile_source(
         br#"

@@ -248,6 +248,17 @@ let changed = db::transaction("local/db", [
 ]);
 ```
 
+### `gpu`
+
+`gpu` is the VM-facing GPU module registered by `Vm::with_all()`. It keeps the backend pieces split into three paths:
+
+- `gpu::spirv_compile(options)` and `gpu::spirv_check(options)` compile/check Zust source to SPIR-V.
+- `gpu::metal_compile(options)` and `gpu::metal_check(options)` compile/check Zust source to Metal source on macOS.
+- `gpu::vulkan_run(options)` loads SPIR-V, binds buffers, dispatches Vulkan, and returns requested readbacks.
+- `gpu::metal_run(options)` loads Metal source or compiles Zust source, dispatches Metal on macOS, and returns requested readbacks.
+
+The compile options are dynamic maps with `source` or `path`, `module`, `fn`, `workgroup_size`, and optional `generic_args`. Runtime argument descriptors support scalar inputs, typed vector buffers, and raw `bytes` buffers for ABI-packed structs.
+
 ### `spirv`
 
 The SPIR-V and Metal backends register GPU-oriented builtins for shader-style programs:

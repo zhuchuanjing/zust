@@ -1,5 +1,5 @@
 use anyhow::{Result, anyhow};
-use dynamic::Type;
+use dynamic::{Dynamic, Type};
 use image::{ImageBuffer, Rgba};
 use std::time::Instant;
 
@@ -13,82 +13,55 @@ const BIGFLOAT_LIMBS: usize = 2;
 const MAX_ITER: u32 = 1000;
 const OUTPUT_PATH: &str = "mand-metal.png";
 
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct GpuBigFloat<const N: usize> {
-    sign: u8,
-    _pad0: [u8; 3],
-    exp: i32,
-    data: [u32; N],
-}
-
-unsafe impl<const N: usize> bytemuck::Zeroable for GpuBigFloat<N> {}
-unsafe impl<const N: usize> bytemuck::Pod for GpuBigFloat<N> {}
-
-impl<const N: usize> GpuBigFloat<N> {
-    fn zero() -> Self {
-        Self { sign: 0, _pad0: [0; 3], exp: 0, data: [0; N] }
+fn bigfloat_from_f32<const N: usize>(value: f32) -> Dynamic {
+    fn zero<const N: usize>() -> Dynamic {
+        dynamic::map!("sign"=> false, "exp"=> 0i32, "data"=> Dynamic::from(&[0u32; N][..]))
     }
 
-    fn from_f32(value: f32) -> Self {
-        let mut out = [0u32; N];
-        let sign = value < 0.0;
-        let mut mag = if sign { -value } else { value };
-        if mag == 0.0 || mag.is_nan() {
-            return Self::zero();
-        }
+    let mut out = [0u32; N];
+    let sign = value < 0.0;
+    let mut mag = if sign { -value } else { value };
+    if mag == 0.0 || mag.is_nan() {
+        return zero::<N>();
+    }
 
-        let base = 4_294_967_296.0f32;
-        let mut exp = 0i32;
-        let mut norm_steps = 0;
-        while mag >= base && norm_steps < 16 {
-            mag /= base;
-            exp += 1;
-            norm_steps += 1;
-        }
+    let base = 4_294_967_296.0f32;
+    let mut exp = 0i32;
+    let mut norm_steps = 0;
+    while mag >= base && norm_steps < 16 {
+        mag /= base;
+        exp += 1;
+        norm_steps += 1;
+    }
 
-        let mut tiny_steps = 0;
-        while mag < 1.0 && tiny_steps < 16 {
-            mag *= base;
+    let mut tiny_steps = 0;
+    while mag < 1.0 && tiny_steps < 16 {
+        mag *= base;
+        exp -= 1;
+        tiny_steps += 1;
+    }
+
+    if mag >= base {
+        out.fill(u32::MAX);
+        return dynamic::map!("sign"=> sign, "exp"=> exp, "data"=> Dynamic::from(&out[..]));
+    }
+    if mag < 1.0 {
+        return zero::<N>();
+    }
+
+    let mut idx = N;
+    while idx > 0 {
+        idx -= 1;
+        let limb = mag as u32;
+        out[idx] = limb;
+        mag = (mag - limb as f32) * base;
+        if idx > 0 {
             exp -= 1;
-            tiny_steps += 1;
         }
-
-        if mag >= base {
-            out.fill(u32::MAX);
-            return Self { sign: sign as u8, _pad0: [0; 3], exp, data: out };
-        }
-        if mag < 1.0 {
-            return Self::zero();
-        }
-
-        let mut idx = N;
-        while idx > 0 {
-            idx -= 1;
-            let limb = mag as u32;
-            out[idx] = limb;
-            mag = (mag - limb as f32) * base;
-            if idx > 0 {
-                exp -= 1;
-            }
-        }
-
-        Self { sign: sign as u8, _pad0: [0; 3], exp, data: out }
     }
-}
 
-#[derive(Clone, Copy)]
-#[repr(C)]
-struct MandelParams<const N: usize> {
-    x: GpuBigFloat<N>,
-    y: GpuBigFloat<N>,
-    step: GpuBigFloat<N>,
-    max_iter: u32,
-    _pad0: u32,
+    dynamic::map!("sign"=> sign, "exp"=> exp, "data"=> Dynamic::from(&out[..]))
 }
-
-unsafe impl<const N: usize> bytemuck::Zeroable for MandelParams<N> {}
-unsafe impl<const N: usize> bytemuck::Pod for MandelParams<N> {}
 
 fn main() -> Result<()> {
     let total_start = Instant::now();
@@ -96,10 +69,19 @@ fn main() -> Result<()> {
     let module_name = std::env::var("MANDEL_MODULE").unwrap_or_else(|_| "mandelbrot".to_string());
     let output_path = std::env::var("MANDEL_OUTPUT").unwrap_or_else(|_| OUTPUT_PATH.to_string());
     let kernel = vm_metal::compile_file_with_generic_args_and_workgroup_size(&source_path, &module_name, "main", &[Type::ConstInt(BIGFLOAT_LIMBS as i64)], WORKGROUP_SIZE)?;
+    let vm = vm::Vm::new();
+    vm.import_file(&module_name, &source_path)?;
+    let params_layout = vm.gpu_struct_layout(&format!("{module_name}::Params"), &[Type::ConstInt(BIGFLOAT_LIMBS as i64)])?;
+    let params_bytes = params_layout.pack_map(&dynamic::map!(
+        "x"=> bigfloat_from_f32::<BIGFLOAT_LIMBS>(-0.7454),
+        "y"=> bigfloat_from_f32::<BIGFLOAT_LIMBS>(0.1103),
+        "step"=> bigfloat_from_f32::<BIGFLOAT_LIMBS>(0.000014),
+        "max_iter"=> MAX_ITER
+    ))?;
 
     let mut runtime = vm_metal::Runtime::new()?;
     let mut args = runtime.args();
-    let _params = args.add_input(MandelParams::<BIGFLOAT_LIMBS> { x: GpuBigFloat::from_f32(-0.7454), y: GpuBigFloat::from_f32(0.1103), step: GpuBigFloat::from_f32(0.000014), max_iter: MAX_ITER, _pad0: 0 })?;
+    let _params = args.add_bytes(params_bytes)?;
     let output = args.add_vec::<f32>((SAMPLE_WIDTH * SAMPLE_HEIGHT) as u64, |pixels| pixels.fill(0.0))?;
 
     runtime.prepare_kernel(&kernel, args)?;

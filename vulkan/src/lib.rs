@@ -152,4 +152,13 @@ impl Args {
         self.set_writers.push(WriteDescriptorSet::buffer(idx, buf.clone()));
         Ok(buf)
     }
+
+    pub fn add_bytes(&mut self, bytes: impl AsRef<[u8]>) -> Result<Subbuffer<[u8]>> {
+        let bytes = bytes.as_ref();
+        self.add_vec(bytes.len() as u64, |buf| buf.copy_from_slice(bytes))
+    }
+
+    pub fn add_bytes_output(&mut self, len: u64) -> Result<Subbuffer<[u8]>> {
+        self.add_vec(len, |buf| buf.fill(0))
+    }
 }

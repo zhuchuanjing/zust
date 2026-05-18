@@ -173,8 +173,20 @@ impl MetalCompiler {
 
         if emitted.insert(name.to_string()) {
             out.push_str(&format!("struct {name} {{\n"));
-            for (field, ty) in fields {
+            let (size, offsets) = Type::struct_layout(&fields);
+            let mut cursor = 0usize;
+            let mut pad_idx = 0usize;
+            for ((field, ty), offset) in fields.into_iter().zip(offsets) {
+                let offset = offset as usize;
+                if offset > cursor {
+                    emit_padding(out, &mut pad_idx, offset - cursor);
+                }
                 out.push_str(&format!("    {} {};\n", self.msl_type(&ty), sanitize_ident(&field)));
+                cursor = offset + ty.storage_width() as usize;
+            }
+            let size = size as usize;
+            if size > cursor {
+                emit_padding(out, &mut pad_idx, size - cursor);
             }
             out.push_str("};\n\n");
         }
@@ -198,4 +210,12 @@ impl MetalCompiler {
         args.push("uint3 zust_local_id [[thread_position_in_threadgroup]]".to_string());
         Ok(args)
     }
+}
+
+fn emit_padding(out: &mut String, pad_idx: &mut usize, bytes: usize) {
+    if bytes == 0 {
+        return;
+    }
+    out.push_str(&format!("    array<uchar, {bytes}> _zust_pad{pad_idx};\n"));
+    *pad_idx += 1;
 }

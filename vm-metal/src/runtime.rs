@@ -111,6 +111,15 @@ impl Args {
         self.buffers.push(buffer.clone());
         Ok(MetalBuffer { buffer, len, marker: std::marker::PhantomData })
     }
+
+    pub fn add_bytes(&mut self, bytes: impl AsRef<[u8]>) -> Result<MetalBuffer<u8>> {
+        let bytes = bytes.as_ref();
+        self.add_vec(bytes.len() as u64, |buf| buf.copy_from_slice(bytes))
+    }
+
+    pub fn add_bytes_output(&mut self, len: u64) -> Result<MetalBuffer<u8>> {
+        self.add_vec(len, |buf| buf.fill(0))
+    }
 }
 
 pub struct MetalBuffer<T> {

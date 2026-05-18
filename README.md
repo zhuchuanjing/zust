@@ -6,6 +6,13 @@ The project is close to a mature open-source release. The current crate version 
 
 中文文档: [README.zh.md](README.zh.md)
 
+## Additional Documentation
+
+- [Mandelbrot Deep Refinement and Zust BigFloat GPU Notes](MANDELBROT_REFINEMENT_BIGFLOAT_REPORT.en.md): English notes from a deep-zoom Mandelbrot experiment, covering GPU BigFloat precision, iteration count, sampling, and the server/client rendering split.
+- [Mandelbrot 深度精化实验与 Zust BigFloat GPU 能力记录](MANDELBROT_REFINEMENT_BIGFLOAT_REPORT.zh.md): 中文版实验记录，说明高精度坐标、BigFloat GPU 渲染、Redis 状态保存和客户端交互规则。
+- [BIGFLOAT_MANDELBROT.zh.md](BIGFLOAT_MANDELBROT.zh.md): BigFloat Mandelbrot implementation notes in Chinese.
+- [GPU_DEVELOPMENT.zh.md](GPU_DEVELOPMENT.zh.md): GPU backend development notes in Chinese.
+
 ## Design Ideas
 
 Zust is designed around a small set of practical goals:

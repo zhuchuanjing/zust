@@ -392,6 +392,10 @@ pub fn mount_redis(name: &str, url: &str) -> Result<bool> {
     ROOT.mount_redis(name, url)
 }
 
+pub fn mount_fjall(data_dir: &str) -> Result<bool> {
+    ROOT.mount_fjall("fjall", data_dir)
+}
+
 pub fn get_mount<'a>(name: &'a str) -> Result<(Mount<Object>, &'a str)> {
     ROOT.get_mount(name)
 }
@@ -517,6 +521,16 @@ pub fn get_list(name: &str) -> Result<Vec<Dynamic>> {
             let mut conn = client.get_connection()?;
             let items: Vec<Vec<u8>> = conn.lrange(name, 0, -1)?;
             let items: Vec<Dynamic> = items.into_iter().map(|buf| Dynamic::decode(buf.as_slice()).map(|(v, _)| v).unwrap_or(Dynamic::Null)).collect();
+            Ok(items)
+        }
+        Mount::Fjall { .. } => {
+            let len = m.len(name)?;
+            let mut items = Vec::new();
+            for idx in 0..len {
+                if let Ok(value) = m.get_idx(name, idx, |obj| obj.value()) {
+                    items.push(value);
+                }
+            }
             Ok(items)
         }
     }

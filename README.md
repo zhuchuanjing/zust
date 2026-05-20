@@ -136,7 +136,7 @@ Most normal script syntax, such as `list[idx]`, `map.key`, `value.len()`, and dy
 
 ### `root`
 
-`root` is an addressable object tree. The default mount is `local`, backed by memory. Redis mounts are also supported.
+`root` is an addressable object tree. The default mount is `local`, backed by memory. Redis mounts and a local Fjall-backed `fjall` mount are also supported.
 
 ```zust
 root::add("local/user/1", {name: "Zust", points: 10});
@@ -152,6 +152,7 @@ root::insert("local/users", "alice", {age: 20});
 Functions:
 
 - `root::mount(name, url)`: mount a Redis-backed root path.
+- `root::mount_fjall(data_dir)`: mount a local Fjall-backed root path at `fjall`.
 - `root::add(path, value)`, `root::get(path)`, `root::remove(path)`, `root::contains(path)`.
 - `root::dir(path)`, `root::len(path)`.
 - `root::add_list(path)`, `root::push(path, value)`, `root::get_idx(path, idx)`, `root::remove_idx(path, idx)`.

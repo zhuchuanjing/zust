@@ -52,6 +52,12 @@ extern "C" fn root_mount(name: *const Dynamic, url: *const Dynamic) {
     }
 }
 
+extern "C" fn root_mount_fjall(data_dir: *const Dynamic) {
+    unsafe {
+        let _ = root::mount_fjall(&(*data_dir).as_str());
+    }
+}
+
 extern "C" fn root_get(name: *const Dynamic) -> *const Dynamic {
     unsafe {
         let v = Box::new(if let Ok((m, name)) = get_mount(&(*name).as_str()) { m.get(name, |v| v.value()).unwrap_or(Dynamic::Null) } else { Dynamic::Null });
@@ -118,8 +124,9 @@ extern "C" fn root_remove_key(name: *const Dynamic, key: *const Dynamic) -> *con
     }
 }
 
-pub const ROOT_NATIVE: [(&str, &[Type], Type, *const u8); 18] = [
+pub const ROOT_NATIVE: [(&str, &[Type], Type, *const u8); 19] = [
     ("mount", &[Type::Any, Type::Any], Type::Void, root_mount as *const u8),
+    ("mount_fjall", &[Type::Any], Type::Void, root_mount_fjall as *const u8),
     ("add_list", &[Type::Any], Type::Void, root_add_list as *const u8),
     ("add_map", &[Type::Any], Type::Void, root_add_map as *const u8),
     ("add", &[Type::Any, Type::Any], Type::I32, root_add as *const u8),

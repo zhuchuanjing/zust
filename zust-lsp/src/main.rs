@@ -377,6 +377,7 @@ fn lsp_externs() -> Vec<LspExtern> {
         LspExtern { full_name: "spirv::barrier", arg_tys: vec![], ret_ty: Type::Void },
         LspExtern { full_name: "spirv::atomic_add", arg_tys: vec![Type::U32, Type::U32], ret_ty: Type::U32 },
         LspExtern { full_name: "root::mount", arg_tys: vec![Type::Any, Type::Any], ret_ty: Type::Void },
+        LspExtern { full_name: "root::mount_fjall", arg_tys: vec![Type::Any], ret_ty: Type::Void },
         LspExtern { full_name: "root::add_list", arg_tys: vec![Type::Any], ret_ty: Type::Void },
         LspExtern { full_name: "root::add_map", arg_tys: vec![Type::Any], ret_ty: Type::Void },
         LspExtern { full_name: "root::add", arg_tys: vec![Type::Any, Type::Any], ret_ty: Type::I32 },

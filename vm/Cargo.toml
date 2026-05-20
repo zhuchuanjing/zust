@@ -41,7 +41,9 @@ uuid = { version = "1.23.1", features = ["v4"]}
 rand = "0.10.1"
 reqwest = "0.13.3"
 base64 = "0.22.1"
-sqlx = { version = "0.8.6", default-features = false, features = ["runtime-tokio-rustls", "any", "postgres", "mysql"] }
+sqlx-core = { version = "0.8.6", default-features = false, features = ["_rt-tokio", "_tls-rustls-ring-webpki", "any"] }
+sqlx-mysql = { version = "0.8.6", default-features = false, features = ["any"] }
+sqlx-postgres = { version = "0.8.6", default-features = false, features = ["any"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 vm-metal = { package = "zust-vm-metal", version = "0.9.3", path = "../vm-metal" }

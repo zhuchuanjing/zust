@@ -1,10 +1,13 @@
 use anyhow::{Result, anyhow};
 use dynamic::{Dynamic, Type};
 use smol_str::SmolStr;
-use sqlx::{
-    Any, AnyPool, Column, Executor, Row, ValueRef,
-    any::{AnyArguments, AnyPoolOptions, AnyRow, AnyTypeInfoKind},
-    query::Query,
+use sqlx_core::{
+    any::{Any, AnyArguments, AnyPool, AnyPoolOptions, AnyRow, AnyTypeInfoKind, driver::install_drivers},
+    column::Column,
+    executor::Executor,
+    query::{Query, query},
+    row::Row,
+    value::ValueRef,
 };
 use std::{
     collections::BTreeMap,
@@ -155,7 +158,7 @@ async fn select_rows(path: Dynamic, sql: Dynamic, data: Dynamic) -> Result<Dynam
     let kind = db_kind(&target.url)?;
     let (sql, values) = prepare_sql(sql.as_str(), data, kind)?;
     let pool = pool_for(&target).await?;
-    let rows = bind_values(sqlx::query(&sql), values)?.fetch_all(&pool).await?;
+    let rows = bind_values(query(&sql), values)?.fetch_all(&pool).await?;
     Ok(Dynamic::list(rows.into_iter().map(row_to_dynamic).collect()))
 }
 
@@ -164,7 +167,7 @@ async fn exec_sql(path: Dynamic, sql: Dynamic, data: Dynamic) -> Result<i64> {
     let kind = db_kind(&target.url)?;
     let (sql, values) = prepare_sql(sql.as_str(), data, kind)?;
     let pool = pool_for(&target).await?;
-    let result = bind_values(sqlx::query(&sql), values)?.execute(&pool).await?;
+    let result = bind_values(query(&sql), values)?.execute(&pool).await?;
     Ok(result.rows_affected().min(i64::MAX as u64) as i64)
 }
 
@@ -178,7 +181,7 @@ async fn transaction_sql(path: Dynamic, steps: Dynamic) -> Result<i64> {
 
     for (sql, data) in steps {
         let (sql, values) = prepare_sql(&sql, data, kind)?;
-        let result = bind_values(sqlx::query(&sql), values)?.execute(&mut *tx).await?;
+        let result = bind_values(query(&sql), values)?.execute(&mut *tx).await?;
         rows_affected = rows_affected.saturating_add(result.rows_affected());
     }
 
@@ -187,7 +190,9 @@ async fn transaction_sql(path: Dynamic, steps: Dynamic) -> Result<i64> {
 }
 
 async fn pool_for(target: &DbTarget) -> Result<AnyPool> {
-    INSTALL_DRIVERS.call_once(sqlx::any::install_default_drivers);
+    INSTALL_DRIVERS.call_once(|| {
+        install_drivers(&[sqlx_mysql::any::DRIVER, sqlx_postgres::any::DRIVER]).expect("SQLx Any drivers already installed");
+    });
 
     if let Some(pool) = POOLS.lock().unwrap().get(&target.pool_path).filter(|entry| entry.url == target.url).map(|entry| entry.pool.clone()) {
         return Ok(pool);

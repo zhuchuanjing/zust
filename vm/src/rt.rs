@@ -12,13 +12,14 @@ use cranelift_module::{DataDescription, DataId, FuncId, Module};
 
 use anyhow::{Result, anyhow};
 use smol_str::SmolStr;
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock, Weak};
 
 pub struct JITRunTime {
     pub compiler: Compiler,
     pub fns: BTreeMap<u32, FnVariant>,
     pub sigs: Vec<(Vec<Type>, Signature, Type)>,
     pub native_symbols: Arc<RwLock<HashMap<String, usize>>>,
+    pub(crate) owner: Weak<Mutex<JITRunTime>>,
     pub(crate) pending_fns: VecDeque<PendingFn>,
     pub(crate) compile_depth: usize,
     #[cfg(feature = "ir-disassembly")]
@@ -150,6 +151,7 @@ impl JITRunTime {
             fns,
             sigs: Vec::new(),
             native_symbols,
+            owner: Weak::new(),
             pending_fns: VecDeque::new(),
             compile_depth: 0,
             #[cfg(feature = "ir-disassembly")]
@@ -157,6 +159,14 @@ impl JITRunTime {
             module,
             consts: Vec::new(),
         }
+    }
+
+    pub(crate) fn set_owner(&mut self, owner: Weak<Mutex<JITRunTime>>) {
+        self.owner = owner;
+    }
+
+    pub(crate) fn owner_context_ptr(&self) -> usize {
+        &self.owner as *const Weak<Mutex<JITRunTime>> as usize
     }
 
     fn unary(ctx: &mut BuildContext, left: (Value, Type), op: UnaryOp) -> Result<(Value, Type)> {
@@ -190,8 +200,9 @@ impl JITRunTime {
 
     pub(crate) fn call(&mut self, ctx: &mut BuildContext, fn_info: FnInfo, args: Vec<Value>) -> Result<(Value, Type)> {
         match fn_info {
-            FnInfo::Call { fn_id, arg_tys: _, caps: _, ret } => {
+            FnInfo::Call { fn_id, arg_tys: _, caps: _, ret, context } => {
                 let fn_ref = self.get_fn_ref(ctx, fn_id);
+                let args = self.add_context_arg(ctx, context, args);
                 let call_inst = ctx.builder.ins().call(fn_ref, &args);
                 if !ret.is_void() { Ok((ctx.builder.inst_results(call_inst)[0], ret)) } else { Err(anyhow!("没有返回值")) }
             }
@@ -201,13 +212,22 @@ impl JITRunTime {
 
     fn call_for_side_effect(&mut self, ctx: &mut BuildContext, fn_info: FnInfo, args: Vec<Value>) -> Result<()> {
         match fn_info {
-            FnInfo::Call { fn_id, arg_tys: _, caps: _, ret: _ } => {
+            FnInfo::Call { fn_id, arg_tys: _, caps: _, ret: _, context } => {
                 let fn_ref = self.get_fn_ref(ctx, fn_id);
+                let args = self.add_context_arg(ctx, context, args);
                 ctx.builder.ins().call(fn_ref, &args);
                 Ok(())
             }
             FnInfo::Inline { fn_ptr, arg_tys: _ } => fn_ptr(Some(ctx), args).map(|_| ()),
         }
+    }
+
+    fn add_context_arg(&mut self, ctx: &mut BuildContext, context: Option<usize>, mut args: Vec<Value>) -> Vec<Value> {
+        if let Some(context) = context {
+            let context = ctx.builder.ins().iconst(ptr_type(), context as i64);
+            args.insert(0, context);
+        }
+        args
     }
 
     pub(crate) fn short_circuit_logic(&mut self, ctx: &mut BuildContext, left: (Value, Type), op: BinaryOp, right: &Expr) -> Result<(Value, Type)> {
@@ -691,7 +711,7 @@ impl JITRunTime {
             })?,
         };
         match &fn_info {
-            FnInfo::Call { fn_id: _, arg_tys: want_tys, caps, ret } => {
+            FnInfo::Call { fn_id: _, arg_tys: want_tys, caps, ret, context: _ } => {
                 let mut args = self.adjust_args(ctx, args, want_tys)?;
                 if capture_values.is_none() {
                     for c in caps {

@@ -22,7 +22,6 @@ mod llm_module;
 mod root_module;
 pub use gpu_layout::{GpuFieldLayout, GpuStructLayout};
 
-use std::cell::RefCell;
 use std::sync::{Mutex, OnceLock, Weak};
 static PTR_TYPE: OnceLock<types::Type> = OnceLock::new();
 pub fn ptr_type() -> types::Type {
@@ -61,30 +60,13 @@ use std::sync::Arc;
 unsafe impl Send for JITRunTime {}
 unsafe impl Sync for JITRunTime {}
 
-thread_local! {
-    static CURRENT_VM: RefCell<Option<Weak<Mutex<JITRunTime>>>> = const { RefCell::new(None) };
-}
-
-fn set_current_vm(vm: &Vm) {
-    CURRENT_VM.with(|current| {
-        *current.borrow_mut() = Some(Arc::downgrade(&vm.jit));
-    });
-}
-
-fn with_current_vm<T>(f: impl FnOnce(&Vm) -> Result<T>) -> Result<T> {
-    CURRENT_VM.with(|current| {
-        let jit = current.borrow().as_ref().and_then(Weak::upgrade).ok_or_else(|| anyhow!("当前线程没有 VM"))?;
-        let vm = Vm { jit };
-        f(&vm)
-    })
-}
-
-pub(crate) fn import_current(name: &str, path: &str) -> Result<()> {
-    with_current_vm(|vm| vm.import(name, path))
-}
-
-pub(crate) fn get_current_fn_ptr(name: &str, arg_tys: &[Type]) -> Result<(*const u8, Type)> {
-    with_current_vm(|vm| vm.get_fn_ptr(name, arg_tys))
+pub(crate) fn with_vm_context<T>(context: *const Weak<Mutex<JITRunTime>>, f: impl FnOnce(&Vm) -> Result<T>) -> Result<T> {
+    if context.is_null() {
+        return Err(anyhow!("VM context is null"));
+    }
+    let jit = unsafe { &*context }.upgrade().ok_or_else(|| anyhow!("VM context has expired"))?;
+    let vm = Vm { jit };
+    f(&vm)
 }
 
 fn add_method_field(jit: &mut JITRunTime, def: &str, method: &str, id: u32) -> Result<()> {
@@ -135,6 +117,14 @@ impl JITRunTime {
         result
     }
 
+    pub(crate) fn add_native_module_context_ptr(&mut self, module: &str, name: &str, arg_tys: &[Type], ret_ty: Type, fn_ptr: *const u8) -> Result<u32> {
+        self.add_module(module);
+        let full_name = format!("{}::{}", module, name);
+        let result = self.add_context_native_ptr(&full_name, name, arg_tys, ret_ty, fn_ptr);
+        self.pop_module();
+        result
+    }
+
     pub fn add_native_method_ptr(&mut self, def: &str, method: &str, arg_tys: &[Type], ret_ty: Type, fn_ptr: *const u8) -> Result<u32> {
         self.add_empty_type(def)?;
         let full_name = format!("{}::{}", def, method);
@@ -148,6 +138,7 @@ impl JITRunTime {
         for (name, arg_tys, ret_ty, fn_ptr) in STD {
             self.add_native_ptr(name, name, arg_tys, ret_ty, fn_ptr)?;
         }
+        self.add_context_native_ptr("import", "import", &[Type::Any, Type::Any], Type::Bool, native::import_with_vm as *const u8)?;
         Ok(())
     }
 
@@ -195,7 +186,9 @@ impl JITRunTime {
     }
 
     pub fn add_root(&mut self) -> Result<()> {
-        add_native_module_fns(self, "root", &root_module::ROOT_NATIVE)
+        add_native_module_fns(self, "root", &root_module::ROOT_NATIVE)?;
+        self.add_native_module_context_ptr("root", "add_fn", &[Type::Any, Type::Any], Type::Bool, root_module::root_add_fn_with_vm as *const u8)?;
+        Ok(())
     }
 
     pub fn add_http(&mut self) -> Result<()> {
@@ -237,7 +230,6 @@ pub struct CompiledFn {
 
 impl CompiledFn {
     pub fn ptr(&self) -> *const u8 {
-        set_current_vm(&self.owner);
         self.ptr as *const u8
     }
 
@@ -252,7 +244,9 @@ impl CompiledFn {
 
 impl Vm {
     pub fn new() -> Self {
-        Self { jit: Arc::new(Mutex::new(JITRunTime::new(|_| {}))) }
+        let jit = Arc::new(Mutex::new(JITRunTime::new(|_| {})));
+        jit.lock().unwrap().set_owner(Arc::downgrade(&jit));
+        Self { jit }
     }
 
     pub fn with_all() -> Result<Self> {
@@ -360,7 +354,6 @@ impl Vm {
     }
 
     pub fn get_fn(&self, name: &str, arg_tys: &[Type]) -> Result<CompiledFn> {
-        set_current_vm(self);
         let (ptr, ret) = self.get_fn_ptr(name, arg_tys)?;
         Ok(CompiledFn { ptr: ptr as usize, ret, owner: self.clone() })
     }
@@ -760,6 +753,38 @@ mod tests {
         let result = unsafe { &*script() };
         assert_eq!(result.len(), 3);
         assert_eq!(result.get_idx(2).and_then(|value| value.get_dynamic("note")).map(|value| value.as_str().to_string()), Some("third".to_string()));
+        Ok(())
+    }
+
+    #[test]
+    fn native_import_uses_owning_vm() -> anyhow::Result<()> {
+        let module_path = std::env::temp_dir().join(format!("zust_vm_import_owner_{}.zs", std::process::id()));
+        std::fs::write(&module_path, "pub fn value() { 41 }")?;
+        let module_path = module_path.to_string_lossy().replace('\\', "\\\\").replace('"', "\\\"");
+
+        let vm1 = Vm::with_all()?;
+        vm1.import_code(
+            "vm_import_owner",
+            format!(
+                r#"
+                pub fn run() {{
+                    import("vm_imported_owner", "{module_path}");
+                }}
+                "#
+            )
+            .into_bytes(),
+        )?;
+        let compiled = vm1.get_fn("vm_import_owner::run", &[])?;
+
+        let vm2 = Vm::with_all()?;
+        vm2.import_code("vm_import_other", b"pub fn run() { 0 }".to_vec())?;
+        let _ = vm2.get_fn("vm_import_other::run", &[])?;
+
+        let run: extern "C" fn() = unsafe { std::mem::transmute(compiled.ptr()) };
+        run();
+
+        assert!(vm1.get_fn("vm_imported_owner::value", &[]).is_ok());
+        assert!(vm2.get_fn("vm_imported_owner::value", &[]).is_err());
         Ok(())
     }
 

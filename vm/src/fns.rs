@@ -7,7 +7,7 @@ use dynamic::Type;
 
 #[derive(Debug)]
 pub enum FnVariant {
-    Native { ty: Type, fn_id: FuncId },                                                                                //没有变体 直接调用的原生函数
+    Native { ty: Type, fn_id: FuncId, context: Option<usize> },                                                        //没有变体 直接调用的原生函数
     Inline { fn_ptr: fn(Option<&mut BuildContext>, Vec<Value>) -> Result<(Option<Value>, Type)>, arg_tys: Vec<Type> }, //inline 函数 直接生成代码
     Compiled(Vec<(Type, FuncId)>),
 }
@@ -26,25 +26,25 @@ use smol_str::SmolStr;
 #[derive(Debug)]
 pub enum FnInfo {
     //用来调用的函数信息
-    Call { fn_id: FuncId, arg_tys: Vec<Type>, caps: Vec<usize>, ret: Type },
+    Call { fn_id: FuncId, arg_tys: Vec<Type>, caps: Vec<usize>, ret: Type, context: Option<usize> },
     Inline { fn_ptr: fn(Option<&mut BuildContext>, Vec<Value>) -> Result<(Option<Value>, Type)>, arg_tys: Vec<Type> },
 }
 
 impl FnInfo {
     pub fn get_id(&self) -> Result<FuncId> {
-        if let Self::Call { fn_id, arg_tys: _, caps: _, ret: _ } = self { Ok(*fn_id) } else { Err(anyhow!("Inline 函数没有 FuncId")) }
+        if let Self::Call { fn_id, arg_tys: _, caps: _, ret: _, context: _ } = self { Ok(*fn_id) } else { Err(anyhow!("Inline 函数没有 FuncId")) }
     }
 
     pub fn arg_tys(&self) -> Result<&[Type]> {
         match self {
-            Self::Call { fn_id: _, arg_tys, caps: _, ret: _ } => Ok(arg_tys),
+            Self::Call { fn_id: _, arg_tys, caps: _, ret: _, context: _ } => Ok(arg_tys),
             Self::Inline { fn_ptr: _, arg_tys } => Ok(arg_tys),
         }
     }
 
     pub fn get_type(&self) -> Result<Type> {
         match self {
-            Self::Call { fn_id: _, arg_tys: _, caps: _, ret } => Ok(ret.clone()),
+            Self::Call { fn_id: _, arg_tys: _, caps: _, ret, context: _ } => Ok(ret.clone()),
             Self::Inline { fn_ptr, arg_tys: _ } => fn_ptr(None, vec![]).map(|(_, t)| t),
         }
     }
@@ -125,7 +125,7 @@ impl JITRunTime {
                                 }
                             }
                             if real_types.len() == want_tys.len() {
-                                return Ok(FnInfo::Call { fn_id: *fn_id, arg_tys: real_types, caps: Vec::new(), ret: ret.as_ref().clone() });
+                                return Ok(FnInfo::Call { fn_id: *fn_id, arg_tys: real_types, caps: Vec::new(), ret: ret.as_ref().clone(), context: None });
                             }
                         }
                     }
@@ -133,9 +133,9 @@ impl JITRunTime {
                 FnVariant::Inline { fn_ptr, arg_tys } => {
                     return Ok(FnInfo::Inline { fn_ptr: fn_ptr.clone(), arg_tys: arg_tys.clone() });
                 }
-                FnVariant::Native { ty, fn_id } => {
+                FnVariant::Native { ty, fn_id, context } => {
                     if let Type::Fn { tys, ret } = ty.clone() {
-                        return Ok(FnInfo::Call { fn_id: *fn_id, arg_tys: tys, caps: Vec::new(), ret: ret.as_ref().clone() });
+                        return Ok(FnInfo::Call { fn_id: *fn_id, arg_tys: tys, caps: Vec::new(), ret: ret.as_ref().clone(), context: *context });
                     }
                 }
             }
@@ -250,7 +250,7 @@ impl JITRunTime {
                             && tys == &arg_tys
                             && ret.as_ref() == &ret_ty
                         {
-                            return Ok(FnInfo::Call { fn_id: *fn_id, arg_tys: arg_tys.to_vec(), caps: Vec::new(), ret: ret_ty });
+                            return Ok(FnInfo::Call { fn_id: *fn_id, arg_tys: arg_tys.to_vec(), caps: Vec::new(), ret: ret_ty, context: None });
                         }
                     }
                 }
@@ -278,7 +278,7 @@ impl JITRunTime {
                     self.module.finalize_definitions()?;
                     fn_id
                 };
-                return Ok(FnInfo::Call { fn_id, arg_tys: arg_tys.to_vec(), caps: compile_cap.vars.clone(), ret: ret_ty });
+                return Ok(FnInfo::Call { fn_id, arg_tys: arg_tys.to_vec(), caps: compile_cap.vars.clone(), ret: ret_ty, context: None });
             }
             let ret_ty = self.compiler.infer_fn_with_params(id, &arg_tys, generic_args)?;
             for v in cap.vars.iter() {
@@ -295,7 +295,7 @@ impl JITRunTime {
                 self.module.finalize_definitions()?;
                 fn_id
             };
-            return Ok(FnInfo::Call { fn_id, arg_tys: arg_tys.to_vec(), caps: cap.vars.clone(), ret: ret_ty });
+            return Ok(FnInfo::Call { fn_id, arg_tys: arg_tys.to_vec(), caps: cap.vars.clone(), ret: ret_ty, context: None });
         }
         Err(anyhow!("生成函数 {} 失败", id))
     }

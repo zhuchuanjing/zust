@@ -1,7 +1,9 @@
 //支持 root 内存和 redis 文件系统
 use dynamic::{Dynamic, Type};
 
+use crate::JITRunTime;
 use root::{Object, get_mount};
+use std::sync::{Mutex, Weak};
 extern "C" fn root_add(name: *const Dynamic, value: *const Dynamic) -> bool {
     unsafe {
         let obj = Object::Value((*value).clone());
@@ -100,10 +102,10 @@ extern "C" fn root_get_key(name: *const Dynamic, key: *const Dynamic) -> *const 
     }
 }
 
-extern "C" fn root_add_fn(name: *const Dynamic, fn_name: *const Dynamic) -> bool {
+pub(crate) extern "C" fn root_add_fn_with_vm(context: *const Weak<Mutex<JITRunTime>>, name: *const Dynamic, fn_name: *const Dynamic) -> bool {
     let name = unsafe { (*name).clone() };
     let fn_name = unsafe { (*fn_name).clone() };
-    match crate::get_current_fn_ptr(fn_name.as_str(), &[Type::Any]) {
+    match crate::with_vm_context(context, |vm| vm.get_fn_ptr(fn_name.as_str(), &[Type::Any])) {
         Ok((fn_ptr, ty)) => {
             if let Ok((m, name)) = get_mount(name.as_str()) {
                 return m.add(name, Object::Func(fn_ptr as i64, ty.clone()));
@@ -124,7 +126,7 @@ extern "C" fn root_remove_key(name: *const Dynamic, key: *const Dynamic) -> *con
     }
 }
 
-pub const ROOT_NATIVE: [(&str, &[Type], Type, *const u8); 19] = [
+pub const ROOT_NATIVE: [(&str, &[Type], Type, *const u8); 18] = [
     ("mount", &[Type::Any, Type::Any], Type::Void, root_mount as *const u8),
     ("mount_fjall", &[Type::Any], Type::Void, root_mount_fjall as *const u8),
     ("add_list", &[Type::Any], Type::Void, root_add_list as *const u8),
@@ -143,5 +145,4 @@ pub const ROOT_NATIVE: [(&str, &[Type], Type, *const u8); 19] = [
     ("insert", &[Type::Any, Type::Any, Type::Any], Type::Void, root_insert as *const u8),
     ("get_key", &[Type::Any, Type::Any], Type::Any, root_get_key as *const u8),
     ("remove_key", &[Type::Any, Type::Any], Type::Any, root_remove_key as *const u8),
-    ("add_fn", &[Type::Any, Type::Any], Type::Bool, root_add_fn as *const u8),
 ];

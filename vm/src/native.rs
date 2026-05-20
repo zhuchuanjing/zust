@@ -1,10 +1,12 @@
 use super::FnVariant;
 use crate::JITRunTime;
 use anyhow::Result;
+use cranelift::prelude::AbiParam;
 use cranelift_module::{Linkage, Module};
 use dynamic::{Dynamic, Type};
 use parser::{BinaryOp, Expr, ExprKind, Span};
 use rand::RngExt;
+use std::sync::{Mutex, Weak};
 
 extern "C" fn any_clone(addr: *const Dynamic) -> *const Dynamic {
     //在堆上分配内存 复制 addr 到内存中
@@ -72,11 +74,11 @@ extern "C" fn struct_from_ptr(addr: i64, ty: i64) -> *const Dynamic {
     Box::into_raw(Box::new(Dynamic::Struct { addr: addr as usize, ty }))
 }
 
-extern "C" fn import(addr: *const Dynamic, path: *const Dynamic) -> bool {
+pub(crate) extern "C" fn import_with_vm(context: *const Weak<Mutex<JITRunTime>>, addr: *const Dynamic, path: *const Dynamic) -> bool {
     if addr.is_null() || path.is_null() {
         return false;
     }
-    super::import_current(unsafe { &*addr }.as_str(), unsafe { &*path }.as_str()).map_err(|e| println!("import {:?}", e)).is_ok()
+    super::with_vm_context(context, |vm| vm.import(unsafe { &*addr }.as_str(), unsafe { &*path }.as_str())).map_err(|e| println!("import {:?}", e)).is_ok()
 }
 
 extern "C" fn any_len(addr: *const Dynamic) -> i64 {
@@ -285,9 +287,8 @@ extern "C" fn any_logic(left: *const Dynamic, op: i32, right: *const Dynamic) ->
     }
 }
 
-pub const STD: [(&str, &[Type], Type, *const u8); 6] = [
+pub const STD: [(&str, &[Type], Type, *const u8); 5] = [
     ("print", &[Type::Any], Type::Void, print as *const u8),
-    ("import", &[Type::Any, Type::Any], Type::Bool, import as *const u8),
     ("uuid", &[], Type::Any, uuid as *const u8),
     ("rand", &[Type::Any, Type::Any], Type::Any, random as *const u8),
     ("__struct_alloc", &[Type::I64], Type::Any, struct_alloc as *const u8),
@@ -330,12 +331,33 @@ impl JITRunTime {
         self.add_native(full_name, name, arg_tys, ret_ty)
     }
 
+    pub(crate) fn add_context_native_ptr(&mut self, full_name: &str, name: &str, arg_tys: &[Type], ret_ty: Type, fn_ptr: *const u8) -> Result<u32> {
+        self.native_symbols.write().unwrap().insert(full_name.to_string(), fn_ptr as usize);
+        self.add_context_native(full_name, name, arg_tys, ret_ty)
+    }
+
     pub fn add_native(&mut self, full_name: &str, name: &str, arg_tys: &[Type], ret_ty: Type) -> Result<u32> {
         let fn_ty = Type::Fn { tys: arg_tys.to_vec(), ret: Rc::new(ret_ty.clone()) };
         let id = self.compiler.add_symbol(name, compiler::Symbol::Native(fn_ty.clone()));
         let sig = self.get_sig(arg_tys, ret_ty)?;
         let fn_id = self.module.declare_function(full_name, Linkage::Import, &sig)?;
-        self.fns.insert(id, FnVariant::Native { ty: fn_ty, fn_id });
+        self.fns.insert(id, FnVariant::Native { ty: fn_ty, fn_id, context: None });
+        Ok(id)
+    }
+
+    pub(crate) fn add_context_native(&mut self, full_name: &str, name: &str, arg_tys: &[Type], ret_ty: Type) -> Result<u32> {
+        let fn_ty = Type::Fn { tys: arg_tys.to_vec(), ret: Rc::new(ret_ty.clone()) };
+        let id = self.compiler.add_symbol(name, compiler::Symbol::Native(fn_ty.clone()));
+        let mut sig = self.module.make_signature();
+        sig.params.push(AbiParam::new(crate::ptr_type()));
+        for arg in arg_tys.iter() {
+            sig.params.push(AbiParam::new(crate::get_type(arg)?));
+        }
+        if !ret_ty.is_void() {
+            sig.returns.push(AbiParam::new(crate::get_type(&ret_ty)?));
+        }
+        let fn_id = self.module.declare_function(full_name, Linkage::Import, &sig)?;
+        self.fns.insert(id, FnVariant::Native { ty: fn_ty, fn_id, context: Some(self.owner_context_ptr()) });
         Ok(id)
     }
 }

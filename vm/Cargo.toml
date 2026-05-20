@@ -1,6 +1,6 @@
 [package]
 name = "zust-vm"
-version = "0.9.14"
+version = "0.9.15"
 edition = "2024"
 rust-version = "1.85"
 description = "Cranelift JIT runtime for executing Zust modules."

@@ -120,6 +120,11 @@ pub enum ExprKind {
         ty: Type,
         name: SmolStr,
     },
+    TypedMethod {
+        obj: Box<Expr>,
+        ty: Type,
+        name: SmolStr,
+    },
     AssocId {
         id: u32,
         params: Vec<Type>,
@@ -364,11 +369,19 @@ impl Parser {
     }
 
     fn postfix_expr(&mut self, start: usize, mut expr: Expr) -> Result<Expr> {
-        while !self.is_eof() && [b'.', b'[', b'('].contains(&self.get()?) {
+        while !self.is_eof() && [b'.', b'[', b'(', b':'].contains(&self.get()?) {
             if self.ahead()? == b'.' && self.get()? == b'.' {
                 break;
             }
-            if self.take(b'.').is_ok() {
+            if self.just("::<").is_ok() {
+                let ty = self.get_type()?;
+                self.whitespace()?;
+                self.until(b'>')?;
+                self.whitespace()?;
+                self.just("::")?;
+                let name = self.ident()?;
+                expr = Expr::new(ExprKind::TypedMethod { obj: Box::new(expr), ty, name }, Span::new(start, self.current_pos()));
+            } else if self.take(b'.').is_ok() {
                 let key_start = self.current_pos();
                 let key = self.ident()?;
                 let right = Expr::new(ExprKind::Value(Dynamic::String(key)), self.span_from(key_start));
@@ -382,6 +395,8 @@ impl Parser {
             } else if self.take(b'(').is_ok() {
                 let params = crate::parse_list!(self, Vec::new(), b')', b',', self.expr(None, None)?.0);
                 expr = Expr::new(ExprKind::Call { obj: Box::new(expr), params }, Span::new(start, self.current_pos()));
+            } else {
+                break;
             }
         }
         Ok(expr.with_span(Span::new(start, self.current_pos())))

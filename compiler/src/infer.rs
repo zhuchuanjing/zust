@@ -80,6 +80,18 @@ impl Compiler {
                         args.push(self.infer_expr(p)?);
                     }
                     self.infer_fn_with_params(*id, &args, generic_args)
+                } else if let ExprKind::TypedMethod { obj: target, ty, name } = &obj.kind {
+                    let base_name = match ty {
+                        Type::Ident { name, .. } => name.clone(),
+                        Type::Symbol { id, .. } => self.symbols.get_symbol(*id)?.0.clone(),
+                        _ => return Ok(Type::Any),
+                    };
+                    let id = self.symbols.get_id(&format!("{}::{}", base_name, name))?;
+                    let mut args = vec![self.infer_expr(target)?];
+                    for p in params {
+                        args.push(self.infer_expr(p)?);
+                    }
+                    self.infer_fn(id, &args)
                 } else if let ExprKind::Id(id, obj_expr) = &obj.kind {
                     let mut args: Vec<Type> = if let Some(obj) = obj_expr { vec![self.infer_expr(obj)?] } else { Vec::new() };
                     for p in params {

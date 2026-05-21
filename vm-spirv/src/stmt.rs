@@ -388,6 +388,7 @@ impl SpirvCompiler {
     pub(crate) fn collect_assigned_vars_expr(expr: &Expr, out: &mut BTreeSet<usize>) {
         match &expr.kind {
             ExprKind::Unary { value, .. } | ExprKind::Typed { value, .. } | ExprKind::Repeat { value, .. } => Self::collect_assigned_vars_expr(value, out),
+            ExprKind::TypedMethod { obj, .. } => Self::collect_assigned_vars_expr(obj, out),
             ExprKind::Binary { left, op, right } => {
                 if *op == BinaryOp::Assign || op.is_assign() {
                     Self::collect_assignment_target_vars(left, out);

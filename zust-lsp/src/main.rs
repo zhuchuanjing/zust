@@ -559,6 +559,7 @@ fn collect_expr_symbols(text: &str, expr: &Expr, symbols: &mut Vec<SymbolInfo>) 
             collect_stmt_symbols(text, body, symbols);
         }
         ExprKind::Typed { value, .. } | ExprKind::Unary { value, .. } | ExprKind::Repeat { value, .. } => collect_expr_symbols(text, value, symbols),
+        ExprKind::TypedMethod { obj, .. } => collect_expr_symbols(text, obj, symbols),
         ExprKind::Binary { left, right, .. } => {
             collect_expr_symbols(text, left, symbols);
             collect_expr_symbols(text, right, symbols);

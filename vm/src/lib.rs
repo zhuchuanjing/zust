@@ -840,6 +840,63 @@ mod tests {
     }
 
     #[test]
+    fn map_get_key_accepts_string_concat_key_variable() -> anyhow::Result<()> {
+        let vm = Vm::with_all()?;
+        vm.import_code(
+            "vm_get_key_string_concat_key",
+            br##"
+            pub fn read_action(action_map, panel_id, action_id) {
+                let action_key = panel_id + "#" + action_id;
+                action_map.get_key(action_key)
+            }
+            "##
+            .to_vec(),
+        )?;
+
+        let compiled = vm.get_fn("vm_get_key_string_concat_key::read_action", &[Type::Any, Type::Any, Type::Any])?;
+        let read_action: extern "C" fn(*const Dynamic, *const Dynamic, *const Dynamic) -> *const Dynamic = unsafe { std::mem::transmute(compiled.ptr()) };
+        let action_map = dynamic::map!("panel#open"=> dynamic::map!("id"=> "open"));
+        let panel_id: Dynamic = "panel".into();
+        let action_id: Dynamic = "open".into();
+
+        let result = unsafe { &*read_action(&action_map, &panel_id, &action_id) };
+
+        assert_eq!(result.get_dynamic("id").map(|value| value.as_str().to_string()), Some("open".to_string()));
+        Ok(())
+    }
+
+    #[test]
+    fn map_get_key_accepts_helper_string_key() -> anyhow::Result<()> {
+        let vm = Vm::with_all()?;
+        vm.import_code(
+            "vm_get_key_helper_string_key",
+            br##"
+            pub fn make_action_key(panel_id, action_id) {
+                panel_id + "#" + action_id
+            }
+
+            pub fn read_action(action_map, panel_id, action_id) {
+                let action_key = make_action_key(panel_id, action_id);
+                let action = action_map.get_key(action_key);
+                action
+            }
+            "##
+            .to_vec(),
+        )?;
+
+        let compiled = vm.get_fn("vm_get_key_helper_string_key::read_action", &[Type::Any, Type::Any, Type::Any])?;
+        let read_action: extern "C" fn(*const Dynamic, *const Dynamic, *const Dynamic) -> *const Dynamic = unsafe { std::mem::transmute(compiled.ptr()) };
+        let action_map = dynamic::map!("panel#open"=> dynamic::map!("id"=> "open"));
+        let panel_id: Dynamic = "panel".into();
+        let action_id: Dynamic = "open".into();
+
+        let result = unsafe { &*read_action(&action_map, &panel_id, &action_id) };
+
+        assert_eq!(result.get_dynamic("id").map(|value| value.as_str().to_string()), Some("open".to_string()));
+        Ok(())
+    }
+
+    #[test]
     fn dynamic_field_value_participates_in_or_expression() -> anyhow::Result<()> {
         let vm = Vm::with_all()?;
         vm.import_code(
@@ -1263,6 +1320,39 @@ mod tests {
         let mut json = String::new();
         result.to_json(&mut json);
         assert!(json.contains("\"points\": 13"));
+        Ok(())
+    }
+
+    struct CounterForTypedReceiver {
+        value: i64,
+    }
+
+    extern "C" fn counter_for_typed_receiver_get(value: *const Dynamic) -> i64 {
+        unsafe { &*value }.as_custom::<CounterForTypedReceiver>().map(|counter| counter.value).unwrap_or(-1)
+    }
+
+    #[test]
+    fn typed_receiver_method_call_dispatches_with_type_hint() -> anyhow::Result<()> {
+        let vm = Vm::with_all()?;
+        vm.add_empty_type("Counter")?;
+        let counter_ty = vm.get_symbol("Counter", Vec::new())?;
+        vm.add_native_method_ptr("Counter", "get", &[counter_ty], Type::I64, counter_for_typed_receiver_get as *const u8)?;
+        vm.import_code(
+            "vm_typed_receiver_method",
+            br#"
+            pub fn run(value) {
+                value::<Counter>::get()
+            }
+            "#
+            .to_vec(),
+        )?;
+
+        let compiled = vm.get_fn("vm_typed_receiver_method::run", &[Type::Any])?;
+        assert_eq!(compiled.ret_ty(), &Type::I64);
+        let run: extern "C" fn(*const Dynamic) -> i64 = unsafe { std::mem::transmute(compiled.ptr()) };
+        let value = Dynamic::custom(CounterForTypedReceiver { value: 42 });
+
+        assert_eq!(run(&value), 42);
         Ok(())
     }
 }

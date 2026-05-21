@@ -57,6 +57,12 @@ impl JITRunTime {
     }
 
     pub fn convert(&mut self, ctx: &mut BuildContext, vt: (Value, Type), ty: Type) -> Result<Value> {
+        let vt = if matches!(vt.1, Type::Symbol { .. }) {
+            let resolved = self.compiler.symbols.get_type(&vt.1).unwrap_or_else(|_| vt.1.clone());
+            (vt.0, resolved)
+        } else {
+            vt
+        };
         if vt.1 != ty {
             if ty.is_any() {
                 if vt.1.is_struct() {
@@ -75,6 +81,8 @@ impl JITRunTime {
                 } else if vt.1.is_f64() {
                     return self.call(ctx, self.get_method(&Type::Any, "from_f64")?, vec![vt.0]).map(|(v, _)| v);
                 } else if vt.1.is_str() {
+                    return Ok(vt.0);
+                } else if matches!(vt.1, Type::Symbol { .. }) {
                     return Ok(vt.0);
                 }
             } else if vt.1.is_any() {

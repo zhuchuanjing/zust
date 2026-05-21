@@ -162,6 +162,7 @@ fn substitute_expr(expr: &Expr, params: &[Type], args: &[Type]) -> Expr {
         ExprKind::Unary { op, value } => ExprKind::Unary { op: op.clone(), value: Box::new(substitute_expr(value, params, args)) },
         ExprKind::Binary { left, op, right } => ExprKind::Binary { left: Box::new(substitute_expr(left, params, args)), op: op.clone(), right: Box::new(substitute_expr(right, params, args)) },
         ExprKind::Assoc { ty, name } => ExprKind::Assoc { ty: substitute_type(ty, params, args), name: name.clone() },
+        ExprKind::TypedMethod { obj, ty, name } => ExprKind::TypedMethod { obj: Box::new(substitute_expr(obj, params, args)), ty: substitute_type(ty, params, args), name: name.clone() },
         ExprKind::AssocId { id, params: nested } => ExprKind::AssocId { id: *id, params: nested.iter().map(|param| substitute_type(param, params, args)).collect() },
         ExprKind::Tuple(items) => ExprKind::Tuple(items.iter().map(|item| substitute_expr(item, params, args)).collect()),
         ExprKind::List(items) => ExprKind::List(items.iter().map(|item| substitute_expr(item, params, args)).collect()),
@@ -517,6 +518,18 @@ impl Compiler {
     }
 
     fn method_call_obj_expr(&mut self, obj: &Expr, stmts: &mut Vec<Stmt>, cap: &mut Capture) -> Result<Option<Expr>> {
+        if let ExprKind::TypedMethod { obj: left, ty, name } = &obj.kind {
+            let left = self.eval(left, stmts, cap)?;
+            let base_name = match ty {
+                Type::Ident { name, .. } => name.clone(),
+                Type::Symbol { id, .. } => self.symbols.get_symbol(*id)?.0.clone(),
+                _ => return Err(Self::semantic_error(obj.span, format!("方法调用类型提示必须是类型: {:?}", ty))),
+            };
+            let method = format!("{}::{}", base_name, name);
+            let id = self.symbols.get_id(&method).map_err(|_| Self::semantic_error(obj.span, format!("未找到类型方法 {}", method)))?;
+            return Ok(Some(Expr::new(ExprKind::Id(id, Some(Box::new(left))), obj.span)));
+        }
+
         let ExprKind::Binary { left, op: BinaryOp::Idx, right } = &obj.kind else {
             return Ok(None);
         };

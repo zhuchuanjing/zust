@@ -5,9 +5,9 @@ edition = "2024"
 publish = false
 
 [dependencies]
-compiler = { package = "zust-compiler", version = "0.9.6", path = "../compiler" }
+compiler = { package = "zust-compiler", version = "0.9.7", path = "../compiler" }
 dynamic = { package = "zust-dynamic", version = "0.9.5", path = "../dynamic" }
-parser = { package = "zust-parser", version = "0.9.5", path = "../parser" }
+parser = { package = "zust-parser", version = "0.9.6", path = "../parser" }
 dashmap = "7.0.0-rc2"
 serde_json = "1.0.149"
 tokio = { version = "1.52.3", features = ["full"] }

@@ -348,8 +348,20 @@ impl Parser {
 
     pub fn ident(&mut self) -> Result<SmolStr> {
         let (start, mut stop) = self.collect(|ch| !NOT_IDENT.contains(&ch))?;
-        while self.just("::").is_ok() {
-            (_, stop) = self.collect(|ch| !NOT_IDENT.contains(&ch))?;
+        loop {
+            let save_pos = self.pos;
+            if self.just("::").is_err() {
+                break;
+            }
+            match self.collect(|ch| !NOT_IDENT.contains(&ch)) {
+                Ok((_, next_stop)) => {
+                    stop = next_stop;
+                }
+                Err(_) => {
+                    self.pos = save_pos;
+                    break;
+                }
+            }
         }
         if KEYWORDS.iter().position(|k| k.as_bytes() == &self.buf[start..stop]).is_some() {
             return Err(anyhow!("发现关键字{}", String::from_utf8_lossy(&self.buf[start..stop])));

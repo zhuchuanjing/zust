@@ -17,6 +17,11 @@ impl JITRunTime {
         self.call(ctx, self.get_method(&Type::Any, "logic")?, vec![left, op, right])
     }
 
+    fn any_binary(&mut self, ctx: &mut BuildContext, left: Value, op: BinaryOp, right: Value) -> Result<(Value, Type)> {
+        let op = ctx.builder.ins().iconst(types::I32, i32::from(op) as i64);
+        self.call(ctx, self.get_method(&Type::Any, "binary")?, vec![left, op, right])
+    }
+
     fn struct_to_dynamic(&mut self, ctx: &mut BuildContext, base: Value, ty: &Type) -> Result<Value> {
         let Type::Struct { params: _, fields: _ } = ty else {
             return Err(anyhow!("不是结构体 {:?}", ty));
@@ -184,14 +189,19 @@ impl JITRunTime {
         } else {
             left.1.clone() + right.1.clone()
         }; //为了支持字符串的加法需要单独处理
+        if ty.is_str() && op.is_add() {
+            let left = self.convert(ctx, left, Type::Any)?;
+            let right = self.convert(ctx, right, Type::Any)?;
+            let result = self.any_binary(ctx, left, op, right)?.0;
+            return Ok((result, ty));
+        }
         let left = self.convert(ctx, left, ty.clone())?;
         let right = self.convert(ctx, right, ty.clone())?;
         if ty.is_any() {
             if op.is_logic() {
                 return self.any_logic(ctx, left, op, right);
             } else {
-                let op = ctx.builder.ins().iconst(types::I32, i32::from(op) as i64);
-                return self.call(ctx, self.get_method(&Type::Any, "binary")?, vec![left, op, right]);
+                return self.any_binary(ctx, left, op, right);
             }
         }
         if ty.is_str() && op.is_logic() {
@@ -204,8 +214,7 @@ impl JITRunTime {
                 } else if ty.is_float() {
                     return Ok((ctx.builder.ins().fadd(left, right), ty));
                 } else if ty.is_str() {
-                    let op = ctx.builder.ins().iconst(types::I32, i32::from(op) as i64);
-                    let result = self.call(ctx, self.get_method(&Type::Any, "binary")?, vec![left, op, right])?.0;
+                    let result = self.any_binary(ctx, left, op, right)?.0;
                     return Ok((result, ty));
                 }
             }
@@ -317,6 +326,16 @@ impl JITRunTime {
 
     pub(crate) fn binary_imm<'a>(&mut self, ctx: &'a mut BuildContext, left: (Value, Type), op: BinaryOp, right: Dynamic) -> Result<(Value, Type)> {
         let ty = left.1.clone() + right.get_type();
+        if ty.is_str() && op.is_add() {
+            let left = self.convert(ctx, left, Type::Any)?;
+            let right_vt = ctx.get_const(&right).or_else(|_| {
+                let idx = self.compiler.get_const(right.clone());
+                self.get_const_value(ctx, idx)
+            })?;
+            let right = self.convert(ctx, right_vt, Type::Any)?;
+            let result = self.any_binary(ctx, left, op, right)?.0;
+            return Ok((result, ty));
+        }
         let left = self.convert(ctx, left, ty.clone())?;
         if ty.is_str() && op.is_logic() {
             let right_vt = ctx.get_const(&right).or_else(|_| {
@@ -334,8 +353,7 @@ impl JITRunTime {
                         self.get_const_value(ctx, idx)
                     })?;
                     let right = self.convert(ctx, right_vt, Type::Str)?;
-                    let op = ctx.builder.ins().iconst(types::I32, i32::from(op) as i64);
-                    let result = self.call(ctx, self.get_method(&Type::Any, "binary")?, vec![left, op, right])?.0;
+                    let result = self.any_binary(ctx, left, op, right)?.0;
                     return Ok((result, ty));
                 }
                 if ty.is_int() | ty.is_uint() {

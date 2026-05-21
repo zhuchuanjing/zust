@@ -530,6 +530,45 @@ mod tests {
     }
 
     #[test]
+    fn concatenates_string_with_integer_values() -> anyhow::Result<()> {
+        let vm = Vm::with_all()?;
+        vm.import_code(
+            "vm_string_concat_integer",
+            br#"
+            pub fn idx_key(idx: i64) {
+                "" + idx
+            }
+
+            pub fn level_text(level: i64) {
+                "" + level + " level"
+            }
+
+            pub fn gold_text(currency) {
+                "" + currency.gold
+            }
+            "#
+            .to_vec(),
+        )?;
+
+        let compiled = vm.get_fn("vm_string_concat_integer::idx_key", &[Type::I64])?;
+        let idx_key: extern "C" fn(i64) -> *const Dynamic = unsafe { std::mem::transmute(compiled.ptr()) };
+        let result = unsafe { &*idx_key(7) };
+        assert_eq!(result.as_str(), "7");
+
+        let compiled = vm.get_fn("vm_string_concat_integer::level_text", &[Type::I64])?;
+        let level_text: extern "C" fn(i64) -> *const Dynamic = unsafe { std::mem::transmute(compiled.ptr()) };
+        let result = unsafe { &*level_text(12) };
+        assert_eq!(result.as_str(), "12 level");
+
+        let compiled = vm.get_fn("vm_string_concat_integer::gold_text", &[Type::Any])?;
+        let gold_text: extern "C" fn(*const Dynamic) -> *const Dynamic = unsafe { std::mem::transmute(compiled.ptr()) };
+        let currency = dynamic::map!("gold"=> 345i64);
+        let result = unsafe { &*gold_text(&currency) };
+        assert_eq!(result.as_str(), "345");
+        Ok(())
+    }
+
+    #[test]
     fn dynamic_field_value_participates_in_or_expression() -> anyhow::Result<()> {
         let vm = Vm::with_all()?;
         vm.import_code(

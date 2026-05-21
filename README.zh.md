@@ -2,7 +2,7 @@
 
 Zust 是一个用 Rust 编写的类 Rust 脚本语言和运行时。它保留了 Rust 语法中清晰、结构化的部分，同时去掉借用检查和显式可变性约束，让脚本更短、更动态，也更适合由工具或模型生成、改写。
 
-当前开源版本号为 `0.9.2`，已经接近成熟版本。
+项目已经接近成熟的开源版本。当前 workspace 内各 crate 独立发版：VM crate 为 `0.9.17`，compiler 为 `0.9.6`，parser 为 `0.9.5`，编辑器相关包为 `0.9.2`。
 
 English: [README.md](README.md)
 
@@ -16,6 +16,21 @@ Zust 的设计围绕几个现实目标展开：
 - **脚本编译成本地函数**：`vm` crate 使用 Cranelift 编译 Zust 模块，并把函数指针暴露给宿主 Rust 代码调用。
 - **同一语言，多种执行目标**：仓库包含 JIT 后端、SPIR-V 生成、Metal 源码生成和 Vulkan 执行辅助。
 - **面向 AI，但不绑定应用**：`llm` crate 保留通用模型调用能力；具体应用服务器代码不在本次开源范围内。
+
+## 当前语言状态
+
+仓库内的语法套件已经覆盖了 parser、compiler 和 VM 目前实现的核心语言面：
+
+- 行注释、块注释、转义字符串、原始字符串，以及十进制、十六进制、八进制、二进制数字字面量。
+- 基本类型：`bool`、`string`、8 到 64 位有符号/无符号整数、`f16`、`f32`、`f64`、tuple、动态 list/map、固定数组和面向 GPU 的向量类型。
+- `let` 绑定支持标识符、tuple、list、通配符和带类型标注的模式。
+- `const`、`static`、公开项、函数、泛型函数、结构体、泛型结构体、`impl`、方法和关联调用。
+- 代码块、表达式形式的 `if`/`else`、`for`、`while`、`loop`、`break`、`continue` 和 `return`。
+- 带类型参数并能捕获外部值的闭包。
+- 算术、比较、逻辑、位运算、索引、range、类型转换、赋值和复合赋值表达式。
+- 跨 `.zs` 文件导入；单参数 `import` 会默认补全 `.zs` 后缀。
+
+Zust 的目标不是完整兼容 Rust，而是保留 Rust 的结构感并服务脚本场景：没有借用检查，变量不需要显式 `mut`，宿主模块边界默认使用动态值。
 
 ## 语言说明
 
@@ -32,6 +47,8 @@ pub fn main() {
 }
 ```
 
+函数在没有尾随分号时会返回代码块最后一个表达式。需要提前退出时，可以使用 `return;` 或 `return value;`。
+
 ### 基本值
 
 ```zust
@@ -39,11 +56,44 @@ let i = 42;
 let f = 3.14f32;
 let ok = true;
 let text = "hello";
+let raw = r#"hello "Zust""#;
 let nothing = null;
 
 let list = [1, 2, 3];
 let object = {name: "Zust", version: 0.9};
+let pair = (1i32, 2i32);
+let repeated: [u32; 3] = [0u32; 1 + 2];
 ```
+
+数字字面量可以带显式后缀，例如 `1i32`、`8u64`、`3.14f32`；整数字面量支持 `0x`、`0o` 和 `0b` 前缀。
+
+字符串拼接会在运行时使用动态字符串转换，因此支持 `"" + idx`、`"" + level + "级"`、`"" + map.value` 这类写法。
+
+### 常量和静态值
+
+```zust
+pub const ANSWER: i32 = 42i32;
+pub static DEFAULT_LIMIT: u32 = 1024u32;
+```
+
+### 模式和修改
+
+```zust
+let (left, right) = (3i32, 4i32);
+let [first, second] = [5i32, 6i32];
+let _ = first;
+
+let data = {
+    label: "point",
+    items: [1i32, 2i32, 3i32],
+};
+
+data.items.push(4i32);
+data.items[0] = data.items[1] + 10i32;
+data.extra = second;
+```
+
+变量和字段可以直接重新赋值。语言也支持 `+=`、`-=`、`*=`、`/=`、`%=`、`&=`、`|=`、`^=`、`<<=`、`>>=` 等复合赋值运算符。
 
 ### 控制流
 
@@ -56,6 +106,15 @@ for i in 0..10 {
 }
 
 let label = if list.len() > 0 { "non-empty" } else { "empty" };
+
+let value = 0i32;
+while value < 100 {
+    value += 1;
+}
+
+loop {
+    break;
+}
 ```
 
 ### 结构体和 impl
@@ -74,7 +133,34 @@ impl Point {
 
 pub fn demo() {
     let p = Point{x: 3.0, y: 4.0};
-    p.len2()
+    p.len2() == Point::len2(p)
+}
+```
+
+### 泛型和闭包
+
+```zust
+pub struct Boxed<T> {
+    value: T,
+}
+
+impl Boxed<T> {
+    pub fn get(self: Boxed<T>) {
+        self.value
+    }
+}
+
+fn identity<T>(value: T) {
+    value
+}
+
+pub fn demo_closure() {
+    let base = 10i32;
+    let add_base = |value: i32| {
+        value + base
+    };
+
+    add_base(identity(5i32))
 }
 ```
 
@@ -82,6 +168,7 @@ pub fn demo() {
 
 ```zust
 import("qsort", "qsort.zs");
+import("syntax_imported");
 ```
 
 当调用侧省略导入路径时，编译器默认使用 `.zs` 后缀。
@@ -99,6 +186,18 @@ pub struct BigFloat<N> {
 ```
 
 可以参考 [zusts/bigfloat.zs](zusts/bigfloat.zs) 以及 [zusts/gpu](zusts/gpu) 下的 Mandelbrot 示例。
+
+## 动态值方法
+
+动态值暴露常用成员方法：
+
+- 类型和复制辅助：`is_map()`、`is_list()`、`clone()`、`len()`、`keys()`、`to_string()`。
+- List 和字符串辅助：`push(value)`、`pop()`、`split(sep)`、`slice(start, stop, inclusive)`。
+- Map 和索引辅助：`get_idx(idx)`、`set_idx(idx, value)`、`get_key(key)`、`set_key(key, value)`、`contains(value)`、`starts_with(prefix)`。
+- 迭代辅助：`iter()`、`next()`。
+- 转换辅助：`Any::from_i64`、`Any::to_i64`、`Any::from_bool`、`Any::to_bool`、`Any::from_f64`、`Any::to_f64`。
+
+普通脚本语法，例如 `list[idx]`、`map.key`、`value.len()` 和动态算术，都会降到这些辅助方法上。
 
 ## 最小 VM 示例
 

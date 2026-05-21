@@ -2,7 +2,7 @@
 
 Zust is a Rust-like scripting language and runtime written in Rust. It keeps the familiar shape of Rust syntax, but removes borrow checking and explicit mutability so scripts can stay compact, dynamic, and easy to generate or transform.
 
-The project is close to a mature open-source release. The current crate version is `0.9.2`.
+The project is close to a mature open-source release. The workspace now contains separately versioned crates, with the VM crate at `0.9.17`, the compiler at `0.9.6`, the parser at `0.9.5`, and the editor-facing packages at `0.9.2`.
 
 中文文档: [README.zh.md](README.zh.md)
 
@@ -24,6 +24,21 @@ Zust is designed around a small set of practical goals:
 - **One language, several execution targets**: the repository contains a JIT backend, SPIR-V generation, Metal source generation, and Vulkan execution helpers.
 - **AI-ready but not app-specific**: the `llm` crate contains generic model-call utilities. Application/server code is intentionally outside this open-source snapshot.
 
+## Current Language Status
+
+The checked-in syntax suite covers the core language surface now implemented by the parser, compiler, and VM:
+
+- Line comments, block comments, escaped strings, raw strings, and numeric literals in decimal, hex, octal, and binary forms.
+- Primitive types: `bool`, `string`, signed and unsigned integers from 8 to 64 bits, `f16`, `f32`, `f64`, tuples, dynamic lists/maps, fixed arrays, and GPU-oriented vector types.
+- `let` bindings with identifier, tuple, list, wildcard, and typed patterns.
+- `const`, `static`, public items, functions, generic functions, structs, generic structs, `impl` blocks, methods, and associated calls.
+- Blocks, expression-oriented `if`/`else`, `for`, `while`, `loop`, `break`, `continue`, and `return`.
+- Closures with typed parameters and captured values.
+- Arithmetic, comparison, logical, bitwise, indexing, range, cast, assignment, and compound-assignment expressions.
+- Imports across `.zs` files, including default `.zs` suffix inference for single-argument imports.
+
+The language is intentionally pragmatic rather than fully Rust-compatible: there is no borrow checker, variables do not need explicit `mut`, and dynamic values remain the default boundary type for host modules.
+
 ## Language Overview
 
 Zust source files use the `.zs` suffix.
@@ -39,6 +54,8 @@ pub fn main() {
 }
 ```
 
+Functions return the last expression in a block when there is no trailing semicolon. Use `return;` or `return value;` when an early exit is clearer.
+
 ### Values
 
 ```zust
@@ -46,11 +63,44 @@ let i = 42;
 let f = 3.14f32;
 let ok = true;
 let text = "hello";
+let raw = r#"hello "Zust""#;
 let nothing = null;
 
 let list = [1, 2, 3];
 let object = {name: "Zust", version: 0.9};
+let pair = (1i32, 2i32);
+let repeated: [u32; 3] = [0u32; 1 + 2];
 ```
+
+Numeric literals may use explicit suffixes such as `1i32`, `8u64`, or `3.14f32`, and integer literals support `0x`, `0o`, and `0b` prefixes.
+
+String concatenation uses dynamic string conversion at runtime, so expressions such as `"" + idx`, `"" + level + " level"`, and `"" + map.value` are supported.
+
+### Constants And Statics
+
+```zust
+pub const ANSWER: i32 = 42i32;
+pub static DEFAULT_LIMIT: u32 = 1024u32;
+```
+
+### Patterns And Mutation
+
+```zust
+let (left, right) = (3i32, 4i32);
+let [first, second] = [5i32, 6i32];
+let _ = first;
+
+let data = {
+    label: "point",
+    items: [1i32, 2i32, 3i32],
+};
+
+data.items.push(4i32);
+data.items[0] = data.items[1] + 10i32;
+data.extra = second;
+```
+
+Variables and fields can be reassigned directly. Compound assignment operators such as `+=`, `-=`, `*=`, `/=`, `%=`, `&=`, `|=`, `^=`, `<<=`, and `>>=` are supported.
 
 ### Control Flow
 
@@ -63,6 +113,15 @@ for i in 0..10 {
 }
 
 let label = if list.len() > 0 { "non-empty" } else { "empty" };
+
+let value = 0i32;
+while value < 100 {
+    value += 1;
+}
+
+loop {
+    break;
+}
 ```
 
 ### Structs And Impl Blocks
@@ -81,7 +140,34 @@ impl Point {
 
 pub fn demo() {
     let p = Point{x: 3.0, y: 4.0};
-    p.len2()
+    p.len2() == Point::len2(p)
+}
+```
+
+### Generics And Closures
+
+```zust
+pub struct Boxed<T> {
+    value: T,
+}
+
+impl Boxed<T> {
+    pub fn get(self: Boxed<T>) {
+        self.value
+    }
+}
+
+fn identity<T>(value: T) {
+    value
+}
+
+pub fn demo_closure() {
+    let base = 10i32;
+    let add_base = |value: i32| {
+        value + base
+    };
+
+    add_base(identity(5i32))
 }
 ```
 
@@ -89,6 +175,7 @@ pub fn demo() {
 
 ```zust
 import("qsort", "qsort.zs");
+import("syntax_imported");
 ```
 
 When an import path is omitted by the caller, the compiler defaults to the `.zs` suffix.
@@ -126,7 +213,7 @@ The standard functions are available without a module prefix:
 
 Dynamic values expose common methods:
 
-- Type and copy helpers: `is_map()`, `is_list()`, `clone()`, `len()`, `to_string()`.
+- Type and copy helpers: `is_map()`, `is_list()`, `clone()`, `len()`, `keys()`, `to_string()`.
 - List and string helpers: `push(value)`, `pop()`, `split(sep)`, `slice(start, stop, inclusive)`.
 - Map and index helpers: `get_idx(idx)`, `set_idx(idx, value)`, `get_key(key)`, `set_key(key, value)`, `contains(value)`, `starts_with(prefix)`.
 - Iteration helpers: `iter()`, `next()`.

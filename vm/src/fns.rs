@@ -55,7 +55,10 @@ impl JITRunTime {
         let kind = match &stmt.kind {
             StmtKind::Return(Some(expr)) if ret_ty.is_void() => StmtKind::Return(None),
             StmtKind::Return(Some(expr)) => StmtKind::Return(Some(Expr::new(ExprKind::Typed { value: Box::new(expr.clone()), ty: ret_ty.clone() }, expr.span))),
-            StmtKind::Block(stmts) => StmtKind::Block(stmts.iter().map(|stmt| Self::coerce_returns(stmt, ret_ty)).collect()),
+            StmtKind::Block(stmts) => {
+                let last = stmts.len().saturating_sub(1);
+                StmtKind::Block(stmts.iter().enumerate().map(|(idx, stmt)| if idx == last { Self::coerce_returns(stmt, ret_ty) } else { stmt.clone() }).collect())
+            }
             StmtKind::If { cond, then_body, else_body } => {
                 StmtKind::If { cond: cond.clone(), then_body: Box::new(Self::coerce_returns(then_body, ret_ty)), else_body: else_body.as_ref().map(|body| Box::new(Self::coerce_returns(body, ret_ty))) }
             }

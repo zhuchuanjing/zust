@@ -569,6 +569,72 @@ mod tests {
     }
 
     #[test]
+    fn root_get_accepts_string_concat_with_dynamic_field() -> anyhow::Result<()> {
+        let vm = Vm::with_all()?;
+        vm.import_code(
+            "vm_root_get_dynamic_concat",
+            br#"
+            pub fn get_action(req) {
+                root::get("local/game/panel_actions/" + req.idx)
+            }
+            "#
+            .to_vec(),
+        )?;
+
+        root::add("local/game/panel_actions/7", dynamic::map!("id"=> "action-7").into())?;
+        let compiled = vm.get_fn("vm_root_get_dynamic_concat::get_action", &[Type::Any])?;
+        assert_eq!(compiled.ret_ty(), &Type::Any);
+        let get_action: extern "C" fn(*const Dynamic) -> *const Dynamic = unsafe { std::mem::transmute(compiled.ptr()) };
+        let req = dynamic::map!("idx"=> 7i64);
+        let result = unsafe { &*get_action(&req) };
+
+        assert_eq!(result.get_dynamic("id").map(|value| value.as_str().to_string()), Some("action-7".to_string()));
+        Ok(())
+    }
+
+    #[test]
+    fn root_add_fn_registers_handler_with_dynamic_field_path_concat() -> anyhow::Result<()> {
+        let vm = Vm::with_all()?;
+        vm.import_code(
+            "vm_registered_panel_action",
+            br#"
+            pub fn panel_action(req) {
+                root::get("local/game/panel_actions/" + req.idx)
+            }
+
+            pub fn register() {
+                root::add_fn("local/ui/panel_action", "vm_registered_panel_action::panel_action")
+            }
+            "#
+            .to_vec(),
+        )?;
+
+        let compiled = vm.get_fn("vm_registered_panel_action::register", &[])?;
+        assert_eq!(compiled.ret_ty(), &Type::Bool);
+        let register: extern "C" fn() -> bool = unsafe { std::mem::transmute(compiled.ptr()) };
+        assert!(register());
+        Ok(())
+    }
+
+    #[test]
+    fn root_add_fn_accepts_string_concat_in_registered_handler() -> anyhow::Result<()> {
+        let vm = Vm::with_all()?;
+        vm.import_code(
+            "vm_registered_string_concat",
+            br#"
+            pub fn send_panel(idx: i64) {
+                let idx_key = "" + idx;
+                idx_key
+            }
+            "#
+            .to_vec(),
+        )?;
+
+        assert!(vm.get_fn_ptr("vm_registered_string_concat::send_panel", &[Type::Any]).is_ok());
+        Ok(())
+    }
+
+    #[test]
     fn dynamic_field_value_participates_in_or_expression() -> anyhow::Result<()> {
         let vm = Vm::with_all()?;
         vm.import_code(

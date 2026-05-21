@@ -652,7 +652,7 @@ impl JITRunTime {
                 }
             } else {
                 let right = self.eval(ctx, &right)?.get(ctx).unwrap();
-                if right.1.is_any() {
+                if right.1.is_any() || right.1.is_str() {
                     let f = self.get_method(&left.1, "set_key")?;
                     let args = self.adjust_args(ctx, vec![left, right, value.clone()], f.arg_tys()?)?;
                     self.call_for_side_effect(ctx, f, args)?;
@@ -805,8 +805,9 @@ impl JITRunTime {
                             self.call(ctx, self.get_method(&left.1, "slice")?, vec![left.0, start, stop, inclusive]).map(|r| r.into())
                         } else {
                             let right = self.eval(ctx, right)?.get(ctx).ok_or(anyhow!("非Value {:?}", right))?;
-                            if right.1.is_any() {
-                                self.call(ctx, self.get_method(&left.1, "get_key")?, vec![left.0, right.0]).map(|r| r.into())
+                            if right.1.is_any() || right.1.is_str() {
+                                let right = self.convert(ctx, right, Type::Any)?;
+                                self.call(ctx, self.get_method(&left.1, "get_key")?, vec![left.0, right]).map(|r| r.into())
                             } else {
                                 let right = self.convert(ctx, right, Type::I64)?;
                                 self.call(ctx, self.get_method(&left.1, "get_idx")?, vec![left.0, right]).map(|r| r.into())

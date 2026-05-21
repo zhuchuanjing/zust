@@ -812,6 +812,34 @@ mod tests {
     }
 
     #[test]
+    fn map_assignment_accepts_string_concat_key() -> anyhow::Result<()> {
+        let vm = Vm::with_all()?;
+        vm.import_code(
+            "vm_string_concat_map_key",
+            br##"
+            pub fn write_action(action_map, panel_id, action_id, action) {
+                action_map[panel_id + "#" + action_id] = action;
+                action_map[panel_id + "#" + action_id]
+            }
+            "##
+            .to_vec(),
+        )?;
+
+        let compiled = vm.get_fn("vm_string_concat_map_key::write_action", &[Type::Any, Type::Any, Type::Any, Type::Any])?;
+        let write_action: extern "C" fn(*const Dynamic, *const Dynamic, *const Dynamic, *const Dynamic) -> *const Dynamic = unsafe { std::mem::transmute(compiled.ptr()) };
+        let action_map = dynamic::map!();
+        let panel_id: Dynamic = "panel".into();
+        let action_id: Dynamic = "open".into();
+        let action = dynamic::map!("id"=> "open");
+
+        let result = unsafe { &*write_action(&action_map, &panel_id, &action_id, &action) };
+
+        assert_eq!(result.get_dynamic("id").map(|value| value.as_str().to_string()), Some("open".to_string()));
+        assert_eq!(action_map.get_dynamic("panel#open").and_then(|value| value.get_dynamic("id")).map(|value| value.as_str().to_string()), Some("open".to_string()));
+        Ok(())
+    }
+
+    #[test]
     fn dynamic_field_value_participates_in_or_expression() -> anyhow::Result<()> {
         let vm = Vm::with_all()?;
         vm.import_code(

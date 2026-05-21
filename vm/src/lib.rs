@@ -443,6 +443,28 @@ mod tests {
     }
 
     #[test]
+    fn parenthesized_expression_can_call_any_method() -> anyhow::Result<()> {
+        let vm = Vm::with_all()?;
+        vm.import_code(
+            "vm_parenthesized_method_call",
+            br#"
+            pub fn run(value) {
+                (value + 2).to_i64()
+            }
+            "#
+            .to_vec(),
+        )?;
+
+        let compiled = vm.get_fn("vm_parenthesized_method_call::run", &[Type::Any])?;
+        assert_eq!(compiled.ret_ty(), &Type::I64);
+        let run: extern "C" fn(*const Dynamic) -> i64 = unsafe { std::mem::transmute(compiled.ptr()) };
+        let value = Dynamic::from(40i64);
+
+        assert_eq!(run(&value), 42);
+        Ok(())
+    }
+
+    #[test]
     fn compares_concrete_value_with_string_literal_as_string() -> anyhow::Result<()> {
         let vm = Vm::with_all()?;
         vm.import_code(

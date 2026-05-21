@@ -669,10 +669,12 @@ impl Parser {
             if self.get()? == b',' {
                 self.pos += 1;
                 let list = crate::parse_list!(self, vec![e], b')', b',', self.expr_with_min_weight(None, None, 0, true)?.0);
-                Ok((Expr::new(ExprKind::Tuple(list), Span::new(start, self.current_pos())), true))
+                let expr = Expr::new(ExprKind::Tuple(list), Span::new(start, self.current_pos()));
+                Ok((self.postfix_expr(start, expr)?, true))
             } else {
                 self.until(b')')?;
-                Ok((e.with_span(Span::new(start, self.current_pos())), true))
+                let expr = e.with_span(Span::new(start, self.current_pos()));
+                Ok((self.postfix_expr(start, expr)?, true))
             }
         } else if ch == b'!' && self.ahead().map(|a| a != b'=').unwrap_or(true) {
             let start = self.current_pos();

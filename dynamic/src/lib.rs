@@ -1,5 +1,6 @@
 use bytemuck::{AnyBitPattern, NoUninit, cast_slice, cast_slice_mut};
 use smol_str::SmolStr;
+use std::any::Any;
 use std::collections::BTreeMap;
 use std::mem;
 use tinyvec::TinyVec;
@@ -138,6 +139,47 @@ pub enum DynamicErr {
 }
 
 use std::sync::{Arc, RwLock};
+
+#[derive(Clone)]
+pub struct CustomValue {
+    type_name: &'static str,
+    value: Arc<dyn Any + Send + Sync>,
+}
+
+impl CustomValue {
+    pub fn new<T>(value: T) -> Self
+    where
+        T: Any + Send + Sync + 'static,
+    {
+        Self { type_name: std::any::type_name::<T>(), value: Arc::new(value) }
+    }
+
+    pub fn from_arc<T>(value: Arc<T>) -> Self
+    where
+        T: Any + Send + Sync + 'static,
+    {
+        Self { type_name: std::any::type_name::<T>(), value }
+    }
+
+    pub fn as_any(&self) -> &(dyn Any + Send + Sync) {
+        self.value.as_ref()
+    }
+
+    pub fn custom_type_name(&self) -> &'static str {
+        self.type_name
+    }
+
+    fn ptr_eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.value, &other.value)
+    }
+}
+
+impl std::fmt::Debug for CustomValue {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CustomValue").field("type_name", &self.type_name).finish()
+    }
+}
+
 #[derive(Debug, Default, Clone)]
 pub enum Dynamic {
     #[default]
@@ -170,6 +212,7 @@ pub enum Dynamic {
         addr: usize,
         ty: Type,
     },
+    Custom(CustomValue),
     Iter {
         idx: usize,
         keys: Vec<SmolStr>,
@@ -241,6 +284,7 @@ impl PartialEq for Dynamic {
             }
             // Struct - compare addresses and types
             (Self::Struct { addr: a_addr, ty: a_ty }, Self::Struct { addr: b_addr, ty: b_ty }) => a_addr == b_addr && a_ty == b_ty,
+            (Self::Custom(a), Self::Custom(b)) => a.ptr_eq(b),
             _ => false,
         }
     }
@@ -511,6 +555,35 @@ impl ToString for Dynamic {
 
 use anyhow::Result;
 impl Dynamic {
+    pub fn custom<T>(value: T) -> Self
+    where
+        T: Any + Send + Sync + 'static,
+    {
+        Self::Custom(CustomValue::new(value))
+    }
+
+    pub fn custom_arc<T>(value: Arc<T>) -> Self
+    where
+        T: Any + Send + Sync + 'static,
+    {
+        Self::Custom(CustomValue::from_arc(value))
+    }
+
+    pub fn is_custom(&self) -> bool {
+        matches!(self, Self::Custom(_))
+    }
+
+    pub fn custom_type_name(&self) -> Option<&'static str> {
+        if let Self::Custom(value) = self { Some(value.custom_type_name()) } else { None }
+    }
+
+    pub fn as_custom<T>(&self) -> Option<&T>
+    where
+        T: Any + Send + Sync,
+    {
+        if let Self::Custom(value) = self { value.as_any().downcast_ref::<T>() } else { None }
+    }
+
     pub fn deep_clone(&self) -> Self {
         match self {
             Self::Map(m) => {
@@ -949,6 +1022,7 @@ impl Dynamic {
             Self::List(list) => list.read().unwrap().len(),
             Self::Map(obj) => obj.read().unwrap().len(),
             Self::Struct { ty, .. } => ty.len(),
+            Self::Custom(_) => 0,
             _ => 1,
         }
     }
@@ -1007,6 +1081,7 @@ impl Dynamic {
             Self::VecU64(vec) => vec.len(),
             Self::VecF64(vec) => vec.len(),
             Self::Map(obj) => obj.read().unwrap().len(),
+            Self::Custom(_) => 0,
             _ => 0,
         }
     }
@@ -1248,6 +1323,31 @@ impl Dynamic {
             }
         }
         s
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::RwLock;
+
+    #[derive(Debug, PartialEq)]
+    struct CustomCounter {
+        value: i64,
+    }
+
+    #[test]
+    fn custom_values_can_be_downcast_and_shared_by_clone() {
+        let value = Dynamic::custom(RwLock::new(CustomCounter { value: 7 }));
+        assert!(value.is_custom());
+        assert!(value.custom_type_name().is_some());
+
+        let cloned = value.clone();
+        assert_eq!(cloned.as_custom::<RwLock<CustomCounter>>().unwrap().read().unwrap().value, 7);
+
+        cloned.as_custom::<RwLock<CustomCounter>>().unwrap().write().unwrap().value = 9;
+        assert_eq!(value.as_custom::<RwLock<CustomCounter>>().unwrap().read().unwrap().value, 9);
+        assert_eq!(value, cloned);
     }
 }
 

@@ -1,6 +1,6 @@
 [package]
 name = "zust-vm"
-version = "0.9.18"
+version = "0.9.19"
 edition = "2024"
 rust-version = "1.85"
 description = "Cranelift JIT runtime for executing Zust modules."
@@ -18,7 +18,7 @@ ir-disassembly = []
 
 [dependencies]
 log = "0.4.29"
-dynamic = { package = "zust-dynamic", version = "0.9.4", path = "../dynamic" }
+dynamic = { package = "zust-dynamic", version = "0.9.5", path = "../dynamic" }
 parser = { package = "zust-parser", version = "0.9.5", path = "../parser" }
 compiler = { package = "zust-compiler", version = "0.9.6", path = "../compiler" }
 root = { package = "zust-root", version = "0.9.4", path = "../root" }

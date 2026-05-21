@@ -13,7 +13,7 @@ categories = ["compilers"]
 name = "compiler"
 
 [dependencies]
-dynamic = { package = "zust-dynamic", version = "0.9.4", path = "../dynamic" }
+dynamic = { package = "zust-dynamic", version = "0.9.5", path = "../dynamic" }
 parser = { package = "zust-parser", version = "0.9.5", path = "../parser" }
 
 log = "0.4.29"

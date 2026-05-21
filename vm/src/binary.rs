@@ -124,6 +124,15 @@ impl JITRunTime {
                         }
                     }
                 }
+                if vt.1.is_str() {
+                    let (v, _) = self.call(ctx, self.get_method(&Type::Any, "to_i64")?, vec![vt.0])?;
+                    return Ok(match ty.width() {
+                        1 => ctx.builder.ins().ireduce(types::I8, v),
+                        2 => ctx.builder.ins().ireduce(types::I16, v),
+                        4 => ctx.builder.ins().ireduce(types::I32, v),
+                        _ => v,
+                    });
+                }
             } else if ty.is_f32() {
                 if vt.1.is_int() {
                     return Ok(ctx.builder.ins().fcvt_from_sint(types::F32, vt.0));

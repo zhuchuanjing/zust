@@ -569,6 +569,26 @@ mod tests {
     }
 
     #[test]
+    fn coerces_string_concat_to_i64_without_unimplemented_log() -> anyhow::Result<()> {
+        let vm = Vm::with_all()?;
+        vm.import_code(
+            "vm_string_concat_to_i64",
+            br#"
+            pub fn run(idx: i64) {
+                ("" + idx) as i64
+            }
+            "#
+            .to_vec(),
+        )?;
+
+        let compiled = vm.get_fn("vm_string_concat_to_i64::run", &[Type::I64])?;
+        assert_eq!(compiled.ret_ty(), &Type::I64);
+        let run: extern "C" fn(i64) -> i64 = unsafe { std::mem::transmute(compiled.ptr()) };
+        assert_eq!(run(7), 0);
+        Ok(())
+    }
+
+    #[test]
     fn root_get_accepts_string_concat_with_dynamic_field() -> anyhow::Result<()> {
         let vm = Vm::with_all()?;
         vm.import_code(
@@ -631,6 +651,163 @@ mod tests {
         )?;
 
         assert!(vm.get_fn_ptr("vm_registered_string_concat::send_panel", &[Type::Any]).is_ok());
+        Ok(())
+    }
+
+    #[test]
+    fn compiles_public_hotspots_with_string_paths_and_keys() -> anyhow::Result<()> {
+        let vm = Vm::with_all()?;
+        vm.import_code(
+            "vm_public_hotspots",
+            br#"
+            pub fn public_hotspot(action_map_path, panel_id, action_id, hotspot) {
+                {
+                    path: action_map_path,
+                    panel_id: panel_id,
+                    action_id: action_id,
+                    id: hotspot.id
+                }
+            }
+
+            pub fn public_hotspots(idx, panel_id, hotspots) {
+                let idx_key = "" + idx;
+                let action_map_path = "local/game/panel_actions/" + idx_key;
+
+                let existing_action_map = root::get(action_map_path);
+                if !existing_action_map.is_map() {
+                    root::add_map(action_map_path);
+                }
+
+                if hotspots.is_map() {
+                    let public_items = {};
+                    for action_id in hotspots.keys() {
+                        public_items[action_id] = public_hotspot(action_map_path, panel_id, action_id, hotspots[action_id]);
+                    }
+                    return public_items;
+                }
+
+                let public_items = [];
+                let i = 0;
+                while i < hotspots.len() {
+                    let hotspot = hotspots.get_idx(i);
+                    let item = public_hotspot(action_map_path, panel_id, hotspot.id, hotspot);
+                    public_items.push(item);
+                    i = i + 1;
+                }
+
+                public_items
+            }
+            "#
+            .to_vec(),
+        )?;
+
+        assert!(vm.get_fn("vm_public_hotspots::public_hotspots", &[Type::I64, Type::Any, Type::Any]).is_ok());
+        assert!(vm.get_fn("vm_public_hotspots::public_hotspots", &[Type::Any, Type::Any, Type::Any]).is_ok());
+        Ok(())
+    }
+
+    #[test]
+    fn send_panel_calls_public_hotspots_with_dynamic_request() -> anyhow::Result<()> {
+        let vm = Vm::with_all()?;
+        vm.import_code(
+            "vm_send_panel_public_hotspots",
+            br#"
+            pub fn ok(value) {
+                value
+            }
+
+            pub fn panel_from_node(req) {
+                {
+                    panel_id: req.panel_id,
+                    hotspots: req.hotspots
+                }
+            }
+
+            pub fn public_hotspot(action_map_path, panel_id, action_id, hotspot) {
+                {
+                    path: action_map_path,
+                    panel_id: panel_id,
+                    action_id: action_id,
+                    id: hotspot.id
+                }
+            }
+
+            pub fn public_hotspots(idx, panel_id, hotspots) {
+                let idx_key = "" + idx;
+                let action_map_path = "local/game/panel_actions/" + idx_key;
+
+                let existing_action_map = root::get(action_map_path);
+                if !existing_action_map.is_map() {
+                    root::add_map(action_map_path);
+                }
+
+                if hotspots.is_map() {
+                    let public_items = {};
+                    for action_id in hotspots.keys() {
+                        public_items[action_id] = public_hotspot(action_map_path, panel_id, action_id, hotspots[action_id]);
+                    }
+                    return public_items;
+                }
+
+                let public_items = [];
+                let i = 0;
+                while i < hotspots.len() {
+                    let hotspot = hotspots.get_idx(i);
+                    let item = public_hotspot(action_map_path, panel_id, hotspot.id, hotspot);
+                    public_items.push(item);
+                    i = i + 1;
+                }
+
+                public_items
+            }
+
+            pub fn send_panel(req) {
+                let panel = req.panel;
+                if !panel.is_map() {
+                    panel = panel_from_node(req);
+                }
+                if !panel.is_map() {
+                    return ok({
+                        id: 4,
+                        type: "panel_rejected",
+                        reason: "invalid panel"
+                    });
+                }
+                panel.id = 4;
+                panel.idx = req.idx;
+                if !panel.contains("type") {
+                    panel.type = "panel";
+                }
+                if panel.contains("hotspots") {
+                    panel.hotspots = public_hotspots(req.idx, panel.panel_id, panel.hotspots);
+                }
+                root::send_idx("local/ws", req.idx, panel);
+                ok({
+                    id: 4,
+                    type: "panel",
+                    panel_id: panel.panel_id
+                })
+            }
+            "#
+            .to_vec(),
+        )?;
+
+        let compiled = vm.get_fn("vm_send_panel_public_hotspots::send_panel", &[Type::Any])?;
+        assert_eq!(compiled.ret_ty(), &Type::Any);
+        let send_panel: extern "C" fn(*const Dynamic) -> *const Dynamic = unsafe { std::mem::transmute(compiled.ptr()) };
+        let req = dynamic::map!(
+            "idx"=> 7i64,
+            "panel"=> dynamic::map!(
+                "panel_id"=> "main",
+                "hotspots"=> dynamic::map!(
+                    "open"=> dynamic::map!("id"=> "open")
+                )
+            )
+        );
+        let result = unsafe { &*send_panel(&req) };
+
+        assert_eq!(result.get_dynamic("type").map(|value| value.as_str().to_string()), Some("panel".to_string()));
+        assert_eq!(result.get_dynamic("panel_id").map(|value| value.as_str().to_string()), Some("main".to_string()));
         Ok(())
     }
 

@@ -395,6 +395,7 @@ impl Dynamic {
             Self::String(_) => Type::Str,
             Self::Map(_) => Type::Map,
             Self::Struct { ty, .. } => ty.clone(),
+            Self::Custom(_) => Type::Any,
             Self::Null => Type::Void,
             Self::List(items) => {
                 let tys: Vec<Type> = items.read().unwrap().iter().map(|v| v.get_type()).collect();

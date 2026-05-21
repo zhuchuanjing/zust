@@ -5,7 +5,7 @@ edition = "2024"
 publish = false
 
 [dependencies]
-dynamic = { package = "zust-dynamic", version = "0.9.4", path = "../dynamic" }
+dynamic = { package = "zust-dynamic", version = "0.9.5", path = "../dynamic" }
 parser = { package = "zust-parser", version = "0.9.4", path = "../parser" }
 compiler = { package = "zust-compiler", version = "0.9.6", path = "../compiler" }
 root = { package = "zust-root", version = "0.9.2", path = "../root" }

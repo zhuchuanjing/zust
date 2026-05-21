@@ -255,6 +255,11 @@ impl ToJson for Dynamic {
                 });
                 buf.push_str("}\n");
             }
+            Self::Custom(value) => {
+                buf.push_str("{\"@custom\":");
+                value.custom_type_name().to_json(buf);
+                buf.push('}');
+            }
         }
     }
 }

@@ -197,6 +197,11 @@ impl MsgPack for Dynamic {
                     self.get_dynamic(key.as_str()).unwrap_or(Dynamic::Null).encode(buf);
                 }
             }
+            Dynamic::Custom(value) => {
+                buf.push(0x81);
+                "@custom".encode(buf);
+                value.custom_type_name().encode(buf);
+            }
         }
     }
 }

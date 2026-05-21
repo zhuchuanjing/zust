@@ -465,6 +465,38 @@ mod tests {
     }
 
     #[test]
+    fn any_keys_returns_map_keys_and_empty_list_for_other_values() -> anyhow::Result<()> {
+        let vm = Vm::with_all()?;
+        vm.import_code(
+            "vm_any_keys",
+            br#"
+            pub fn map_keys(value) {
+                let keys = value.keys();
+                keys.len() == 2 && keys.contains("alpha") && keys.contains("beta")
+            }
+
+            pub fn non_map_keys(value) {
+                value.keys().len() == 0
+            }
+            "#
+            .to_vec(),
+        )?;
+
+        let compiled = vm.get_fn("vm_any_keys::map_keys", &[Type::Any])?;
+        assert_eq!(compiled.ret_ty(), &Type::Bool);
+        let map_keys: extern "C" fn(*const Dynamic) -> bool = unsafe { std::mem::transmute(compiled.ptr()) };
+        let value = dynamic::map!("alpha"=> 1i64, "beta"=> 2i64);
+        assert!(map_keys(&value));
+
+        let compiled = vm.get_fn("vm_any_keys::non_map_keys", &[Type::Any])?;
+        assert_eq!(compiled.ret_ty(), &Type::Bool);
+        let non_map_keys: extern "C" fn(*const Dynamic) -> bool = unsafe { std::mem::transmute(compiled.ptr()) };
+        let value = Dynamic::from("alpha");
+        assert!(non_map_keys(&value));
+        Ok(())
+    }
+
+    #[test]
     fn compares_concrete_value_with_string_literal_as_string() -> anyhow::Result<()> {
         let vm = Vm::with_all()?;
         vm.import_code(

@@ -85,6 +85,17 @@ extern "C" fn any_len(addr: *const Dynamic) -> i64 {
     if addr.is_null() { 0 } else { unsafe { (&*addr).len() as i64 } }
 }
 
+extern "C" fn any_keys(addr: *const Dynamic) -> *const Dynamic {
+    if addr.is_null() {
+        return Box::into_raw(Box::new(Dynamic::list(Vec::new())));
+    }
+    let keys = match unsafe { &*addr } {
+        Dynamic::Map(map) => map.read().unwrap().keys().map(|key| Dynamic::from(key.as_str())).collect(),
+        _ => Vec::new(),
+    };
+    Box::into_raw(Box::new(Dynamic::list(keys)))
+}
+
 extern "C" fn any_iter(addr: *const Dynamic) -> *const Dynamic {
     if addr.is_null() {
         &Dynamic::Null
@@ -295,12 +306,13 @@ pub const STD: [(&str, &[Type], Type, *const u8); 5] = [
     ("__struct_from_ptr", &[Type::I64, Type::I64], Type::Any, struct_from_ptr as *const u8),
 ];
 
-pub const ANY: [(&str, &[Type], Type, *const u8); 26] = [
+pub const ANY: [(&str, &[Type], Type, *const u8); 27] = [
     ("Any::null", &[], Type::Any, any_null as *const u8),
     ("Any::is_map", &[Type::Any], Type::Bool, any_is_map as *const u8),
     ("Any::is_list", &[Type::Any], Type::Bool, any_is_list as *const u8),
     ("Any::clone", &[Type::Any], Type::Any, any_clone as *const u8),
     ("Any::len", &[Type::Any], Type::I32, any_len as *const u8),
+    ("Any::keys", &[Type::Any], Type::Any, any_keys as *const u8),
     ("Any::split", &[Type::Any, Type::Any], Type::Any, any_split as *const u8),
     ("Any::push", &[Type::Any, Type::Any], Type::Void, any_push as *const u8),
     ("Any::pop", &[Type::Any], Type::Any, any_pop as *const u8),

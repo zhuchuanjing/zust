@@ -137,6 +137,24 @@ pub fn demo() {
 }
 ```
 
+### 带接收者类型提示的方法调用
+
+当编译器能确定接收者类型时，普通方法调用就可以工作：
+
+```zust
+let navmap = NavMap::new("map.svg", "grid.svg");
+let path = navmap.get_path(start, stop, false);
+```
+
+如果值来自动态边界，例如 `root::get`、handler 参数，或者 native `Any`/custom 值，编译期可能只知道它是 `Any`。这种情况下，可以在方法名前加接收者类型提示：
+
+```zust
+let navmap = root::get("local/world/newbie_village/navmap");
+let path = navmap::<NavMap>::get_path(start, stop, false);
+```
+
+这里的 `::<NavMap>::` 只是在告诉编译器去哪里查找 native 方法，不会转换、克隆或修改底层的 `Dynamic` 值。通过 `Dynamic` 携带的 native/custom 对象只适合在本地 VM 进程内使用；JSON 和 MessagePack 不能持久化它们持有的 Rust 进程内状态。
+
 ### 泛型和闭包
 
 ```zust

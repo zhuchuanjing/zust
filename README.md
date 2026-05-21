@@ -144,6 +144,24 @@ pub fn demo() {
 }
 ```
 
+### Typed Receiver Method Calls
+
+When the compiler can infer the receiver type, normal method syntax is enough:
+
+```zust
+let navmap = NavMap::new("map.svg", "grid.svg");
+let path = navmap.get_path(start, stop, false);
+```
+
+Values that cross a dynamic boundary, such as `root::get`, handler arguments, or native `Any`/custom values, may only be known as `Any` at compile time. In that case, add a receiver type hint before the method name:
+
+```zust
+let navmap = root::get("local/world/newbie_village/navmap");
+let path = navmap::<NavMap>::get_path(start, stop, false);
+```
+
+The `::<NavMap>::` part only tells the compiler where to look up the native method. It does not convert, clone, or otherwise change the underlying `Dynamic` value. Native/custom objects carried through `Dynamic` are intended for local VM use; JSON and MessagePack serialization cannot persist their in-process Rust state.
+
 ### Generics And Closures
 
 ```zust

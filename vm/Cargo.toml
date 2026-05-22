@@ -1,6 +1,6 @@
 [package]
 name = "zust-vm"
-version = "0.9.22"
+version = "0.9.23"
 edition = "2024"
 rust-version = "1.85"
 description = "Cranelift JIT runtime for executing Zust modules."
@@ -20,10 +20,10 @@ ir-disassembly = []
 log = "0.4.29"
 dynamic = { package = "zust-dynamic", version = "0.9.5", path = "../dynamic" }
 parser = { package = "zust-parser", version = "0.9.6", path = "../parser" }
-compiler = { package = "zust-compiler", version = "0.9.8", path = "../compiler" }
+compiler = { package = "zust-compiler", version = "0.9.9", path = "../compiler" }
 root = { package = "zust-root", version = "0.9.4", path = "../root" }
 llm = { package = "zust-llm", version = "0.9.4", path = "../llm" }
-vm-spirv = { package = "zust-vm-spirv", version = "0.9.3", path = "../vm-spirv" }
+vm-spirv = { package = "zust-vm-spirv", version = "0.9.4", path = "../vm-spirv" }
 vulkan = { package = "zust-vulkan", version = "0.9.3", path = "../vulkan" }
 
 anyhow = "1.0.102"
@@ -46,7 +46,7 @@ sqlx-mysql = { version = "0.8.6", default-features = false, features = ["any"] }
 sqlx-postgres = { version = "0.8.6", default-features = false, features = ["any"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
-vm-metal = { package = "zust-vm-metal", version = "0.9.4", path = "../vm-metal" }
+vm-metal = { package = "zust-vm-metal", version = "0.9.5", path = "../vm-metal" }
 
 [dev-dependencies]
 num-bigint = "0.4.6"

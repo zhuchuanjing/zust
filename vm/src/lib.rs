@@ -614,6 +614,74 @@ mod tests {
     }
 
     #[test]
+    fn root_contains_string_concat_is_bool_condition() -> anyhow::Result<()> {
+        let vm = Vm::with_all()?;
+        vm.import_code(
+            "vm_root_contains_condition",
+            br#"
+            pub fn exists(user_id) {
+                if root::contains("redis/user/" + user_id) {
+                    return 1;
+                }
+                0
+            }
+            "#
+            .to_vec(),
+        )?;
+
+        assert_eq!(vm.infer("root::contains", &[Type::Any])?, Type::Bool);
+        let compiled = vm.get_fn("vm_root_contains_condition::exists", &[Type::Any])?;
+        assert_eq!(compiled.ret_ty(), &Type::I32);
+        Ok(())
+    }
+
+    #[test]
+    fn semicolon_tail_call_makes_function_void() -> anyhow::Result<()> {
+        let vm = Vm::with_all()?;
+        vm.import_code(
+            "vm_semicolon_tail_void",
+            br#"
+            pub fn send_role_select(idx, account_id, selected_slot) {
+                root::send("local/ui/send_dialog", {
+                    idx: idx,
+                    account_id: account_id,
+                    selected_slot: selected_slot
+                });
+            }
+            "#
+            .to_vec(),
+        )?;
+
+        let compiled = vm.get_fn("vm_semicolon_tail_void::send_role_select", &[Type::Any, Type::Any, Type::Any])?;
+        assert_eq!(compiled.ret_ty(), &Type::Void);
+        Ok(())
+    }
+
+    #[test]
+    fn bare_return_conflicts_with_non_void_return() -> anyhow::Result<()> {
+        let vm = Vm::with_all()?;
+        vm.import_code(
+            "vm_bare_return_conflict",
+            br#"
+            pub fn run(flag) {
+                if flag {
+                    return;
+                }
+                1
+            }
+            "#
+            .to_vec(),
+        )?;
+
+        let err = match vm.get_fn("vm_bare_return_conflict::run", &[Type::Bool]) {
+            Ok(_) => panic!("expected mismatched return types to fail"),
+            Err(err) => err,
+        };
+        assert!(format!("{err:#}").contains("返回类型不一致"));
+        Ok(())
+    }
+
+    #[test]
     fn root_get_accepts_string_concat_with_dynamic_field() -> anyhow::Result<()> {
         let vm = Vm::with_all()?;
         vm.import_code(

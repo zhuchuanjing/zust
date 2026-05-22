@@ -278,6 +278,9 @@ impl SymbolTable {
     }
 
     pub fn get_id(&self, name: &str) -> Result<u32> {
+        if let Some(idx) = self.symbols.get_index_of(name) {
+            return Ok(idx as u32);
+        }
         if let Some(id) = self.roots.iter().rev().find_map(|r| self.modules.get(r).and_then(|m| m.get(name))) {
             return Ok(*id);
         }
@@ -300,6 +303,9 @@ impl SymbolTable {
     }
 
     pub fn add_global(&mut self, name: SmolStr, s: Symbol) -> u32 {
+        if let Some(idx) = self.symbols.get_index_of(name.as_str()) {
+            return idx as u32;
+        }
         if let Some((mod_name, symbol_name)) = name.as_str().split_once("::") {
             if let Some(m) = self.modules.get_mut(mod_name) {
                 if let Some(&id) = m.get(symbol_name) {

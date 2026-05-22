@@ -5,7 +5,7 @@ edition = "2024"
 publish = false
 
 [dependencies]
-compiler = { package = "zust-compiler", version = "0.9.7", path = "../compiler" }
+compiler = { package = "zust-compiler", version = "0.9.9", path = "../compiler" }
 dynamic = { package = "zust-dynamic", version = "0.9.5", path = "../dynamic" }
 parser = { package = "zust-parser", version = "0.9.6", path = "../parser" }
 dashmap = "7.0.0-rc2"

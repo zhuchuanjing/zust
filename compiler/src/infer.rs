@@ -4,48 +4,61 @@ use dynamic::{Dynamic, Type};
 use parser::{BinaryOp, Expr, ExprKind, PatternKind, Span, Stmt, StmtKind};
 
 impl Compiler {
-    fn merge_return_type(left: Option<Type>, right: Type) -> Type {
+    fn merge_return_type(span: Span, left: Option<Type>, right: Type) -> Result<Type> {
         match left {
-            Some(left) if left == right => left,
-            Some(left) => left + right,
-            None => right,
+            Some(left) if left == right => Ok(left),
+            Some(left) if left.is_void() || right.is_void() => Err(Self::semantic_error(span, format!("返回类型不一致: {:?} 和 {:?}", left, right))),
+            Some(left) => Ok(left + right),
+            None => Ok(right),
         }
     }
 
     fn infer_return_type(&mut self, stmt: &Stmt) -> Result<Option<Type>> {
+        self.infer_returns(stmt, true).map(|(ty, _)| ty)
+    }
+
+    fn infer_returns(&mut self, stmt: &Stmt, tail: bool) -> Result<(Option<Type>, bool)> {
         match &stmt.kind {
-            StmtKind::Return(Some(expr)) => Ok(Some(self.infer_expr(expr)?)),
-            StmtKind::Return(None) => Ok(Some(Type::Void)),
+            StmtKind::Return(Some(expr)) => Ok((Some(self.infer_expr(expr)?), true)),
+            StmtKind::Return(None) => Ok((Some(Type::Void), true)),
             StmtKind::Block(stmts) => {
                 let mut ret = None;
-                for stmt in stmts {
-                    if let Some(ty) = self.infer_return_type(stmt)? {
-                        ret = Some(Self::merge_return_type(ret, ty));
+                for (idx, stmt) in stmts.iter().enumerate() {
+                    let (ty, always_returns) = self.infer_returns(stmt, tail && idx == stmts.len().saturating_sub(1))?;
+                    if let Some(ty) = ty {
+                        ret = Some(Self::merge_return_type(stmt.span, ret, ty)?);
+                    }
+                    if always_returns {
+                        return Ok((ret, true));
                     }
                 }
-                Ok(ret)
+                Ok((ret, false))
             }
             StmtKind::If { cond, then_body, else_body } => {
                 let cond_ty = self.infer_expr(cond)?;
                 if cond_ty != Type::Bool {
-                    return Err(Self::semantic_error(cond.span, "条件表达式必须是布尔类型"));
+                    return Err(Self::semantic_error(cond.span, format!("条件表达式必须是布尔类型，实际是 {:?}", cond_ty)));
                 }
-                let mut ret = self.infer_return_type(then_body)?;
-                if let Some(body) = else_body {
-                    if let Some(ty) = self.infer_return_type(body)? {
-                        ret = Some(Self::merge_return_type(ret, ty));
+                let (mut ret, then_returns) = self.infer_returns(then_body, tail)?;
+                let else_returns = if let Some(body) = else_body {
+                    let (else_ty, else_returns) = self.infer_returns(body, tail)?;
+                    if let Some(ty) = else_ty {
+                        ret = Some(Self::merge_return_type(body.span, ret, ty)?);
                     }
-                }
-                Ok(ret)
+                    else_returns
+                } else {
+                    false
+                };
+                Ok((ret, then_returns && else_returns))
             }
             StmtKind::While { cond, body } => {
                 let cond_ty = self.infer_expr(cond)?;
                 if cond_ty != Type::Bool {
-                    return Err(Self::semantic_error(cond.span, "条件表达式必须是布尔类型"));
+                    return Err(Self::semantic_error(cond.span, format!("条件表达式必须是布尔类型，实际是 {:?}", cond_ty)));
                 }
-                self.infer_return_type(body)
+                self.infer_returns(body, false).map(|(ty, _)| (ty, false))
             }
-            StmtKind::Loop(body) => self.infer_return_type(body),
+            StmtKind::Loop(body) => self.infer_returns(body, false),
             StmtKind::For { pat, range, body } => {
                 if let PatternKind::Var { idx, .. } = &pat.kind {
                     let ty = self.infer_expr(range)?;
@@ -59,19 +72,19 @@ impl Compiler {
                         }
                     }
                 }
-                self.infer_return_type(body)
+                self.infer_returns(body, false).map(|(ty, _)| (ty, false))
             }
             StmtKind::Let { .. } => {
                 self.infer_stmt(stmt)?;
-                Ok(None)
+                Ok((None, false))
             }
             StmtKind::Expr(expr, close) => {
                 let ty = self.infer_expr(expr)?;
-                Ok(if *close { None } else { Some(ty) })
+                Ok(if *close || !tail { (None, false) } else { (Some(ty), true) })
             }
             _ => {
                 self.infer_stmt(stmt)?;
-                Ok(None)
+                Ok((None, false))
             }
         }
     }
@@ -368,7 +381,7 @@ impl Compiler {
             StmtKind::While { cond, body } => {
                 let cond_ty = self.infer_expr(cond)?;
                 if cond_ty != Type::Bool {
-                    return Err(Self::semantic_error(cond.span, "条件表达式必须是布尔类型"));
+                    return Err(Self::semantic_error(cond.span, format!("条件表达式必须是布尔类型，实际是 {:?}", cond_ty)));
                 }
                 self.infer_stmt(body)
             }

@@ -587,11 +587,11 @@ impl Dynamic {
     pub fn deep_clone(&self) -> Self {
         match self {
             Self::Map(m) => {
-                let m = m.read().unwrap().iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+                let m = m.read().unwrap().iter().map(|(k, v)| (k.clone(), v.deep_clone())).collect();
                 Self::map(m)
             }
             Self::List(l) => {
-                let l = l.read().unwrap().iter().map(|item| item.clone()).collect();
+                let l = l.read().unwrap().iter().map(|item| item.deep_clone()).collect();
                 Self::list(l)
             }
             Self::Struct { addr, ty } => Self::Struct { addr: *addr, ty: ty.clone() },
@@ -1348,6 +1348,23 @@ mod tests {
         cloned.as_custom::<RwLock<CustomCounter>>().unwrap().write().unwrap().value = 9;
         assert_eq!(value.as_custom::<RwLock<CustomCounter>>().unwrap().read().unwrap().value, 9);
         assert_eq!(value, cloned);
+    }
+
+    #[test]
+    fn deep_clone_recursively_copies_maps_and_lists() {
+        let nested = Dynamic::map(Default::default());
+        nested.insert("score", 1);
+
+        let value = Dynamic::map(Default::default());
+        value.insert("nested", nested.clone());
+        value.insert("items", Dynamic::list(vec![nested.clone()]));
+
+        let cloned = value.deep_clone();
+        cloned.get_dynamic("nested").unwrap().insert("score", 2);
+        cloned.get_dynamic("items").unwrap().get_idx(0).unwrap().insert("score", 3);
+
+        assert_eq!(value.get_dynamic("nested").unwrap().get_dynamic("score").and_then(|v| v.as_int()), Some(1));
+        assert_eq!(value.get_dynamic("items").unwrap().get_idx(0).unwrap().get_dynamic("score").and_then(|v| v.as_int()), Some(1));
     }
 }
 

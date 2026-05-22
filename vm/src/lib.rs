@@ -1398,6 +1398,17 @@ mod tests {
                     points: user.points
                 }
             }
+
+            pub fn clone_then_mutate(arg) {
+                let user = {
+                    profile: {
+                        points: 20
+                    }
+                };
+                let copied = user.clone();
+                copied.profile.points = 13;
+                user
+            }
             "#
             .to_vec(),
         )?;
@@ -1413,6 +1424,12 @@ mod tests {
         let mut json = String::new();
         result.to_json(&mut json);
         assert!(json.contains("\"points\": 13"));
+
+        let clone_then_mutate = vm.get_fn("vm_root_clone_bridge::clone_then_mutate", &[Type::Any])?;
+        let clone_then_mutate: extern "C" fn(*const Dynamic) -> *const Dynamic = unsafe { std::mem::transmute(clone_then_mutate.ptr()) };
+        let result = clone_then_mutate(&arg);
+        let result = unsafe { &*result };
+        assert_eq!(result.get_dynamic("profile").unwrap().get_dynamic("points").and_then(|value| value.as_int()), Some(20));
         Ok(())
     }
 

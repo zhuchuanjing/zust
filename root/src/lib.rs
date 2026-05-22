@@ -104,10 +104,10 @@ impl Into<Object> for Dynamic {
 impl Object {
     pub fn value(&self) -> Dynamic {
         match self {
-            Self::Value(v) => v.clone(),
-            Self::Task(_, info) => info.clone(),
-            Self::ThreadTask(_, info) => info.clone(),
-            Self::Tx(_, info) => info.clone(),
+            Self::Value(v) => v.deep_clone(),
+            Self::Task(_, info) => info.deep_clone(),
+            Self::ThreadTask(_, info) => info.deep_clone(),
+            Self::Tx(_, info) => info.deep_clone(),
             _ => Dynamic::Null,
         }
     }
@@ -680,5 +680,22 @@ mod tests {
 
         assert_eq!(take_dynamic_expire(&mut value), None);
         assert!(!value.contains("@expire"));
+    }
+
+    #[test]
+    fn root_get_returns_independent_dynamic_values() {
+        let path = format!("local/test/root_get_clone/{}", uuid::Uuid::new_v4());
+        let nested = dynamic::map!("score"=> 1);
+        let value = dynamic::map!("nested"=> nested.clone(), "items"=> Dynamic::list(vec![nested]));
+
+        add_value(&path, value).unwrap();
+
+        let first = get(&path).unwrap();
+        first.get_dynamic("nested").unwrap().insert("score", 2);
+        first.get_dynamic("items").unwrap().get_idx(0).unwrap().insert("score", 3);
+
+        let second = get(&path).unwrap();
+        assert_eq!(second.get_dynamic("nested").unwrap().get_dynamic("score").and_then(|v| v.as_int()), Some(1));
+        assert_eq!(second.get_dynamic("items").unwrap().get_idx(0).unwrap().get_dynamic("score").and_then(|v| v.as_int()), Some(1));
     }
 }

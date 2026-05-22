@@ -589,6 +589,31 @@ mod tests {
     }
 
     #[test]
+    fn unifies_explicit_return_and_tail_integer_widths() -> anyhow::Result<()> {
+        let vm = Vm::with_all()?;
+        vm.import_code(
+            "vm_return_integer_widths",
+            br#"
+            pub fn selected(flag, slot) {
+                if flag {
+                    return slot;
+                }
+                0
+            }
+            "#
+            .to_vec(),
+        )?;
+
+        let compiled = vm.get_fn("vm_return_integer_widths::selected", &[Type::Bool, Type::I64])?;
+        assert_eq!(compiled.ret_ty(), &Type::I64);
+        let selected: extern "C" fn(bool, i64) -> i64 = unsafe { std::mem::transmute(compiled.ptr()) };
+
+        assert_eq!(selected(true, 7), 7);
+        assert_eq!(selected(false, 7), 0);
+        Ok(())
+    }
+
+    #[test]
     fn root_get_accepts_string_concat_with_dynamic_field() -> anyhow::Result<()> {
         let vm = Vm::with_all()?;
         vm.import_code(

@@ -4,6 +4,78 @@ use dynamic::{Dynamic, Type};
 use parser::{BinaryOp, Expr, ExprKind, PatternKind, Span, Stmt, StmtKind};
 
 impl Compiler {
+    fn merge_return_type(left: Option<Type>, right: Type) -> Type {
+        match left {
+            Some(left) if left == right => left,
+            Some(left) => left + right,
+            None => right,
+        }
+    }
+
+    fn infer_return_type(&mut self, stmt: &Stmt) -> Result<Option<Type>> {
+        match &stmt.kind {
+            StmtKind::Return(Some(expr)) => Ok(Some(self.infer_expr(expr)?)),
+            StmtKind::Return(None) => Ok(Some(Type::Void)),
+            StmtKind::Block(stmts) => {
+                let mut ret = None;
+                for stmt in stmts {
+                    if let Some(ty) = self.infer_return_type(stmt)? {
+                        ret = Some(Self::merge_return_type(ret, ty));
+                    }
+                }
+                Ok(ret)
+            }
+            StmtKind::If { cond, then_body, else_body } => {
+                let cond_ty = self.infer_expr(cond)?;
+                if cond_ty != Type::Bool {
+                    return Err(Self::semantic_error(cond.span, "条件表达式必须是布尔类型"));
+                }
+                let mut ret = self.infer_return_type(then_body)?;
+                if let Some(body) = else_body {
+                    if let Some(ty) = self.infer_return_type(body)? {
+                        ret = Some(Self::merge_return_type(ret, ty));
+                    }
+                }
+                Ok(ret)
+            }
+            StmtKind::While { cond, body } => {
+                let cond_ty = self.infer_expr(cond)?;
+                if cond_ty != Type::Bool {
+                    return Err(Self::semantic_error(cond.span, "条件表达式必须是布尔类型"));
+                }
+                self.infer_return_type(body)
+            }
+            StmtKind::Loop(body) => self.infer_return_type(body),
+            StmtKind::For { pat, range, body } => {
+                if let PatternKind::Var { idx, .. } = &pat.kind {
+                    let ty = self.infer_expr(range)?;
+                    self.set_ty(*idx, ty);
+                } else if let PatternKind::Tuple(pats) = &pat.kind {
+                    let ty = self.infer_expr(range)?;
+                    assert!(ty.is_any());
+                    for pat in pats {
+                        if let Some(idx) = pat.var() {
+                            self.set_ty(idx, Type::Any);
+                        }
+                    }
+                }
+                self.infer_return_type(body)
+            }
+            StmtKind::Let { .. } => {
+                self.infer_stmt(stmt)?;
+                Ok(None)
+            }
+            StmtKind::Expr(expr, close) => {
+                let ty = self.infer_expr(expr)?;
+                Ok(if *close { None } else { Some(ty) })
+            }
+            _ => {
+                self.infer_stmt(stmt)?;
+                Ok(None)
+            }
+        }
+    }
+
     pub fn infer_expr(&mut self, expr: &Expr) -> Result<Type> {
         match &expr.kind {
             ExprKind::Value(Dynamic::Null) => Ok(Type::Any),
@@ -215,7 +287,7 @@ impl Compiler {
                     self.tys.push(self.tys[self.top() + *c].clone());
                 }
                 self.frames.push(top);
-                let ret_ty = self.infer_stmt(&body);
+                let ret_ty = self.infer_return_type(&body).map(|ty| ty.unwrap_or(Type::Void));
                 if let Some(top) = self.frames.pop() {
                     self.tys.truncate(top);
                 }

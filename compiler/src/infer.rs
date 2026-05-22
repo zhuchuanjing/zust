@@ -92,7 +92,9 @@ impl Compiler {
     pub fn infer_expr(&mut self, expr: &Expr) -> Result<Type> {
         match &expr.kind {
             ExprKind::Value(Dynamic::Null) => Ok(Type::Any),
+            ExprKind::Value(v) if v.is_list() || v.is_map() => Ok(Type::Any),
             ExprKind::Value(v) => Ok(v.get_type()),
+            ExprKind::Const(_) => Ok(Type::Any),
             ExprKind::Var(idx) => {
                 let idx = self.top() + (*idx as usize);
                 if idx < self.tys.len() { self.symbols.get_type(&self.tys[idx]) } else { Ok(Type::Any) }

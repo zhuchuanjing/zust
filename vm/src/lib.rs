@@ -1237,6 +1237,46 @@ mod tests {
     }
 
     #[test]
+    fn list_return_value_supports_get_idx_method_call() -> anyhow::Result<()> {
+        let vm = Vm::with_all()?;
+        vm.import_code(
+            "vm_returned_list_get_idx",
+            r#"
+            pub fn ids() {
+                [
+                    "base",
+                    "2",
+                    "3"
+                ]
+            }
+
+            pub fn combinations() {
+                let result = [];
+                let values = ids();
+                let idx = 0;
+                while idx < values.len() {
+                    result.push(values.get_idx(idx));
+                    idx = idx + 1;
+                }
+                result
+            }
+            "#
+            .as_bytes()
+            .to_vec(),
+        )?;
+
+        let compiled = vm.get_fn("vm_returned_list_get_idx::combinations", &[])?;
+        assert_eq!(compiled.ret_ty(), &Type::Any);
+        let combinations: extern "C" fn() -> *const Dynamic = unsafe { std::mem::transmute(compiled.ptr()) };
+        let result = unsafe { &*combinations() };
+
+        assert_eq!(result.len(), 3);
+        assert_eq!(result.get_idx(0).map(|value| value.as_str().to_string()), Some("base".to_string()));
+        assert_eq!(result.get_idx(2).map(|value| value.as_str().to_string()), Some("3".to_string()));
+        Ok(())
+    }
+
+    #[test]
     fn repeated_deep_step_literals_import_successfully() -> anyhow::Result<()> {
         fn extra_page_literal(depth: usize) -> String {
             let mut value = "{leaf: \"done\"}".to_string();

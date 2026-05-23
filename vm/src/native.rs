@@ -113,8 +113,7 @@ extern "C" fn any_next(addr: *mut Dynamic) -> *const Dynamic {
 extern "C" fn any_push(addr: *mut Dynamic, value: *mut Dynamic) {
     if !addr.is_null() && !value.is_null() {
         unsafe {
-            let value_box = Box::from_raw(value as *mut Dynamic);
-            (&mut *addr).push(*value_box);
+            (&mut *addr).push((&*value).clone());
         }
     }
 }

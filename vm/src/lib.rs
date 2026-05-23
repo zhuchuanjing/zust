@@ -418,6 +418,36 @@ mod tests {
     }
 
     #[test]
+    fn any_push_does_not_consume_reused_value() -> anyhow::Result<()> {
+        let vm = Vm::with_all()?;
+        vm.import_code(
+            "vm_any_push_reused_value",
+            br#"
+            pub fn run() {
+                let role_id = "acct_role_2";
+                let updated = [];
+                updated.push(role_id);
+                {
+                    ok: true,
+                    user_id: role_id,
+                    first: updated.get_idx(0)
+                }
+            }
+            "#
+            .to_vec(),
+        )?;
+
+        let compiled = vm.get_fn("vm_any_push_reused_value::run", &[])?;
+        assert_eq!(compiled.ret_ty(), &Type::Any);
+        let run: extern "C" fn() -> *const Dynamic = unsafe { std::mem::transmute(compiled.ptr()) };
+        let result = unsafe { &*run() };
+        assert_eq!(result.get_dynamic("ok").and_then(|value| value.as_bool()), Some(true));
+        assert_eq!(result.get_dynamic("user_id").map(|value| value.as_str().to_string()), Some("acct_role_2".to_string()));
+        assert_eq!(result.get_dynamic("first").map(|value| value.as_str().to_string()), Some("acct_role_2".to_string()));
+        Ok(())
+    }
+
+    #[test]
     fn compares_any_with_string_literal_as_string() -> anyhow::Result<()> {
         let vm = Vm::with_all()?;
         vm.import_code(

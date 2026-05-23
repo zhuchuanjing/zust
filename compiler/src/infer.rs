@@ -1,7 +1,7 @@
 use super::{Compiler, Symbol};
 use anyhow::Result;
 use dynamic::{Dynamic, Type};
-use parser::{BinaryOp, Expr, ExprKind, PatternKind, Span, Stmt, StmtKind};
+use parser::{BinaryOp, Expr, ExprKind, PatternKind, Span, Stmt, StmtKind, UnaryOp};
 
 impl Compiler {
     fn merge_return_type(span: Span, left: Option<Type>, right: Type) -> Result<Type> {
@@ -108,7 +108,14 @@ impl Compiler {
                 s => Err(Self::semantic_error(expr.span, format!("符号 {:?} 不是变量、常量、静态变量、结构体", s))),
             },
             ExprKind::AssocId { id, params } => Ok(Type::Symbol { id: *id, params: params.clone() }),
-            ExprKind::Unary { value, .. } => self.infer_expr(value.as_ref()),
+            ExprKind::Unary { op, value } => match op {
+                UnaryOp::Not => {
+                    self.infer_expr(value.as_ref())?;
+                    Ok(Type::Bool)
+                }
+                UnaryOp::Neg => self.infer_expr(value.as_ref()),
+                UnaryOp::Unknow => Ok(Type::Any),
+            },
             ExprKind::Binary { left, op, right } => {
                 let assign_idx = if op.is_assign() { if let ExprKind::Var(idx) = &left.kind { Some(*idx) } else { None } } else { None };
                 let ty = if op.is_logic() {

@@ -36,14 +36,14 @@ extern "C" fn root_send_idx(name: *const Dynamic, idx: i64, value: *const Dynami
     }
 }
 
-extern "C" fn root_add_map(name: *const Dynamic) {
+extern "C" fn root_add_map(name: *const Dynamic) -> bool {
     unsafe {
-        let _ = root::add_map(&(*name).as_str());
+        root::add_map(&(*name).as_str()).is_ok()
     }
 }
-extern "C" fn root_add_list(name: *const Dynamic) {
+extern "C" fn root_add_list(name: *const Dynamic) -> bool {
     unsafe {
-        let _ = root::add_list(&(*name).as_str());
+        root::add_list(&(*name).as_str()).is_ok()
     }
 }
 
@@ -129,8 +129,8 @@ extern "C" fn root_remove_key(name: *const Dynamic, key: *const Dynamic) -> *con
 pub const ROOT_NATIVE: [(&str, &[Type], Type, *const u8); 18] = [
     ("mount", &[Type::Any, Type::Any], Type::Void, root_mount as *const u8),
     ("mount_fjall", &[Type::Any], Type::Void, root_mount_fjall as *const u8),
-    ("add_list", &[Type::Any], Type::Void, root_add_list as *const u8),
-    ("add_map", &[Type::Any], Type::Void, root_add_map as *const u8),
+    ("add_list", &[Type::Any], Type::Bool, root_add_list as *const u8),
+    ("add_map", &[Type::Any], Type::Bool, root_add_map as *const u8),
     ("add", &[Type::Any, Type::Any], Type::I32, root_add as *const u8),
     ("dir", &[Type::Any], Type::Any, root_dir as *const u8),
     ("remove", &[Type::Any], Type::Any, root_remove as *const u8),

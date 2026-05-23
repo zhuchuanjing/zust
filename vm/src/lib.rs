@@ -666,6 +666,49 @@ mod tests {
     }
 
     #[test]
+    fn root_add_map_can_be_printed() -> anyhow::Result<()> {
+        let vm = Vm::with_all()?;
+        assert_eq!(vm.infer("root::add_map", &[Type::Any])?, Type::Bool);
+        vm.import_code(
+            "vm_root_add_map_print",
+            br#"
+            pub fn run() {
+                print(root::add_map("local/world_handlers/til_map_novicevillage"));
+            }
+            "#
+            .to_vec(),
+        )?;
+
+        let compiled = vm.get_fn("vm_root_add_map_print::run", &[])?;
+        assert!(compiled.ret_ty().is_void());
+        Ok(())
+    }
+
+    #[test]
+    fn unary_not_any_loop_var_is_bool_condition() -> anyhow::Result<()> {
+        let vm = Vm::with_all()?;
+        vm.import_code(
+            "vm_unary_not_any_loop_var",
+            br#"
+            pub fn count_missing(flags) {
+                let missing = 0;
+                for exists in flags {
+                    if !exists {
+                        missing = missing + 1;
+                    }
+                }
+                missing
+            }
+            "#
+            .to_vec(),
+        )?;
+
+        let compiled = vm.get_fn("vm_unary_not_any_loop_var::count_missing", &[Type::Any])?;
+        assert_eq!(compiled.ret_ty(), &Type::I32);
+        Ok(())
+    }
+
+    #[test]
     fn semicolon_tail_call_makes_function_void() -> anyhow::Result<()> {
         let vm = Vm::with_all()?;
         vm.import_code(

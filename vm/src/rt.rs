@@ -125,6 +125,23 @@ impl JITRunTime {
         self.compiler.get_field(ty, name).and_then(|(_, ty)| if let Type::Symbol { id, params: _ } = ty { self.get_fn(id, &[]) } else { Err(anyhow!("不是成员函数")) })
     }
 
+    fn is_fn_field_type(&self, ty: &Type) -> bool {
+        match ty {
+            Type::Symbol { id, .. } => self.compiler.symbols.get_symbol(*id).map(|(_, symbol)| symbol.is_fn()).unwrap_or(false),
+            Type::Fn { .. } => true,
+            _ => false,
+        }
+    }
+
+    pub(crate) fn is_opaque_custom_ty(&self, ty: &Type) -> bool {
+        let ty = self.compiler.symbols.get_type(ty).unwrap_or_else(|_| ty.clone());
+        matches!(ty, Type::Struct { fields, .. } if !fields.is_empty() && fields.iter().all(|(_, field_ty)| self.is_fn_field_type(field_ty)))
+    }
+
+    pub(crate) fn is_aggregate_ty(&self, ty: &Type) -> bool {
+        (ty.is_struct() && !self.is_opaque_custom_ty(ty)) || ty.is_array()
+    }
+
     pub fn get_id(&self, name: &str) -> Result<u32> {
         self.compiler.symbols.get_id(name)
     }
@@ -554,7 +571,7 @@ impl JITRunTime {
     }
 
     fn zero_value(&mut self, ctx: &mut BuildContext, ty: &Type) -> Result<(Value, Type)> {
-        if ty.is_struct() || ty.is_array() {
+        if self.is_aggregate_ty(ty) {
             Ok((self.struct_alloc(ctx, ty)?, ty.clone()))
         } else if ty.is_f32() {
             Ok((ctx.builder.ins().f32const(0.0), ty.clone()))
@@ -573,7 +590,7 @@ impl JITRunTime {
             }
             let value_ty = value.get_ty();
             if let Some(ty) = ctx.get_var_ty(*idx) {
-                if ty.is_struct() || ty.is_array() {
+                if self.is_aggregate_ty(&ty) {
                     let dst = ctx.get_var(*idx)?.get(ctx).ok_or(anyhow!("aggregate variable has no value"))?.0;
                     let src = value.get(ctx).ok_or(anyhow!("aggregate assignment has no value"))?;
                     let src = self.convert(ctx, src, ty.clone())?;
@@ -592,7 +609,7 @@ impl JITRunTime {
                 } else {
                     ctx.set_var(*idx, value)?;
                 }
-            } else if value_ty.is_struct() || value_ty.is_array() {
+            } else if self.is_aggregate_ty(&value_ty) {
                 let src = value.get(ctx).ok_or(anyhow!("aggregate initializer has no value"))?;
                 let dst = self.struct_alloc(ctx, &value_ty)?;
                 let src = self.convert(ctx, src, value_ty.clone())?;
@@ -685,14 +702,14 @@ impl JITRunTime {
     }
 
     pub(crate) fn call_fn_with_capture_values(&mut self, ctx: &mut BuildContext, id: u32, generic_args: &[Type], obj: Option<Expr>, params: &Vec<Expr>, capture_values: Option<Vec<(Value, Type)>>) -> Result<LocalVar> {
-        let mut args: Vec<(Value, Type)> = if let Some(obj) = obj { vec![self.eval(ctx, &obj)?.get(ctx).unwrap()] } else { Vec::new() };
+        let fn_name = self.compiler.symbols.get_symbol(id).map(|(name, _)| name.clone())?;
+        let mut args: Vec<(Value, Type)> = if let Some(obj) = obj { vec![self.eval(ctx, &obj)?.get(ctx).ok_or_else(|| anyhow!("函数 {} 的接收者表达式没有值: {:?}", fn_name, obj))?] } else { Vec::new() };
         for p in params {
-            args.push(self.eval(ctx, p)?.get(ctx).unwrap());
+            args.push(self.eval(ctx, p)?.get(ctx).ok_or_else(|| anyhow!("函数 {} 的参数表达式没有值: {:?}", fn_name, p))?);
         }
         if let Some(captures) = &capture_values {
             args.extend(captures.iter().cloned());
         }
-        let fn_name = self.compiler.symbols.get_symbol(id).map(|(name, _)| name.clone())?;
         if fn_name.as_str().ends_with("Vec::swap")
             && let Some((base, vec_ty)) = args.first().cloned()
             && let Some(elem_ty) = Self::vec_elem_ty(&vec_ty)
@@ -843,7 +860,7 @@ impl JITRunTime {
                             }
                             let mut args = vec![left];
                             for p in params {
-                                args.push(self.eval(ctx, p)?.get(ctx).unwrap());
+                                args.push(self.eval(ctx, p)?.get(ctx).ok_or_else(|| anyhow!("动态方法 {:?} 的参数表达式没有值: {:?}", name, p))?);
                             }
                             let (_, method_ty) = self.compiler.get_field(&ty, name.as_str())?;
                             let Type::Symbol { id, .. } = method_ty else {
@@ -888,7 +905,9 @@ impl JITRunTime {
                 } else {
                     return Ok(LocalVar::None);
                 };
-                if let Type::Struct { params: _, fields: _ } = ty {
+                if let Type::Struct { params: _, fields: _ } = ty
+                    && !self.is_opaque_custom_ty(ty)
+                {
                     if &vt.1 == ty {
                         Ok(vt.into())
                     } else if vt.1.is_any() {

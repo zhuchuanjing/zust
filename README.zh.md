@@ -269,6 +269,8 @@ cargo run -p vm --example minimal_vm
 - `gpu::vulkan_run(options)`：加载 SPIR-V、绑定 buffer，并通过 Vulkan dispatch。
 - `gpu::metal_run(options)`：在 macOS 上加载 Metal shader 或从 Zust 编译后 dispatch。
 
+编译 shader 不需要 VM 的执行后端。只有调用 `gpu::vulkan_run` 时才需要打开 `zust-vm` 的 `vulkan` feature；只有调用 `gpu::metal_run` 时才需要打开 `metal` feature。
+
 `options` 是普通动态 map，常用字段包括 `source` 或 `path`、`module`、`fn`、`workgroup_size`、`groups` 和 `args`。运行参数支持标量输入、typed vector buffer，以及用于结构体 ABI 参数的原始 `bytes` buffer。
 
 ## 目录结构

@@ -244,6 +244,8 @@ cargo run -p vulkan --example run_mandel
 
 VM 里也可以用 `gpu::vulkan_run` 做一次性加载和执行。`args` 中的参数顺序必须和 kernel 参数顺序一致：
 
+`gpu::vulkan_run` 是 VM 的可选执行后端，使用它时需要给 `zust-vm` 打开 `vulkan` feature；只编译或检查 SPIR-V shader 不需要这个 feature。
+
 ```zust
 let result = gpu::vulkan_run({
     path: "zusts/gpu/my_kernel.zs",
@@ -287,6 +289,8 @@ cargo run -p vm-metal --example run_mandel
 ```
 
 VM 模块提供对应的 `gpu::metal_compile`、`gpu::metal_check` 和 `gpu::metal_run`。这些函数只在 macOS 上可用；其他平台会返回 `ok: false` 和错误信息。
+
+`gpu::metal_run` 是 VM 的可选执行后端，使用它时需要给 `zust-vm` 打开 `metal` feature；只生成 Metal shader source 不需要 Apple Metal runtime 依赖。
 
 Metal 路线适合 Apple 平台；Vulkan 路线适合具备 Vulkan 驱动和运行时的环境。
 

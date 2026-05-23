@@ -1511,6 +1511,12 @@ mod tests {
         unsafe { &*value }.as_custom::<CounterForTypedReceiver>().map(|counter| counter.value).unwrap_or(-1)
     }
 
+    struct NavMapForFunctionArg;
+
+    extern "C" fn nav_map_for_function_arg_new() -> *const Dynamic {
+        Box::into_raw(Box::new(Dynamic::custom(NavMapForFunctionArg)))
+    }
+
     #[test]
     fn typed_receiver_method_call_dispatches_with_type_hint() -> anyhow::Result<()> {
         let vm = Vm::with_all()?;
@@ -1533,6 +1539,70 @@ mod tests {
         let value = Dynamic::custom(CounterForTypedReceiver { value: 42 });
 
         assert_eq!(run(&value), 42);
+        Ok(())
+    }
+
+    #[test]
+    fn native_custom_object_can_be_passed_to_zs_function() -> anyhow::Result<()> {
+        let vm = Vm::with_all()?;
+        vm.add_empty_type("NavMap")?;
+        vm.add_native_method_ptr("NavMap", "new", &[], Type::Any, nav_map_for_function_arg_new as *const u8)?;
+        vm.import_code(
+            "vm_native_custom_arg",
+            br#"
+            pub fn add_nav_spawns(world, navmap) {
+                navmap
+            }
+
+            pub fn run(world) {
+                let navmap = NavMap::new();
+                let with_spawns = add_nav_spawns(world, navmap);
+                with_spawns
+            }
+            "#
+            .to_vec(),
+        )?;
+
+        let compiled = vm.get_fn("vm_native_custom_arg::run", &[Type::Any])?;
+        assert_eq!(compiled.ret_ty(), &Type::Any);
+        let run: extern "C" fn(*const Dynamic) -> *const Dynamic = unsafe { std::mem::transmute(compiled.ptr()) };
+        let world = Dynamic::Null;
+        let result = run(&world);
+        let result = unsafe { &*result };
+
+        assert!(result.as_custom::<NavMapForFunctionArg>().is_some());
+        Ok(())
+    }
+
+    #[test]
+    fn native_custom_object_typed_local_can_be_passed_to_zs_function() -> anyhow::Result<()> {
+        let vm = Vm::with_all()?;
+        vm.add_empty_type("NavMap")?;
+        let _nav_map_ty = vm.get_symbol("NavMap", Vec::new())?;
+        vm.add_native_method_ptr("NavMap", "new", &[], Type::Any, nav_map_for_function_arg_new as *const u8)?;
+        vm.import_code(
+            "vm_native_custom_typed_arg",
+            br#"
+            pub fn add_nav_spawns(world, navmap) {
+                navmap
+            }
+
+            pub fn run(world) {
+                let navmap: NavMap = NavMap::new();
+                let with_spawns = add_nav_spawns(world, navmap);
+                with_spawns
+            }
+            "#
+            .to_vec(),
+        )?;
+
+        let compiled = vm.get_fn("vm_native_custom_typed_arg::run", &[Type::Any])?;
+        let run: extern "C" fn(*const Dynamic) -> *const Dynamic = unsafe { std::mem::transmute(compiled.ptr()) };
+        let world = Dynamic::Null;
+        let result = run(&world);
+        let result = unsafe { &*result };
+
+        assert!(result.as_custom::<NavMapForFunctionArg>().is_some());
         Ok(())
     }
 }

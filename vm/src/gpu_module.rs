@@ -1,6 +1,7 @@
 use anyhow::{Context, Result, anyhow, bail};
 use dynamic::{Dynamic, Type, map};
 use std::path::Path;
+#[cfg(feature = "vulkan")]
 use vulkano::buffer::Subbuffer;
 
 extern "C" fn spirv_compile(input: *const Dynamic) -> *const Dynamic {
@@ -110,6 +111,7 @@ fn compile_metal_kernel(input: &Dynamic) -> Result<vm_metal::Kernel> {
         .with_context(|| format!("compile Zust {module_name}::{entry} to Metal"))
 }
 
+#[cfg(feature = "vulkan")]
 fn run_vulkan(input: Dynamic) -> Result<Dynamic> {
     let words = spirv_words(&input)?;
     let groups = groups(&input)?;
@@ -122,7 +124,12 @@ fn run_vulkan(input: Dynamic) -> Result<Dynamic> {
     Ok(map!("ok"=> true, "backend"=> "vulkan", "groups"=> Dynamic::from(groups), "outputs"=> Dynamic::list(outputs)))
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(not(feature = "vulkan"))]
+fn run_vulkan(_input: Dynamic) -> Result<Dynamic> {
+    bail!("Vulkan runtime requires the `vulkan` feature")
+}
+
+#[cfg(all(target_os = "macos", feature = "metal"))]
 fn run_metal(input: Dynamic) -> Result<Dynamic> {
     let (source, workgroup_size) = if let Some(source) = input.get_dynamic("metal").or_else(|| input.get_dynamic("shader")) {
         (source.as_str().to_string(), workgroup_size(&input)?)
@@ -140,9 +147,9 @@ fn run_metal(input: Dynamic) -> Result<Dynamic> {
     Ok(map!("ok"=> true, "backend"=> "metal", "groups"=> Dynamic::from(groups), "outputs"=> Dynamic::list(outputs)))
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(all(target_os = "macos", feature = "metal")))]
 fn run_metal(_input: Dynamic) -> Result<Dynamic> {
-    bail!("Metal runtime is only available on macOS")
+    bail!("Metal runtime is only available on macOS with the `metal` feature enabled")
 }
 
 fn source_bytes(input: &Dynamic) -> Result<Vec<u8>> {
@@ -189,6 +196,7 @@ fn workgroup_size(input: &Dynamic) -> Result<[u32; 3]> {
     vec3(input.get_dynamic("workgroup_size").or_else(|| input.get_dynamic("workgroup")).unwrap_or_else(|| Dynamic::from([1u32, 1, 1])), "workgroup_size")
 }
 
+#[cfg(any(feature = "vulkan", all(target_os = "macos", feature = "metal")))]
 fn groups(input: &Dynamic) -> Result<[u32; 3]> {
     vec3(input.get_dynamic("groups").or_else(|| input.get_dynamic("dispatch")).unwrap_or_else(|| Dynamic::from([1u32, 1, 1])), "groups")
 }
@@ -218,6 +226,7 @@ fn type_list(types: &[Type]) -> Dynamic {
     Dynamic::list(types.iter().map(|ty| Dynamic::from(format!("{ty:?}"))).collect())
 }
 
+#[cfg(feature = "vulkan")]
 fn spirv_words(input: &Dynamic) -> Result<Vec<u32>> {
     if let Some(words) = input.get_dynamic("words").or_else(|| input.get_dynamic("spirv")) {
         if let Some(words) = dynamic_words(&words)? {
@@ -235,6 +244,7 @@ fn spirv_words(input: &Dynamic) -> Result<Vec<u32>> {
     Ok(compile_spirv_kernel(input)?.spirv.into_words())
 }
 
+#[cfg(feature = "vulkan")]
 fn dynamic_words(value: &Dynamic) -> Result<Option<Vec<u32>>> {
     if let Some(bytes) = value.as_bytes() {
         return words_from_bytes(bytes).map(Some);
@@ -245,6 +255,7 @@ fn dynamic_words(value: &Dynamic) -> Result<Option<Vec<u32>>> {
     Ok(None)
 }
 
+#[cfg(feature = "vulkan")]
 fn words_from_bytes(bytes: &[u8]) -> Result<Vec<u32>> {
     if !bytes.len().is_multiple_of(4) {
         bail!("SPIR-V byte length must be divisible by 4");
@@ -252,6 +263,7 @@ fn words_from_bytes(bytes: &[u8]) -> Result<Vec<u32>> {
     Ok(bytes.chunks_exact(4).map(|chunk| u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]])).collect())
 }
 
+#[cfg(feature = "vulkan")]
 fn add_vulkan_args(args: &mut vulkan::Args, specs: Dynamic) -> Result<Vec<VulkanReadback>> {
     let mut readbacks = Vec::new();
     for idx in 0..specs.len() {
@@ -330,6 +342,7 @@ fn add_vulkan_args(args: &mut vulkan::Args, specs: Dynamic) -> Result<Vec<Vulkan
     Ok(readbacks)
 }
 
+#[cfg(feature = "vulkan")]
 fn add_vulkan_vec<T>(args: &mut vulkan::Args, spec: &Dynamic) -> Result<Subbuffer<[T]>>
 where
     T: vulkano::buffer::BufferContents + Default + Clone + TryFrom<Dynamic>,
@@ -339,6 +352,7 @@ where
     args.add_vec(values.len() as u64, |dst| dst.clone_from_slice(&values))
 }
 
+#[cfg(feature = "vulkan")]
 enum VulkanReadback {
     U32(usize, Subbuffer<[u32]>),
     I32(usize, Subbuffer<[i32]>),
@@ -349,6 +363,7 @@ enum VulkanReadback {
     Bytes(usize, Subbuffer<[u8]>),
 }
 
+#[cfg(feature = "vulkan")]
 impl VulkanReadback {
     fn read(self) -> Result<Dynamic> {
         match self {
@@ -363,7 +378,7 @@ impl VulkanReadback {
     }
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(all(target_os = "macos", feature = "metal"))]
 fn add_metal_args(args: &mut vm_metal::Args, specs: Dynamic) -> Result<Vec<MetalReadback>> {
     let mut readbacks = Vec::new();
     for idx in 0..specs.len() {
@@ -442,7 +457,7 @@ fn add_metal_args(args: &mut vm_metal::Args, specs: Dynamic) -> Result<Vec<Metal
     Ok(readbacks)
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(all(target_os = "macos", feature = "metal"))]
 fn add_metal_vec<T>(args: &mut vm_metal::Args, spec: &Dynamic) -> Result<vm_metal::MetalBuffer<T>>
 where
     T: bytemuck::NoUninit + bytemuck::AnyBitPattern + Default + Clone + TryFrom<Dynamic>,
@@ -452,7 +467,7 @@ where
     args.add_vec(values.len() as u64, |dst| dst.clone_from_slice(&values))
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(all(target_os = "macos", feature = "metal"))]
 enum MetalReadback {
     U32(usize, vm_metal::MetalBuffer<u32>),
     I32(usize, vm_metal::MetalBuffer<i32>),
@@ -463,7 +478,7 @@ enum MetalReadback {
     Bytes(usize, vm_metal::MetalBuffer<u8>),
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(all(target_os = "macos", feature = "metal"))]
 impl MetalReadback {
     fn read(self) -> Result<Dynamic> {
         match self {
@@ -478,6 +493,7 @@ impl MetalReadback {
     }
 }
 
+#[cfg(any(feature = "vulkan", all(target_os = "macos", feature = "metal")))]
 fn arg_type(spec: &Dynamic) -> Result<String> {
     let ty = spec.get_dynamic("type").or_else(|| spec.get_dynamic("ty")).ok_or_else(|| anyhow!("GPU arg missing `type`"))?;
     let ty = ty.as_str().to_ascii_lowercase();
@@ -487,6 +503,7 @@ fn arg_type(spec: &Dynamic) -> Result<String> {
     Ok(ty)
 }
 
+#[cfg(any(feature = "vulkan", all(target_os = "macos", feature = "metal")))]
 fn arg_kind(spec: &Dynamic) -> String {
     spec.get_dynamic("kind")
         .map(|kind| kind.as_str().to_ascii_lowercase())
@@ -494,6 +511,7 @@ fn arg_kind(spec: &Dynamic) -> String {
         .unwrap_or_else(|| if spec.get_dynamic("value").is_some() && spec.get_dynamic("values").is_none() { "input".to_string() } else { "vec".to_string() })
 }
 
+#[cfg(any(feature = "vulkan", all(target_os = "macos", feature = "metal")))]
 fn scalar<T>(spec: &Dynamic) -> Result<T>
 where
     T: TryFrom<Dynamic>,
@@ -503,6 +521,7 @@ where
     T::try_from(value).map_err(|err| anyhow!("invalid scalar GPU arg: {err:?}"))
 }
 
+#[cfg(any(feature = "vulkan", all(target_os = "macos", feature = "metal")))]
 fn values_or_zeros<T>(spec: &Dynamic) -> Result<Vec<T>>
 where
     T: Default + Clone + TryFrom<Dynamic>,
@@ -522,6 +541,7 @@ where
     Ok(vec![T::default(); len as usize])
 }
 
+#[cfg(any(feature = "vulkan", all(target_os = "macos", feature = "metal")))]
 fn bytes_or_zeros(spec: &Dynamic) -> Result<Vec<u8>> {
     if let Some(values) = spec.get_dynamic("values").or_else(|| spec.get_dynamic("value")) {
         if let Some(bytes) = values.as_bytes() {
@@ -549,6 +569,7 @@ where
         .collect()
 }
 
+#[cfg(any(feature = "vulkan", all(target_os = "macos", feature = "metal")))]
 fn readback(index: usize, ty: &str, values: Dynamic) -> Dynamic {
     map!("index"=> index as i64, "type"=> ty, "values"=> values)
 }

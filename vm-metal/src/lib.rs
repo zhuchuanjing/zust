@@ -4,6 +4,7 @@ mod context;
 mod expr;
 mod externs;
 mod ops;
+#[cfg(feature = "runtime")]
 mod runtime;
 mod state;
 mod stmt;
@@ -12,6 +13,7 @@ mod types;
 mod util;
 
 pub use api::{BuiltinFn, ExternalFn, ExternalFnKind, Kernel, MetalModule, metal_builtins};
+#[cfg(feature = "runtime")]
 pub use runtime::{Args, MetalBuffer, MetalBufferWrite, Runtime};
 
 use anyhow::{Context, Result, bail};

@@ -65,7 +65,9 @@ impl JITRunTime {
         };
         if vt.1 != ty {
             if ty.is_any() {
-                if vt.1.is_struct() {
+                if self.is_opaque_custom_ty(&vt.1) {
+                    return Ok(vt.0);
+                } else if vt.1.is_struct() {
                     return self.struct_to_dynamic(ctx, vt.0, &vt.1);
                 } else if vt.1.is_bool() {
                     return self.call(ctx, self.get_method(&Type::Any, "from_bool")?, vec![vt.0]).map(|(v, _)| v);

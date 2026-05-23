@@ -372,6 +372,8 @@ let changed = db::transaction("local/db", [
 - `gpu::vulkan_run(options)` loads SPIR-V, binds buffers, dispatches Vulkan, and returns requested readbacks.
 - `gpu::metal_run(options)` loads Metal source or compiles Zust source, dispatches Metal on macOS, and returns requested readbacks.
 
+Shader compilation stays available without VM runtime execution backends. Enable `zust-vm` feature `vulkan` only when calling `gpu::vulkan_run`, and feature `metal` only when calling `gpu::metal_run`.
+
 The compile options are dynamic maps with `source` or `path`, `module`, `fn`, `workgroup_size`, and optional `generic_args`. Runtime argument descriptors support scalar inputs, typed vector buffers, and raw `bytes` buffers for ABI-packed structs.
 
 ### `spirv`

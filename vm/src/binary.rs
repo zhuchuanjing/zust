@@ -345,6 +345,7 @@ impl JITRunTime {
 
     pub(crate) fn binary_imm<'a>(&mut self, ctx: &'a mut BuildContext, left: (Value, Type), op: BinaryOp, right: Dynamic) -> Result<(Value, Type)> {
         let ty = left.1.clone() + right.get_type();
+        let bool_imm = || right.as_bool().map(|value| if value { 1 } else { 0 });
         if ty.is_str() && op.is_add() {
             let left = self.convert(ctx, left, Type::Any)?;
             let right_vt = ctx.get_const(&right).or_else(|_| {
@@ -420,11 +421,15 @@ impl JITRunTime {
             BinaryOp::Eq => {
                 if ty.is_int() | ty.is_uint() {
                     return Ok((ctx.builder.ins().icmp_imm(IntCC::Equal, left, right.as_int().unwrap()), Type::Bool));
+                } else if ty.is_bool() {
+                    return Ok((ctx.builder.ins().icmp_imm(IntCC::Equal, left, bool_imm().unwrap()), Type::Bool));
                 }
             }
             BinaryOp::Ne => {
                 if ty.is_int() | ty.is_uint() {
                     return Ok((ctx.builder.ins().icmp_imm(IntCC::NotEqual, left, right.as_int().unwrap()), Type::Bool));
+                } else if ty.is_bool() {
+                    return Ok((ctx.builder.ins().icmp_imm(IntCC::NotEqual, left, bool_imm().unwrap()), Type::Bool));
                 }
             }
             BinaryOp::Le => {

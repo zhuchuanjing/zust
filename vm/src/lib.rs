@@ -473,6 +473,71 @@ mod tests {
     }
 
     #[test]
+    fn compares_bool_values_and_bool_literals() -> anyhow::Result<()> {
+        let vm = Vm::with_all()?;
+        vm.import_code(
+            "vm_bool_compare",
+            br#"
+            pub fn eq_true(value: bool) {
+                value == true
+            }
+
+            pub fn ne_false(value: bool) {
+                value != false
+            }
+
+            pub fn literal_left(value: bool) {
+                true == value
+            }
+
+            pub fn eq_pair(left: bool, right: bool) {
+                left == right
+            }
+
+            pub fn logic_pair(left: bool, right: bool) {
+                (left && right) || (left == true && right != false)
+            }
+            "#
+            .to_vec(),
+        )?;
+
+        let compiled = vm.get_fn("vm_bool_compare::eq_true", &[Type::Bool])?;
+        assert_eq!(compiled.ret_ty(), &Type::Bool);
+        let eq_true: extern "C" fn(bool) -> bool = unsafe { std::mem::transmute(compiled.ptr()) };
+        assert!(eq_true(true));
+        assert!(!eq_true(false));
+
+        let compiled = vm.get_fn("vm_bool_compare::ne_false", &[Type::Bool])?;
+        assert_eq!(compiled.ret_ty(), &Type::Bool);
+        let ne_false: extern "C" fn(bool) -> bool = unsafe { std::mem::transmute(compiled.ptr()) };
+        assert!(ne_false(true));
+        assert!(!ne_false(false));
+
+        let compiled = vm.get_fn("vm_bool_compare::literal_left", &[Type::Bool])?;
+        assert_eq!(compiled.ret_ty(), &Type::Bool);
+        let literal_left: extern "C" fn(bool) -> bool = unsafe { std::mem::transmute(compiled.ptr()) };
+        assert!(literal_left(true));
+        assert!(!literal_left(false));
+
+        let compiled = vm.get_fn("vm_bool_compare::eq_pair", &[Type::Bool, Type::Bool])?;
+        assert_eq!(compiled.ret_ty(), &Type::Bool);
+        let eq_pair: extern "C" fn(bool, bool) -> bool = unsafe { std::mem::transmute(compiled.ptr()) };
+        assert!(eq_pair(true, true));
+        assert!(eq_pair(false, false));
+        assert!(!eq_pair(true, false));
+        assert!(!eq_pair(false, true));
+
+        let compiled = vm.get_fn("vm_bool_compare::logic_pair", &[Type::Bool, Type::Bool])?;
+        assert_eq!(compiled.ret_ty(), &Type::Bool);
+        let logic_pair: extern "C" fn(bool, bool) -> bool = unsafe { std::mem::transmute(compiled.ptr()) };
+        assert!(logic_pair(true, true));
+        assert!(!logic_pair(true, false));
+        assert!(!logic_pair(false, true));
+        assert!(!logic_pair(false, false));
+        Ok(())
+    }
+
+    #[test]
     fn parenthesized_expression_can_call_any_method() -> anyhow::Result<()> {
         let vm = Vm::with_all()?;
         vm.import_code(

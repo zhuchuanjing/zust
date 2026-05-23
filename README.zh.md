@@ -213,7 +213,7 @@ pub struct BigFloat<N> {
 
 - 类型和复制辅助：`is_map()`、`is_list()`、`clone()`、`len()`、`keys()`、`to_string()`。
 - List 和字符串辅助：`push(value)`、`pop()`、`split(sep)`、`slice(start, stop, inclusive)`。
-- Map 和索引辅助：`get_idx(idx)`、`set_idx(idx, value)`、`get_key(key)`、`set_key(key, value)`、`contains(value)`、`starts_with(prefix)`。
+- Map 和索引辅助：`get_idx(idx)`、`set_idx(idx, value)`、`get_key(key)`、`set_key(key, value)`、`del_key(key)`、`contains(value)`、`starts_with(prefix)`。
 - 迭代辅助：`iter()`、`next()`。
 - 转换辅助：`Any::from_i64`、`Any::to_i64`、`Any::from_bool`、`Any::to_bool`、`Any::from_f64`、`Any::to_f64`。
 

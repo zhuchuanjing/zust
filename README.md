@@ -235,7 +235,7 @@ Dynamic values expose common methods:
 
 - Type and copy helpers: `is_map()`, `is_list()`, `clone()`, `len()`, `keys()`, `to_string()`.
 - List and string helpers: `push(value)`, `pop()`, `split(sep)`, `slice(start, stop, inclusive)`.
-- Map and index helpers: `get_idx(idx)`, `set_idx(idx, value)`, `get_key(key)`, `set_key(key, value)`, `contains(value)`, `starts_with(prefix)`.
+- Map and index helpers: `get_idx(idx)`, `set_idx(idx, value)`, `get_key(key)`, `set_key(key, value)`, `del_key(key)`, `contains(value)`, `starts_with(prefix)`.
 - Iteration helpers: `iter()`, `next()`.
 - Conversion helpers: `Any::from_i64`, `Any::to_i64`, `Any::from_bool`, `Any::to_bool`, `Any::from_f64`, `Any::to_f64`.
 

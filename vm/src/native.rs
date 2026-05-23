@@ -137,6 +137,16 @@ extern "C" fn get_key(addr: *const Dynamic, key: *const Dynamic) -> *const Dynam
     }
 }
 
+extern "C" fn del_key(addr: *const Dynamic, key: *const Dynamic) -> *const Dynamic {
+    if addr.is_null() || key.is_null() {
+        &Dynamic::Null
+    } else {
+        let key: &str = unsafe { &*key }.as_str();
+        let v = unsafe { Box::new((*addr).remove_dynamic(key).unwrap_or(Dynamic::Null)) };
+        Box::into_raw(v)
+    }
+}
+
 extern "C" fn contains(addr: *const Dynamic, key: *const Dynamic) -> bool {
     if addr.is_null() || key.is_null() {
         false
@@ -305,7 +315,7 @@ pub const STD: [(&str, &[Type], Type, *const u8); 5] = [
     ("__struct_from_ptr", &[Type::I64, Type::I64], Type::Any, struct_from_ptr as *const u8),
 ];
 
-pub const ANY: [(&str, &[Type], Type, *const u8); 27] = [
+pub const ANY: [(&str, &[Type], Type, *const u8); 28] = [
     ("Any::null", &[], Type::Any, any_null as *const u8),
     ("Any::is_map", &[Type::Any], Type::Bool, any_is_map as *const u8),
     ("Any::is_list", &[Type::Any], Type::Bool, any_is_list as *const u8),
@@ -320,6 +330,7 @@ pub const ANY: [(&str, &[Type], Type, *const u8); 27] = [
     ("Any::contains", &[Type::Any, Type::Any], Type::Bool, contains as *const u8),
     ("Any::starts_with", &[Type::Any, Type::Any], Type::Bool, starts_with as *const u8),
     ("Any::get_key", &[Type::Any, Type::Any], Type::Any, get_key as *const u8),
+    ("Any::del_key", &[Type::Any, Type::Any], Type::Any, del_key as *const u8),
     ("Any::set_idx", &[Type::Any, Type::I64, Type::Any], Type::Void, set_idx as *const u8),
     ("Any::set_key", &[Type::Any, Type::Any, Type::Any], Type::Void, set_key as *const u8),
     ("Any::from_i64", &[Type::I64], Type::Any, any_from_i64 as *const u8),

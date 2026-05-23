@@ -1063,6 +1063,35 @@ mod tests {
     }
 
     #[test]
+    fn map_del_key_removes_string_key_and_returns_removed_value() -> anyhow::Result<()> {
+        let vm = Vm::with_all()?;
+        vm.import_code(
+            "vm_del_key_string_key",
+            br##"
+            pub fn remove_action(action_map, panel_id, action_id) {
+                let action_key = panel_id + "#" + action_id;
+                let removed = action_map.del_key(action_key);
+                [removed, action_map.get_key(action_key)]
+            }
+            "##
+            .to_vec(),
+        )?;
+
+        let compiled = vm.get_fn("vm_del_key_string_key::remove_action", &[Type::Any, Type::Any, Type::Any])?;
+        let remove_action: extern "C" fn(*const Dynamic, *const Dynamic, *const Dynamic) -> *const Dynamic = unsafe { std::mem::transmute(compiled.ptr()) };
+        let action_map = dynamic::map!("panel#open"=> dynamic::map!("id"=> "open"));
+        let panel_id: Dynamic = "panel".into();
+        let action_id: Dynamic = "open".into();
+
+        let result = unsafe { &*remove_action(&action_map, &panel_id, &action_id) };
+
+        assert_eq!(result.get_idx(0).and_then(|value| value.get_dynamic("id")).map(|value| value.as_str().to_string()), Some("open".to_string()));
+        assert!(result.get_idx(1).is_some_and(|value| value.is_null()));
+        assert!(action_map.get_dynamic("panel#open").is_none());
+        Ok(())
+    }
+
+    #[test]
     fn dynamic_field_value_participates_in_or_expression() -> anyhow::Result<()> {
         let vm = Vm::with_all()?;
         vm.import_code(

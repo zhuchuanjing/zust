@@ -1,11 +1,12 @@
 [package]
 name = "zust-dynamic"
-version = "0.9.6"
+version = "0.9.7"
 edition = "2024"
 rust-version = "1.85"
 description = "Dynamic value model for Zust scripts, with JSON, MessagePack, bytes, and typed vectors."
 license = "Apache-2.0"
 repository = "https://github.com/zhuchuanjing/zust"
+homepage = "https://www.zust-lang.com"
 keywords = ["zust", "dynamic", "runtime"]
 categories = ["compilers", "data-structures"]
 

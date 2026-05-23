@@ -2,7 +2,9 @@
 
 Zust 是一个用 Rust 编写的类 Rust 脚本语言和运行时。它保留了 Rust 语法中清晰、结构化的部分，同时去掉借用检查和显式可变性约束，让脚本更短、更动态，也更适合由工具或模型生成、改写。
 
-项目已经接近成熟的开源版本。当前 workspace 内各 crate 独立发版：VM crate 为 `0.9.23`，dynamic crate 为 `0.9.5`，compiler 为 `0.9.9`，parser 为 `0.9.6`，编辑器相关包为 `0.9.2`。
+官方网站：[www.zust-lang.com](https://www.zust-lang.com)
+
+项目已经接近成熟的开源版本。当前 workspace 内各 crate 独立发版：VM crate 为 `0.9.26`，dynamic crate 为 `0.9.7`，compiler 为 `0.9.11`，parser 为 `0.9.7`，编辑器相关包为 `0.9.2`。
 
 English: [README.md](README.md)
 

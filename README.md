@@ -2,7 +2,9 @@
 
 Zust is a Rust-like scripting language and runtime written in Rust. It keeps the familiar shape of Rust syntax, but removes borrow checking and explicit mutability so scripts can stay compact, dynamic, and easy to generate or transform.
 
-The project is close to a mature open-source release. The workspace now contains separately versioned crates, with the VM crate at `0.9.23`, the dynamic crate at `0.9.5`, the compiler at `0.9.9`, the parser at `0.9.6`, and the editor-facing packages at `0.9.2`.
+Official website: [www.zust-lang.com](https://www.zust-lang.com)
+
+The project is close to a mature open-source release. The workspace now contains separately versioned crates, with the VM crate at `0.9.26`, the dynamic crate at `0.9.7`, the compiler at `0.9.11`, the parser at `0.9.7`, and the editor-facing packages at `0.9.2`.
 
 中文文档: [README.zh.md](README.zh.md)
 

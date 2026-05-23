@@ -1,11 +1,12 @@
 [package]
 name = "zust-vm-spirv"
-version = "0.9.4"
+version = "0.9.5"
 edition = "2024"
 rust-version = "1.85"
 description = "SPIR-V code generation backend for the Zust scripting language."
 license = "Apache-2.0"
 repository = "https://github.com/zhuchuanjing/zust"
+homepage = "https://www.zust-lang.com"
 keywords = ["zust", "spirv", "gpu"]
 categories = ["compilers", "rendering"]
 
@@ -14,9 +15,9 @@ name = "vm_spirv"
 
 [dependencies]
 anyhow = "1.0.102"
-compiler = { package = "zust-compiler", version = "0.9.9", path = "../compiler" }
-dynamic = { package = "zust-dynamic", version = "0.9.5", path = "../dynamic" }
-parser = { package = "zust-parser", version = "0.9.6", path = "../parser" }
+compiler = { package = "zust-compiler", version = "0.9.11", path = "../compiler" }
+dynamic = { package = "zust-dynamic", version = "0.9.7", path = "../dynamic" }
+parser = { package = "zust-parser", version = "0.9.7", path = "../parser" }
 rspirv = "0.13.0"
 smol_str = "0.3.6"
 spirv = "0.4.0"

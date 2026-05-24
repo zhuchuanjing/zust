@@ -221,6 +221,7 @@ pub fn test_structs_impls_generics_and_assoc() {
 
 pub fn test_closures_arrays_ranges_and_calls() {
     let base = 10i32;
+    let action = "a";
     let add_base = |value: i32| {
         value + base
     };
@@ -241,6 +242,8 @@ pub fn test_closures_arrays_ranges_and_calls() {
         && repeated[0] == 0u32
         && repeated[1] == 0u32
         && repeated[2] == 0u32
+        && ["a", "b"].contains(action)
+        && [base, base + 1i32].len() == 2
         && open_sum == 3i32
         && closed_sum == 6i32
 }

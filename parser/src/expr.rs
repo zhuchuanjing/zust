@@ -519,23 +519,28 @@ impl Parser {
     pub fn base_expr(&mut self, allow_struct_literal: bool) -> Result<Expr> {
         let start = self.current_pos();
         if let Ok(s) = self.text() {
-            Ok(Expr::new(ExprKind::Value(Dynamic::String(s)), self.span_from(start)))
+            let expr = Expr::new(ExprKind::Value(Dynamic::String(s)), self.span_from(start));
+            self.postfix_expr(start, expr)
         } else if let Ok(n) = self.number() {
-            if let Ok(ty) = self.get_type() {
+            let expr = if let Ok(ty) = self.get_type() {
                 if ty.is_native() {
-                    Ok(Expr::new(ExprKind::Typed { value: Box::new(Expr::new(ExprKind::Value(n), self.span_from(start))), ty }, self.span_from(start)))
+                    Expr::new(ExprKind::Typed { value: Box::new(Expr::new(ExprKind::Value(n), self.span_from(start))), ty }, self.span_from(start))
                 } else {
-                    Err(ExprErr::NotNative(SmolStr::from(format!("{:?}", ty))).into())
+                    return Err(ExprErr::NotNative(SmolStr::from(format!("{:?}", ty))).into());
                 }
             } else {
-                Ok(Expr::new(ExprKind::Value(n), self.span_from(start)))
-            }
+                Expr::new(ExprKind::Value(n), self.span_from(start))
+            };
+            self.postfix_expr(start, expr)
         } else if self.keyword("true").is_ok() {
-            Ok(Expr::new(ExprKind::Value(Dynamic::Bool(true)), self.span_from(start)))
+            let expr = Expr::new(ExprKind::Value(Dynamic::Bool(true)), self.span_from(start));
+            self.postfix_expr(start, expr)
         } else if self.keyword("false").is_ok() {
-            Ok(Expr::new(ExprKind::Value(Dynamic::Bool(false)), self.span_from(start)))
+            let expr = Expr::new(ExprKind::Value(Dynamic::Bool(false)), self.span_from(start));
+            self.postfix_expr(start, expr)
         } else if self.keyword("null").is_ok() {
-            Ok(Expr::new(ExprKind::Value(Dynamic::Null), self.span_from(start)))
+            let expr = Expr::new(ExprKind::Value(Dynamic::Null), self.span_from(start));
+            self.postfix_expr(start, expr)
         } else if let Ok(ident) = self.ident() {
             self.whitespace()?;
             let save_pos = self.pos;
@@ -703,44 +708,52 @@ impl Parser {
             Ok((Expr::new(ExprKind::Unary { op: UnaryOp::Neg, value: Box::new(value) }, Span::new(start, self.current_pos())), false))
         } else if ch == b'[' {
             if let Ok(expr) = try_parse!(self, self.static_dynamic_literal_expr()) {
-                return Ok((expr, false));
-            }
-            let start = self.current_pos();
-            self.pos += 1;
-            self.whitespace()?;
-            if self.take(b']').is_ok() {
-                Ok((Expr::new(ExprKind::List(Vec::new()), Span::new(start, self.current_pos())), false))
+                Ok((self.postfix_expr(start, expr)?, false))
             } else {
-                let first = self.expr_with_min_weight(None, None, 0, true)?.0;
+                let start = self.current_pos();
+                self.pos += 1;
                 self.whitespace()?;
-                if self.take(b';').is_ok() {
-                    let len = self.get_type_param()?;
-                    self.until(b']')?;
-                    Ok((Expr::new(ExprKind::Repeat { value: Box::new(first), len }, Span::new(start, self.current_pos())), false))
+                if self.take(b']').is_ok() {
+                    let expr = Expr::new(ExprKind::List(Vec::new()), Span::new(start, self.current_pos()));
+                    Ok((self.postfix_expr(start, expr)?, false))
                 } else {
-                    let mut items = vec![first];
-                    while self.take(b',').is_ok() {
-                        self.whitespace()?;
-                        if self.take(b']').is_ok() {
-                            return Ok((Expr::new(ExprKind::List(items), Span::new(start, self.current_pos())), false));
+                    let first = self.expr_with_min_weight(None, None, 0, true)?.0;
+                    self.whitespace()?;
+                    if self.take(b';').is_ok() {
+                        let len = self.get_type_param()?;
+                        self.until(b']')?;
+                        let expr = Expr::new(ExprKind::Repeat { value: Box::new(first), len }, Span::new(start, self.current_pos()));
+                        Ok((self.postfix_expr(start, expr)?, false))
+                    } else {
+                        let mut items = vec![first];
+                        let mut closed = false;
+                        while self.take(b',').is_ok() {
+                            self.whitespace()?;
+                            if self.take(b']').is_ok() {
+                                closed = true;
+                                break;
+                            }
+                            items.push(self.expr_with_min_weight(None, None, 0, true)?.0);
+                            self.whitespace()?;
                         }
-                        items.push(self.expr_with_min_weight(None, None, 0, true)?.0);
-                        self.whitespace()?;
+                        if !closed {
+                            self.until(b']')?;
+                        }
+                        let expr = Expr::new(ExprKind::List(items), Span::new(start, self.current_pos()));
+                        Ok((self.postfix_expr(start, expr)?, false))
                     }
-                    self.until(b']')?;
-                    Ok((Expr::new(ExprKind::List(items), Span::new(start, self.current_pos())), false))
                 }
             }
         } else if ch == b'{'
             && (left.is_none() || left_op.is_some())
             && let Ok(expr) = try_parse!(self, self.static_dynamic_literal_expr())
         {
-            Ok((expr, false))
+            Ok((self.postfix_expr(start, expr)?, false))
         } else if ch == b'{'
             && (left.is_none() || left_op.is_some())
             && let Ok(dict) = try_parse!(self, self.dict())
         {
-            Ok((dict, false))
+            Ok((self.postfix_expr(start, dict)?, false))
         } else if (left.is_none() || left_op.is_some()) && self.keyword("if").is_ok() {
             let stmt = self.if_block()?;
             Ok((Expr::new(ExprKind::Stmt(Box::new(stmt)), Span::new(start, self.current_pos())), true))

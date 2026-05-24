@@ -1,6 +1,6 @@
 ﻿[package]
 name = "zust-parser"
-version = "0.9.7"
+version = "0.9.8"
 edition = "2024"
 rust-version = "1.85"
 description = "Lexer and parser for the Zust scripting language."

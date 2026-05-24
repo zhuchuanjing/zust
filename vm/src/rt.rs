@@ -28,6 +28,9 @@ pub struct JITRunTime {
     pub consts: Vec<Option<DataId>>,
 }
 
+// TODO(memory): 函数调用期间为 VM 内部临时 Any/struct 分配引入 arena。
+// 临时值进入 arena，返回值 promote 给 Rust 调用方；否则需要完整 drop 插桩，
+// 覆盖表达式丢弃、变量覆盖、函数出口、break/continue/return 等路径。
 pub(crate) struct PendingFn {
     pub name: SmolStr,
     pub symbol_id: u32,

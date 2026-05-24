@@ -2,31 +2,31 @@ use base64::{Engine as _, engine::general_purpose};
 use dynamic::{Dynamic, Type};
 
 extern "C" fn llm_complete(openai: *const Dynamic, value: *const Dynamic) -> *const Dynamic {
-    let openai = unsafe { openai.read() };
-    let value = unsafe { value.read() };
+    let openai = unsafe { (&*openai).clone() };
+    let value = unsafe { (&*value).clone() };
     let result = root::sync_await!(llm::complete(openai, value, None)).unwrap_or(Dynamic::Null);
     Box::into_raw(Box::new(result))
 }
 
 extern "C" fn llm_audio(openai: *const Dynamic, value: *const Dynamic) -> *const Dynamic {
-    let openai = unsafe { openai.read() };
-    let value = unsafe { value.read() };
+    let openai = unsafe { (&*openai).clone() };
+    let value = unsafe { (&*value).clone() };
     let text = root::sync_await!(llm::audio_recognize(openai, value)).ok().unwrap_or(Dynamic::Null);
     Box::into_raw(Box::new(text))
 }
 
 extern "C" fn llm_tts(openai: *const Dynamic, value: *const Dynamic) -> *const Dynamic {
-    let openai = unsafe { openai.read() };
-    let value = unsafe { value.read() };
+    let openai = unsafe { (&*openai).clone() };
+    let value = unsafe { (&*value).clone() };
     let audio = root::sync_await!(llm::tts(openai, value)).ok().unwrap_or(Dynamic::Null);
     Box::into_raw(Box::new(audio))
 }
 
 extern "C" fn llm_deep(openai: *const Dynamic, value: *const Dynamic, notifier: *const Dynamic) -> *const Dynamic {
     //启动一个任务 使用 消息点来接收 中间消息
-    let openai = unsafe { openai.read() };
-    let value = unsafe { value.read() };
-    let notifier = unsafe { notifier.read() };
+    let openai = unsafe { (&*openai).clone() };
+    let value = unsafe { (&*value).clone() };
+    let notifier = unsafe { (&*notifier).clone() };
     let id = root::start_task(value.clone(), || {
         Box::pin(async move {
             let r = llm::complete(openai, value, Some(notifier.clone())).await?;
@@ -66,9 +66,9 @@ async fn store_generated_image(result: &Dynamic, image_name: &str) -> Option<Str
 
 extern "C" fn llm_image(openai: *const Dynamic, value: *const Dynamic, notifier: *const Dynamic) -> *const Dynamic {
     //启动一个任务 使用 消息点来接收 中间消息
-    let openai = unsafe { openai.read() };
-    let value = unsafe { value.read() };
-    let notifier = unsafe { notifier.read() };
+    let openai = unsafe { (&*openai).clone() };
+    let value = unsafe { (&*value).clone() };
+    let notifier = unsafe { (&*notifier).clone() };
     let id = root::start_task(value.clone(), || {
         Box::pin(async move {
             let r = llm::image(openai, value, Some(notifier.clone())).await?;

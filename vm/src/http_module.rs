@@ -7,7 +7,7 @@ extern "C" fn http_request(input: *const Dynamic) -> *const Dynamic {
     if input.is_null() {
         return Box::into_raw(Box::new(Dynamic::Null));
     }
-    let input = unsafe { input.read() };
+    let input = unsafe { (&*input).clone() };
     let result = root::sync_await!(request(input)).unwrap_or(Dynamic::Null);
     Box::into_raw(Box::new(result))
 }
@@ -16,7 +16,7 @@ extern "C" fn http_get(url: *const Dynamic) -> *const Dynamic {
     if url.is_null() {
         return Box::into_raw(Box::new(Dynamic::Null));
     }
-    let url = unsafe { url.read() };
+    let url = unsafe { (&*url).clone() };
     let result = root::sync_await!(request(map!("method"=> "GET", "url"=> url))).unwrap_or(Dynamic::Null);
     Box::into_raw(Box::new(result))
 }
@@ -25,8 +25,8 @@ extern "C" fn http_post(url: *const Dynamic, body: *const Dynamic) -> *const Dyn
     if url.is_null() || body.is_null() {
         return Box::into_raw(Box::new(Dynamic::Null));
     }
-    let url = unsafe { url.read() };
-    let body = unsafe { body.read() };
+    let url = unsafe { (&*url).clone() };
+    let body = unsafe { (&*body).clone() };
     let result = root::sync_await!(request(map!("method"=> "POST", "url"=> url, "body"=> body))).unwrap_or(Dynamic::Null);
     Box::into_raw(Box::new(result))
 }

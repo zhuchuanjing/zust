@@ -55,8 +55,8 @@ extern "C" fn db_create(path: *const Dynamic, fields: *const Dynamic) -> bool {
     if path.is_null() || fields.is_null() {
         return false;
     }
-    let path = unsafe { path.read() };
-    let fields = unsafe { fields.read() };
+    let path = unsafe { (&*path).clone() };
+    let fields = unsafe { (&*fields).clone() };
     match root::sync_await!(create_table(path, fields)) {
         Ok(ok) => ok,
         Err(err) => {
@@ -70,7 +70,7 @@ extern "C" fn db_drop(path: *const Dynamic) -> bool {
     if path.is_null() {
         return false;
     }
-    let path = unsafe { path.read() };
+    let path = unsafe { (&*path).clone() };
     match root::sync_await!(drop_table(path)) {
         Ok(ok) => ok,
         Err(err) => {
@@ -84,9 +84,9 @@ extern "C" fn db_select(path: *const Dynamic, sql: *const Dynamic, data: *const 
     if path.is_null() || sql.is_null() || data.is_null() {
         return Box::into_raw(Box::new(Dynamic::Null));
     }
-    let path = unsafe { path.read() };
-    let sql = unsafe { sql.read() };
-    let data = unsafe { data.read() };
+    let path = unsafe { (&*path).clone() };
+    let sql = unsafe { (&*sql).clone() };
+    let data = unsafe { (&*data).clone() };
     let result = root::sync_await!(select_rows(path, sql, data)).unwrap_or_else(|err| {
         log::error!("db::select failed: {err:?}");
         Dynamic::Null
@@ -98,9 +98,9 @@ extern "C" fn db_exec(path: *const Dynamic, sql: *const Dynamic, data: *const Dy
     if path.is_null() || sql.is_null() || data.is_null() {
         return -1;
     }
-    let path = unsafe { path.read() };
-    let sql = unsafe { sql.read() };
-    let data = unsafe { data.read() };
+    let path = unsafe { (&*path).clone() };
+    let sql = unsafe { (&*sql).clone() };
+    let data = unsafe { (&*data).clone() };
     match root::sync_await!(exec_sql(path, sql, data)) {
         Ok(rows) => rows,
         Err(err) => {
@@ -114,8 +114,8 @@ extern "C" fn db_transaction(path: *const Dynamic, steps: *const Dynamic) -> i64
     if path.is_null() || steps.is_null() {
         return -1;
     }
-    let path = unsafe { path.read() };
-    let steps = unsafe { steps.read() };
+    let path = unsafe { (&*path).clone() };
+    let steps = unsafe { (&*steps).clone() };
     match root::sync_await!(transaction_sql(path, steps)) {
         Ok(rows) => rows,
         Err(err) => {

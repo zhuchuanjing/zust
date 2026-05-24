@@ -98,7 +98,7 @@ extern "C" fn any_keys(addr: *const Dynamic) -> *const Dynamic {
 
 extern "C" fn any_iter(addr: *const Dynamic) -> *const Dynamic {
     if addr.is_null() {
-        &Dynamic::Null
+        any_null()
     } else {
         let v = unsafe { Box::new((*addr).clone().into_iter()) };
         Box::into_raw(v)
@@ -120,7 +120,7 @@ extern "C" fn any_push(addr: *mut Dynamic, value: *mut Dynamic) {
 
 extern "C" fn any_pop(addr: *mut Dynamic) -> *const Dynamic {
     if addr.is_null() {
-        &Dynamic::Null
+        any_null()
     } else {
         let v = unsafe { Box::new((*addr).pop().unwrap_or(Dynamic::Null)) };
         Box::into_raw(v)
@@ -129,7 +129,7 @@ extern "C" fn any_pop(addr: *mut Dynamic) -> *const Dynamic {
 
 extern "C" fn get_key(addr: *const Dynamic, key: *const Dynamic) -> *const Dynamic {
     if addr.is_null() || key.is_null() {
-        &Dynamic::Null
+        any_null()
     } else {
         let key: &str = unsafe { &*key }.as_str();
         let v = unsafe { Box::new((*addr).get_dynamic(key).unwrap_or(Dynamic::Null)) };
@@ -139,7 +139,7 @@ extern "C" fn get_key(addr: *const Dynamic, key: *const Dynamic) -> *const Dynam
 
 extern "C" fn del_key(addr: *const Dynamic, key: *const Dynamic) -> *const Dynamic {
     if addr.is_null() || key.is_null() {
-        &Dynamic::Null
+        any_null()
     } else {
         let key: &str = unsafe { &*key }.as_str();
         let v = unsafe { Box::new((*addr).remove_dynamic(key).unwrap_or(Dynamic::Null)) };
@@ -167,7 +167,7 @@ extern "C" fn starts_with(addr: *const Dynamic, prefix: *const Dynamic) -> bool 
 
 extern "C" fn get_idx(addr: *const Dynamic, idx: i64) -> *const Dynamic {
     if addr.is_null() {
-        &Dynamic::Null
+        any_null()
     } else {
         let v = unsafe { Box::new((*addr).get_idx(idx as usize).unwrap_or(Dynamic::Null)) };
         Box::into_raw(v)
@@ -176,7 +176,7 @@ extern "C" fn get_idx(addr: *const Dynamic, idx: i64) -> *const Dynamic {
 
 extern "C" fn slice(addr: *const Dynamic, start: i64, stop: *const Dynamic, inclusive: bool) -> *const Dynamic {
     if addr.is_null() {
-        return &Dynamic::Null;
+        return any_null();
     }
 
     let value = unsafe { &*addr };
@@ -258,7 +258,7 @@ extern "C" fn any_from_f64(v: f64) -> *const Dynamic {
 
 extern "C" fn any_split(addr: *mut Dynamic, s: *const Dynamic) -> *const Dynamic {
     if addr.is_null() || s.is_null() {
-        return &Dynamic::Null;
+        return any_null();
     }
     let s: &str = unsafe { &*s }.as_str();
     Box::into_raw(Box::new(unsafe { (&*addr).clone() }.split(s)))
@@ -280,10 +280,13 @@ extern "C" fn any_to_string(addr: *const Dynamic) -> *const Dynamic {
 
 extern "C" fn any_binary(left: *const Dynamic, op: i32, right: *const Dynamic) -> *const Dynamic {
     if left.is_null() {
-        return right;
+        if right.is_null() {
+            return any_null();
+        }
+        return Box::into_raw(Box::new(unsafe { (&*right).clone() }));
     }
     if right.is_null() {
-        return left;
+        return Box::into_raw(Box::new(unsafe { (&*left).clone() }));
     }
     let op = BinaryOp::try_from(op).unwrap();
     unsafe {

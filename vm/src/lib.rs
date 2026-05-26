@@ -162,6 +162,9 @@ impl JITRunTime {
     }
 
     pub fn add_std(&mut self) -> Result<()> {
+        if self.compiler.symbols.get_id("std::print").is_ok() {
+            return Ok(());
+        }
         self.add_module("std");
         for (name, arg_tys, ret_ty, fn_ptr) in STD {
             self.add_native_ptr(name, name, arg_tys, ret_ty, fn_ptr)?;
@@ -171,6 +174,9 @@ impl JITRunTime {
     }
 
     pub fn add_any(&mut self) -> Result<()> {
+        if self.compiler.symbols.get_id("Any").is_ok() && self.compiler.symbols.get_id("Any::is_map").is_ok() {
+            return Ok(());
+        }
         for (name, arg_tys, ret_ty, fn_ptr) in ANY {
             let (_, method) = name.split_once("::").ok_or_else(|| anyhow!("非法 Any 方法名 {}", name))?;
             self.add_native_method_ptr("Any", method, arg_tys, ret_ty, fn_ptr)?;
@@ -278,6 +284,8 @@ impl Vm {
             let mut guard = jit.lock().unwrap();
             guard.set_owner(Arc::downgrade(&jit));
             guard.add_memory_runtime().expect("register VM memory runtime");
+            guard.add_std().expect("register VM std runtime");
+            guard.add_any().expect("register VM Any runtime");
         }
         Self { jit }
     }
@@ -447,6 +455,34 @@ mod tests {
         assert_eq!(compiled.ret_ty(), &Type::I64);
         let run: extern "C" fn(i64) -> i64 = unsafe { std::mem::transmute(compiled.ptr()) };
         assert_eq!(run(21), 42);
+        Ok(())
+    }
+
+    #[test]
+    fn vm_new_registers_std_and_any() -> anyhow::Result<()> {
+        let vm = Vm::new();
+        vm.add_std()?;
+        vm.add_any()?;
+        assert_eq!(vm.infer("std::print", &[Type::Any])?, Type::Void);
+
+        vm.import_code(
+            "vm_new_default_any",
+            br#"
+            pub fn has_items(content) {
+                if content.is_map() {
+                    if content.contains("items") {
+                        return content.items.len() > 0;
+                    }
+                }
+                false
+            }
+            "#
+            .to_vec(),
+        )?;
+
+        assert_eq!(vm.infer("vm_new_default_any::has_items", &[Type::Any])?, Type::Bool);
+        let compiled = vm.get_fn("vm_new_default_any::has_items", &[Type::Any])?;
+        assert_eq!(compiled.ret_ty(), &Type::Bool);
         Ok(())
     }
 

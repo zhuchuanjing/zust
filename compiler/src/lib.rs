@@ -27,6 +27,43 @@ fn impl_target_name(target: &Type) -> anyhow::Result<SmolStr> {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::{Compiler, Symbol};
+    use dynamic::Type;
+
+    #[test]
+    fn inferred_function_return_type_is_written_back_to_symbol() -> anyhow::Result<()> {
+        let mut compiler = Compiler::new();
+        compiler.import_code(
+            "compiler_infer_return",
+            br#"
+            pub fn is_alive() {
+                true
+            }
+
+            pub fn can_act() {
+                is_alive() && true && is_alive()
+            }
+            "#
+            .to_vec(),
+        )?;
+
+        let is_alive = compiler.symbols.get_id("compiler_infer_return::is_alive")?;
+        assert_eq!(compiler.infer_fn(is_alive, &[])?, Type::Bool);
+
+        let (_, symbol) = compiler.symbols.get_symbol(is_alive)?;
+        let Symbol::Fn { ty: Type::Fn { ret, .. }, .. } = symbol else {
+            panic!("is_alive should be a function symbol");
+        };
+        assert_eq!(ret.as_ref(), &Type::Bool);
+
+        let can_act = compiler.symbols.get_id("compiler_infer_return::can_act")?;
+        assert_eq!(compiler.infer_fn(can_act, &[])?, Type::Bool);
+        Ok(())
+    }
+}
+
 fn has_unresolved_generic_param(ty: &Type) -> bool {
     match ty {
         Type::Ident { name, params } => {

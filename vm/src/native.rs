@@ -30,6 +30,14 @@ extern "C" fn print(addr: *const Dynamic) {
     }
 }
 
+extern "C" fn log_any(addr: *const Dynamic) {
+    if addr.is_null() {
+        log::info!("{:?}", Dynamic::Null);
+    } else {
+        log::info!("{:?}", unsafe { &*addr });
+    }
+}
+
 extern "C" fn any_is_map(addr: *const Dynamic) -> bool {
     !addr.is_null() && unsafe { (*addr).is_map() }
 }
@@ -288,8 +296,12 @@ extern "C" fn any_logic(left: *const Dynamic, op: i32, right: *const Dynamic) ->
     }
 }
 
-pub const STD: [(&str, &[Type], Type, *const u8); 3] =
-    [("print", &[Type::Any], Type::Void, print as *const u8), ("uuid", &[], Type::Any, uuid as *const u8), ("rand", &[Type::Any, Type::Any], Type::Any, random as *const u8)];
+pub const STD: [(&str, &[Type], Type, *const u8); 4] = [
+    ("print", &[Type::Any], Type::Void, print as *const u8),
+    ("log", &[Type::Any], Type::Void, log_any as *const u8),
+    ("uuid", &[], Type::Any, uuid as *const u8),
+    ("rand", &[Type::Any, Type::Any], Type::Any, random as *const u8),
+];
 
 pub const ANY: [(&str, &[Type], Type, *const u8); 28] = [
     ("Any::null", &[], Type::Any, any_null as *const u8),

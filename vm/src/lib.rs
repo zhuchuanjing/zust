@@ -838,6 +838,27 @@ mod tests {
     }
 
     #[test]
+    fn std_log_accepts_any_and_returns_void() -> anyhow::Result<()> {
+        let vm = Vm::with_all()?;
+        vm.import_code(
+            "vm_std_log",
+            br#"
+            pub fn run(value) {
+                log({ ok: true, value: value });
+            }
+            "#
+            .to_vec(),
+        )?;
+
+        let compiled = vm.get_fn("vm_std_log::run", &[Type::Any])?;
+        assert!(compiled.ret_ty().is_void());
+        let run: extern "C" fn(*const Dynamic) = unsafe { std::mem::transmute(compiled.ptr()) };
+        let value = Dynamic::from(7i64);
+        run(&value);
+        Ok(())
+    }
+
+    #[test]
     fn unary_not_any_loop_var_is_bool_condition() -> anyhow::Result<()> {
         let vm = Vm::with_all()?;
         vm.import_code(

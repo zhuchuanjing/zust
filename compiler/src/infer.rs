@@ -334,6 +334,12 @@ impl Compiler {
                 self.fns.get_mut(&id).map(|f| {
                     f.iter_mut().find(|item| item.0 == generic_args && item.1 == fn_tys).map(|item| item.2 = ret_ty.clone());
                 });
+                if generic_args.is_empty()
+                    && let Some((_, Symbol::Fn { ty: Type::Fn { ret, .. }, .. })) = self.symbols.get_symbol_mut(id)
+                    && ret.is_any()
+                {
+                    *ret = std::rc::Rc::new(ret_ty.clone());
+                }
                 Ok(ret_ty)
             } else {
                 Ok(Type::Any)

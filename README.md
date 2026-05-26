@@ -4,25 +4,25 @@ Zust is a Rust-like scripting language and runtime written in Rust. It keeps the
 
 Official website: [www.zust-lang.com](https://www.zust-lang.com)
 
-The project is close to a mature open-source release. The workspace now contains separately versioned crates, with the VM crate at `0.9.32`, the dynamic crate at `0.9.7`, the compiler at `0.9.12`, the parser at `0.9.8`, and the editor-facing packages at `0.9.2`.
+The project is close to a mature open-source release. The workspace now contains separately versioned crates, with the VM crate at `0.9.35`, the dynamic crate at `0.9.8`, the compiler at `0.9.15`, the parser at `0.9.8`, and the editor-facing packages at `0.9.2`.
 
 中文文档: [README.zh.md](README.zh.md)
 
-## Most Important TODO: VM-Owned Dynamic Memory
+## Recent Runtime Work
 
-The VM currently returns many `Any`/`Dynamic` values across native boundaries as raw heap pointers, for example values produced by `root::get`, map/list indexing, dynamic arithmetic, and native helpers that allocate with `Box::into_raw`. These values are borrowed by the callee, but the VM does not yet have complete drop instrumentation for expression discard, variable overwrite, function exit, `break`/`continue`, or `return` paths.
+The VM-owned temporary memory work is implemented. VM-created `Any`/`Dynamic` values and generated struct storage are routed through a VM memory manager instead of scattered raw heap ownership. Each executing thread has a thread-local arena with function scopes; non-returned temporaries are dropped at scope exit, and returned values are promoted before they escape to Rust callers or ROOT.
 
-This means loops that repeatedly create temporary `Any` values can retain memory even when the corresponding ROOT value is replaced correctly. ROOT replacement drops ROOT-owned values, but it does not reclaim VM temporary raw pointers returned to script variables.
+Long-cycle probes now show stable memory after the first arena expansion. RSS can remain at the allocator high-water mark, especially in thread pools where each worker has its own arena, but repeated VM function calls do not show continuous `Dynamic` growth. This is intended for long-running server processes.
 
-The priority fix is to introduce unified VM ownership for heap `Dynamic` values:
+The current model is still an arena-based temporary owner, not a tracing GC. Values that must outlive a call should cross the boundary as owned `Dynamic` maps, lists, primitives, bytes, custom objects, or ROOT values. Do not persist raw generated struct addresses from temporary VM storage into long-lived containers.
 
-1. Route VM-created `Any` allocations through a single VM allocator instead of scattered `Box::into_raw` calls.
-2. Create a per-call arena or equivalent temporary object owner when entering a VM function.
-3. Register native-returned `Dynamic` pointers in that owner.
-4. Promote the function return value when it must escape to the Rust caller or ROOT.
-5. Drop all non-promoted temporary values at function exit.
+Recent compiler/runtime fixes also include:
 
-Start with a per-call arena before attempting a full tracing GC. A full GC must first define roots across locals, closure captures, returned values, ROOT-owned values, struct fields containing `Dynamic` pointers, and native/custom objects.
+- Top-level `const` composite literals can reference previously declared const/static values, so tables like `const GEM_TABLE = [{ key: GEM_ATK }]` are folded at compile time.
+- Function return inference writes inferred non-generic return types back into the function symbol table.
+- Nested struct parameters returning structs support static field access at the call site.
+- `std::log(value)` records a dynamic value through Rust logging with debug formatting.
+- VM-internal memory and struct helper imports are registered directly by the runtime instead of being exposed through the script symbol table.
 
 ## Additional Documentation
 
@@ -99,7 +99,14 @@ String concatenation uses dynamic string conversion at runtime, so expressions s
 ```zust
 pub const ANSWER: i32 = 42i32;
 pub static DEFAULT_LIMIT: u32 = 1024u32;
+
+pub const GEM_ATK = "atk";
+pub const GEM_TABLE = [
+    {key: GEM_ATK, score: 3i32},
+];
 ```
+
+Top-level `const` composite literals may reference constants and statics that have already been declared in the same module or an imported module.
 
 ### Patterns And Mutation
 
@@ -239,11 +246,10 @@ See [zusts/bigfloat.zs](zusts/bigfloat.zs) and the GPU Mandelbrot examples under
 The standard functions are available without a module prefix:
 
 - `print(value)`: print a dynamic value.
+- `log(value)`: write a dynamic value to Rust logs using debug formatting.
 - `import(module, path)`: import another `.zs` file or a source object stored in `root`.
 - `uuid()`: return a UUID string.
 - `rand(start, stop)`: return a random integer or float between `start` and `stop`.
-
-`std::__struct_alloc` and `std::__struct_from_ptr` are internal helpers used by generated struct code.
 
 ### `Any`
 

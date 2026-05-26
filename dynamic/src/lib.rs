@@ -1409,7 +1409,7 @@ pub use json::{FromJson, ToJson};
 
 mod ops;
 mod types;
-pub use types::{ConstIntOp, Type, call_fn};
+pub use types::{ConstIntOp, Type, call_fn, set_dynamic_return_handler};
 
 #[macro_export]
 macro_rules! list {

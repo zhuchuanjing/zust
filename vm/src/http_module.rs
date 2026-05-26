@@ -1,3 +1,4 @@
+use crate::memory::alloc_dynamic;
 use anyhow::{Result, anyhow};
 use dynamic::{Dynamic, FromJson, ToJson, Type, map};
 use reqwest::header::{CONTENT_TYPE, HeaderName, HeaderValue};
@@ -5,30 +6,30 @@ use std::time::Duration;
 
 extern "C" fn http_request(input: *const Dynamic) -> *const Dynamic {
     if input.is_null() {
-        return Box::into_raw(Box::new(Dynamic::Null));
+        return alloc_dynamic(Dynamic::Null);
     }
     let input = unsafe { (&*input).clone() };
     let result = root::sync_await!(request(input)).unwrap_or(Dynamic::Null);
-    Box::into_raw(Box::new(result))
+    alloc_dynamic(result)
 }
 
 extern "C" fn http_get(url: *const Dynamic) -> *const Dynamic {
     if url.is_null() {
-        return Box::into_raw(Box::new(Dynamic::Null));
+        return alloc_dynamic(Dynamic::Null);
     }
     let url = unsafe { (&*url).clone() };
     let result = root::sync_await!(request(map!("method"=> "GET", "url"=> url))).unwrap_or(Dynamic::Null);
-    Box::into_raw(Box::new(result))
+    alloc_dynamic(result)
 }
 
 extern "C" fn http_post(url: *const Dynamic, body: *const Dynamic) -> *const Dynamic {
     if url.is_null() || body.is_null() {
-        return Box::into_raw(Box::new(Dynamic::Null));
+        return alloc_dynamic(Dynamic::Null);
     }
     let url = unsafe { (&*url).clone() };
     let body = unsafe { (&*body).clone() };
     let result = root::sync_await!(request(map!("method"=> "POST", "url"=> url, "body"=> body))).unwrap_or(Dynamic::Null);
-    Box::into_raw(Box::new(result))
+    alloc_dynamic(result)
 }
 
 async fn request(input: Dynamic) -> Result<Dynamic> {

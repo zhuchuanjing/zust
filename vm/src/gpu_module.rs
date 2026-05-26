@@ -1,3 +1,4 @@
+use crate::memory::alloc_dynamic;
 use anyhow::{Context, Result, anyhow, bail};
 use dynamic::{Dynamic, Type, map};
 use std::path::Path;
@@ -46,7 +47,7 @@ fn dynamic_result(result: Result<Dynamic>) -> *const Dynamic {
         Ok(value) => value,
         Err(err) => map!("ok"=> false, "error"=> format!("{err:#}")),
     };
-    Box::into_raw(Box::new(value))
+    alloc_dynamic(value)
 }
 
 fn compile_spirv_response(input: Dynamic, include_module: bool) -> Result<Dynamic> {

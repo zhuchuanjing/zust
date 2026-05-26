@@ -1,3 +1,4 @@
+use crate::memory::alloc_dynamic;
 use anyhow::{Result, anyhow};
 use dynamic::{Dynamic, Type};
 use smol_str::SmolStr;
@@ -82,7 +83,7 @@ extern "C" fn db_drop(path: *const Dynamic) -> bool {
 
 extern "C" fn db_select(path: *const Dynamic, sql: *const Dynamic, data: *const Dynamic) -> *const Dynamic {
     if path.is_null() || sql.is_null() || data.is_null() {
-        return Box::into_raw(Box::new(Dynamic::Null));
+        return alloc_dynamic(Dynamic::Null);
     }
     let path = unsafe { (&*path).clone() };
     let sql = unsafe { (&*sql).clone() };
@@ -91,7 +92,7 @@ extern "C" fn db_select(path: *const Dynamic, sql: *const Dynamic, data: *const 
         log::error!("db::select failed: {err:?}");
         Dynamic::Null
     });
-    Box::into_raw(Box::new(result))
+    alloc_dynamic(result)
 }
 
 extern "C" fn db_exec(path: *const Dynamic, sql: *const Dynamic, data: *const Dynamic) -> i64 {

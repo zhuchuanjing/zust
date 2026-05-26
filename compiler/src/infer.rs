@@ -239,7 +239,7 @@ impl Compiler {
                     Ok(Type::Any)
                 }
             }
-            ExprKind::Typed { ty, .. } => Ok(ty.clone()),
+            ExprKind::Typed { ty, .. } => self.symbols.get_type(ty),
             ExprKind::Stmt(stmt) => self.infer_stmt(stmt),
             ExprKind::Range { start, stop, .. } => {
                 let start_ty = self.infer_expr(start)?;
@@ -296,7 +296,7 @@ impl Compiler {
                 if let Some(fns) = self.fns.get_mut(&id) {
                     for f in fns.iter() {
                         if f.0 == generic_args && f.1 == fn_tys {
-                            return Ok(f.2.clone());
+                            return self.symbols.get_type(&f.2);
                         }
                     }
                     fns.push((generic_args.to_vec(), fn_tys.clone(), Type::Any));
@@ -314,7 +314,7 @@ impl Compiler {
                     self.tys.truncate(top);
                 }
                 let ret_ty = match ret_ty {
-                    Ok(ret_ty) => ret_ty,
+                    Ok(ret_ty) => self.symbols.get_type(&ret_ty).unwrap_or(ret_ty),
                     Err(err) => {
                         log::error!("infer_fn {} failed: {:?}", name, err);
                         let should_remove = self

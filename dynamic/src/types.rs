@@ -3,6 +3,7 @@ use smol_str::SmolStr;
 
 use anyhow::{Result, anyhow};
 use std::rc::Rc;
+use std::sync::RwLock;
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub enum ConstIntOp {
@@ -411,34 +412,73 @@ impl Dynamic {
     }
 }
 
+type DynamicReturnHandler = unsafe fn(*const Dynamic) -> Box<Dynamic>;
+
+static DYNAMIC_RETURN_HANDLER: RwLock<Option<DynamicReturnHandler>> = RwLock::new(None);
+
+pub fn set_dynamic_return_handler(handler: DynamicReturnHandler) {
+    *DYNAMIC_RETURN_HANDLER.write().unwrap() = Some(handler);
+}
+
+unsafe fn take_dynamic_return(ptr: *const Dynamic) -> Box<Dynamic> {
+    if let Some(handler) = *DYNAMIC_RETURN_HANDLER.read().unwrap() {
+        unsafe { handler(ptr) }
+    } else if ptr.is_null() {
+        Box::new(Dynamic::Null)
+    } else {
+        unsafe { Box::from_raw(ptr as *mut Dynamic) }
+    }
+}
+
 pub fn call_fn(ptr: i64, ret_ty: Type, param: Box<Dynamic>) -> Result<Box<Dynamic>> {
+    let param = Box::into_raw(param);
     match ret_ty {
         Type::Any => {
             let fn_ptr: extern "C" fn(*const Dynamic) -> *mut Dynamic = unsafe { std::mem::transmute(ptr) };
-            let r = fn_ptr(Box::into_raw(param));
-            Ok(unsafe { Box::from_raw(r) })
+            let r = fn_ptr(param);
+            unsafe {
+                drop(Box::from_raw(param));
+            }
+            Ok(unsafe { take_dynamic_return(r) })
         }
         Type::Bool => {
             let fn_ptr: extern "C" fn(*const Dynamic) -> i8 = unsafe { std::mem::transmute(ptr) };
-            let r = fn_ptr(Box::into_raw(param));
+            let r = fn_ptr(param);
+            unsafe {
+                drop(Box::from_raw(param));
+            }
             Ok(Box::new(Dynamic::Bool(r != 0)))
         }
         Type::Void => {
             let fn_ptr: extern "C" fn(*const Dynamic) = unsafe { std::mem::transmute(ptr) };
-            fn_ptr(Box::into_raw(param));
+            fn_ptr(param);
+            unsafe {
+                drop(Box::from_raw(param));
+            }
             Ok(Box::new(Dynamic::Null))
         }
         Type::F32 => {
             let fn_ptr: extern "C" fn(*const Dynamic) -> f32 = unsafe { std::mem::transmute(ptr) };
-            Ok(Box::new(Dynamic::F32(fn_ptr(Box::into_raw(param)))))
+            let r = fn_ptr(param);
+            unsafe {
+                drop(Box::from_raw(param));
+            }
+            Ok(Box::new(Dynamic::F32(r)))
         }
         Type::F64 => {
             let fn_ptr: extern "C" fn(*const Dynamic) -> f64 = unsafe { std::mem::transmute(ptr) };
-            Ok(Box::new(Dynamic::F64(fn_ptr(Box::into_raw(param)))))
+            let r = fn_ptr(param);
+            unsafe {
+                drop(Box::from_raw(param));
+            }
+            Ok(Box::new(Dynamic::F64(r)))
         }
         _ => {
             let fn_ptr: extern "C" fn(*const Dynamic) -> i64 = unsafe { std::mem::transmute(ptr) };
-            let r = fn_ptr(Box::into_raw(param));
+            let r = fn_ptr(param);
+            unsafe {
+                drop(Box::from_raw(param));
+            }
             Ok(Box::new(Dynamic::I64(r)))
         }
     }

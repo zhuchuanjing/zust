@@ -1,5 +1,6 @@
 //使用 cranelift 作为后端 直接 jit 解释脚本
 mod binary;
+mod memory;
 mod native;
 pub use native::{ANY, STD};
 
@@ -50,6 +51,7 @@ pub fn get_type(ty: &Type) -> Result<types::Type> {
 
 use compiler::Symbol;
 use cranelift::prelude::*;
+use cranelift_module::Module;
 
 pub fn init_jit(mut jit: JITRunTime) -> Result<JITRunTime> {
     jit.add_all()?;
@@ -90,6 +92,32 @@ fn add_native_module_fns(jit: &mut JITRunTime, module: &str, fns: &[(&str, &[Typ
 }
 
 impl JITRunTime {
+    fn add_memory_runtime(&mut self) -> Result<()> {
+        self.native_symbols.write().unwrap().insert("__vm_scope_enter".to_string(), memory::scope_enter as *const () as usize);
+        self.native_symbols.write().unwrap().insert("__vm_scope_exit_void".to_string(), memory::scope_exit_void as *const () as usize);
+        self.native_symbols.write().unwrap().insert("__vm_scope_exit_dynamic".to_string(), memory::scope_exit_dynamic as *const () as usize);
+        self.native_symbols.write().unwrap().insert("__vm_scope_exit_bytes".to_string(), memory::scope_exit_bytes as *const () as usize);
+        self.native_symbols.write().unwrap().insert("__vm_struct_alloc".to_string(), native::struct_alloc as *const () as usize);
+        self.native_symbols.write().unwrap().insert("__vm_struct_from_ptr".to_string(), native::struct_from_ptr as *const () as usize);
+
+        let void_sig = self.get_sig(&[], Type::Void)?;
+        self.scope_enter_fn = Some(self.module.declare_function("__vm_scope_enter", cranelift_module::Linkage::Import, &void_sig)?);
+        self.scope_exit_void_fn = Some(self.module.declare_function("__vm_scope_exit_void", cranelift_module::Linkage::Import, &void_sig)?);
+
+        let dynamic_sig = self.get_sig(&[Type::Any], Type::Any)?;
+        self.scope_exit_dynamic_fn = Some(self.module.declare_function("__vm_scope_exit_dynamic", cranelift_module::Linkage::Import, &dynamic_sig)?);
+
+        let bytes_sig = self.get_sig(&[Type::Any, Type::I64], Type::Any)?;
+        self.scope_exit_bytes_fn = Some(self.module.declare_function("__vm_scope_exit_bytes", cranelift_module::Linkage::Import, &bytes_sig)?);
+
+        let struct_alloc_sig = self.get_sig(&[Type::I64], Type::Any)?;
+        self.struct_alloc_fn = Some(self.module.declare_function("__vm_struct_alloc", cranelift_module::Linkage::Import, &struct_alloc_sig)?);
+
+        let struct_from_ptr_sig = self.get_sig(&[Type::I64, Type::I64], Type::Any)?;
+        self.struct_from_ptr_fn = Some(self.module.declare_function("__vm_struct_from_ptr", cranelift_module::Linkage::Import, &struct_from_ptr_sig)?);
+        Ok(())
+    }
+
     pub fn add_module(&mut self, name: &str) {
         self.compiler.symbols.add_module(name.into());
     }
@@ -244,8 +272,13 @@ impl CompiledFn {
 
 impl Vm {
     pub fn new() -> Self {
+        dynamic::set_dynamic_return_handler(memory::take_dynamic_return);
         let jit = Arc::new(Mutex::new(JITRunTime::new(|_| {})));
-        jit.lock().unwrap().set_owner(Arc::downgrade(&jit));
+        {
+            let mut guard = jit.lock().unwrap();
+            guard.set_owner(Arc::downgrade(&jit));
+            guard.add_memory_runtime().expect("register VM memory runtime");
+        }
         Self { jit }
     }
 
@@ -414,6 +447,61 @@ mod tests {
         assert_eq!(compiled.ret_ty(), &Type::I64);
         let run: extern "C" fn(i64) -> i64 = unsafe { std::mem::transmute(compiled.ptr()) };
         assert_eq!(run(21), 42);
+        Ok(())
+    }
+
+    #[test]
+    fn nested_struct_arg_return_struct_field_is_static_field_access() -> anyhow::Result<()> {
+        let vm = Vm::with_all()?;
+        vm.import_code(
+            "vm_nested_struct_return_field",
+            br#"
+            pub struct Inner {
+                value: i64,
+            }
+
+            pub struct RoleMini {
+                inner: Inner,
+                hp: i64,
+            }
+
+            pub struct TeamMini {
+                role: RoleMini,
+            }
+
+            pub struct BigSummary {
+                winner: i64,
+                loser: i64,
+            }
+
+            pub fn make_big_with_team(team: TeamMini) {
+                let score = team.role.inner.value;
+                BigSummary{winner: score, loser: 0}
+            }
+
+            pub fn read_team_winner_direct() {
+                let team = TeamMini{role: RoleMini{inner: Inner{value: 9}, hp: 1}};
+                make_big_with_team(team).winner
+            }
+
+            pub fn read_team_winner_bound() {
+                let team = TeamMini{role: RoleMini{inner: Inner{value: 9}, hp: 1}};
+                let summary = make_big_with_team(team);
+                summary.winner
+            }
+            "#
+            .to_vec(),
+        )?;
+
+        let compiled = vm.get_fn("vm_nested_struct_return_field::read_team_winner_direct", &[])?;
+        assert_eq!(compiled.ret_ty(), &Type::I64);
+        let direct: extern "C" fn() -> i64 = unsafe { std::mem::transmute(compiled.ptr()) };
+        assert_eq!(direct(), 9);
+
+        let compiled = vm.get_fn("vm_nested_struct_return_field::read_team_winner_bound", &[])?;
+        assert_eq!(compiled.ret_ty(), &Type::I64);
+        let bound: extern "C" fn() -> i64 = unsafe { std::mem::transmute(compiled.ptr()) };
+        assert_eq!(bound(), 9);
         Ok(())
     }
 

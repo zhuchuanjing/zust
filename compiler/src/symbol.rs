@@ -189,14 +189,14 @@ impl SymbolTable {
                     {
                         return self.get_type(&substitute_type(ty, generic_params, &params));
                     }
-                    return Ok(ty.clone());
+                    return self.get_type(ty);
                 }
                 return Ok(Type::Symbol { id, params });
             }
             Type::Symbol { id, params } => {
                 return match self.get_symbol(*id)? {
-                    (_, Symbol::Fn { ty, args: _, generic_params: _, cap: _, body: _, is_pub: _ }) => Ok(ty.clone()),
-                    (_, Symbol::Native(ty)) => Ok(ty.clone()),
+                    (_, Symbol::Fn { ty, args: _, generic_params: _, cap: _, body: _, is_pub: _ }) => self.get_type(ty),
+                    (_, Symbol::Native(ty)) => self.get_type(ty),
                     (_, Symbol::Struct(ty, _)) => {
                         let params = params.iter().map(|param| self.get_type(param)).collect::<Result<Vec<_>>>()?;
                         if let Type::Struct { params: generic_params, .. } = ty
@@ -205,7 +205,7 @@ impl SymbolTable {
                         {
                             self.get_type(&substitute_type(ty, generic_params, &params))
                         } else {
-                            Ok(ty.clone())
+                            self.get_type(ty)
                         }
                     }
                     (_, s) => {

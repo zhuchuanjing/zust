@@ -2,6 +2,7 @@
 use dynamic::{Dynamic, Type};
 
 use crate::JITRunTime;
+use crate::memory::alloc_dynamic;
 use root::{Object, get_mount};
 use std::sync::{Mutex, Weak};
 extern "C" fn root_add(name: *const Dynamic, value: *const Dynamic) -> bool {
@@ -16,17 +17,17 @@ extern "C" fn root_contains(name: *const Dynamic) -> bool {
 }
 
 extern "C" fn root_remove(name: *const Dynamic) -> *const Dynamic {
-    unsafe { Box::into_raw(Box::new(root::remove((*name).as_str()).unwrap_or(Dynamic::Null))) }
+    unsafe { alloc_dynamic(root::remove((*name).as_str()).unwrap_or(Dynamic::Null)) }
 }
 
 extern "C" fn root_dir(name: *const Dynamic) -> *const Dynamic {
-    unsafe { Box::into_raw(Box::new(root::dir((*name).as_str()).unwrap_or(Dynamic::Null))) }
+    unsafe { alloc_dynamic(root::dir((*name).as_str()).unwrap_or(Dynamic::Null)) }
 }
 
 extern "C" fn root_send(name: *const Dynamic, value: *const Dynamic) -> *const Dynamic {
     unsafe {
         let ret = root::send_msg(&(*name).as_str(), (*value).clone()).unwrap_or(Dynamic::Null);
-        Box::into_raw(Box::new(ret))
+        alloc_dynamic(ret)
     }
 }
 
@@ -37,14 +38,10 @@ extern "C" fn root_send_idx(name: *const Dynamic, idx: i64, value: *const Dynami
 }
 
 extern "C" fn root_add_map(name: *const Dynamic) -> bool {
-    unsafe {
-        root::add_map(&(*name).as_str()).is_ok()
-    }
+    unsafe { root::add_map(&(*name).as_str()).is_ok() }
 }
 extern "C" fn root_add_list(name: *const Dynamic) -> bool {
-    unsafe {
-        root::add_list(&(*name).as_str()).is_ok()
-    }
+    unsafe { root::add_list(&(*name).as_str()).is_ok() }
 }
 
 extern "C" fn root_mount(name: *const Dynamic, url: *const Dynamic) {
@@ -61,10 +58,7 @@ extern "C" fn root_mount_fjall(data_dir: *const Dynamic) {
 }
 
 extern "C" fn root_get(name: *const Dynamic) -> *const Dynamic {
-    unsafe {
-        let v = Box::new(if let Ok((m, name)) = get_mount(&(*name).as_str()) { m.get(name, |v| v.value()).unwrap_or(Dynamic::Null) } else { Dynamic::Null });
-        Box::into_raw(v)
-    }
+    unsafe { alloc_dynamic(if let Ok((m, name)) = get_mount(&(*name).as_str()) { m.get(name, |v| v.value()).unwrap_or(Dynamic::Null) } else { Dynamic::Null }) }
 }
 
 extern "C" fn root_len(name: *const Dynamic) -> i64 {
@@ -76,17 +70,11 @@ extern "C" fn root_push(name: *const Dynamic, value: *const Dynamic) -> i64 {
 }
 
 extern "C" fn root_get_idx(name: *const Dynamic, idx: i64) -> *const Dynamic {
-    unsafe {
-        let v = Box::new(if let Ok((m, name)) = get_mount(&(*name).as_str()) { m.get_idx(name, idx as usize, |v| v.value()).unwrap_or(Dynamic::Null) } else { Dynamic::Null });
-        Box::into_raw(v)
-    }
+    unsafe { alloc_dynamic(if let Ok((m, name)) = get_mount(&(*name).as_str()) { m.get_idx(name, idx as usize, |v| v.value()).unwrap_or(Dynamic::Null) } else { Dynamic::Null }) }
 }
 
 extern "C" fn root_remove_idx(name: *const Dynamic, idx: i64) -> *const Dynamic {
-    unsafe {
-        let v = Box::new(if let Ok((m, name)) = get_mount(&(*name).as_str()) { m.remove_idx(name, idx as usize).map(|obj| obj.value()).unwrap_or(Dynamic::Null) } else { Dynamic::Null });
-        Box::into_raw(v)
-    }
+    unsafe { alloc_dynamic(if let Ok((m, name)) = get_mount(&(*name).as_str()) { m.remove_idx(name, idx as usize).map(|obj| obj.value()).unwrap_or(Dynamic::Null) } else { Dynamic::Null }) }
 }
 
 extern "C" fn root_insert(name: *const Dynamic, key: *const Dynamic, value: *const Dynamic) {
@@ -96,10 +84,7 @@ extern "C" fn root_insert(name: *const Dynamic, key: *const Dynamic, value: *con
 }
 
 extern "C" fn root_get_key(name: *const Dynamic, key: *const Dynamic) -> *const Dynamic {
-    unsafe {
-        let v = Box::new(if let Ok((m, name)) = get_mount(&(*name).as_str()) { m.get_key(name, &(*key).as_str(), |v| v.value()).unwrap_or(Dynamic::Null) } else { Dynamic::Null });
-        Box::into_raw(v)
-    }
+    unsafe { alloc_dynamic(if let Ok((m, name)) = get_mount(&(*name).as_str()) { m.get_key(name, &(*key).as_str(), |v| v.value()).unwrap_or(Dynamic::Null) } else { Dynamic::Null }) }
 }
 
 pub(crate) extern "C" fn root_add_fn_with_vm(context: *const Weak<Mutex<JITRunTime>>, name: *const Dynamic, fn_name: *const Dynamic) -> bool {
@@ -120,10 +105,7 @@ pub(crate) extern "C" fn root_add_fn_with_vm(context: *const Weak<Mutex<JITRunTi
 }
 
 extern "C" fn root_remove_key(name: *const Dynamic, key: *const Dynamic) -> *const Dynamic {
-    unsafe {
-        let v = Box::new(if let Ok((m, name)) = get_mount(&(*name).as_str()) { m.remove_key(name, &(*key).as_str()).map(|obj| obj.value()).unwrap_or(Dynamic::Null) } else { Dynamic::Null });
-        Box::into_raw(v)
-    }
+    unsafe { alloc_dynamic(if let Ok((m, name)) = get_mount(&(*name).as_str()) { m.remove_key(name, &(*key).as_str()).map(|obj| obj.value()).unwrap_or(Dynamic::Null) } else { Dynamic::Null }) }
 }
 
 pub const ROOT_NATIVE: [(&str, &[Type], Type, *const u8); 18] = [

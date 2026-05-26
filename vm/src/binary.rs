@@ -34,8 +34,10 @@ impl JITRunTime {
         let ty_data = self.module.declare_data_in_func(id, &mut ctx.builder.func);
         let ty_addr = ctx.builder.ins().global_value(crate::ptr_type(), ty_data);
         let ty_ptr = ctx.builder.ins().load(crate::ptr_type(), MemFlags::new(), ty_addr, 0);
-        let f = self.get_fn(self.get_id("__struct_from_ptr")?, &[Type::I64, Type::I64])?;
-        self.call(ctx, f, vec![base, ty_ptr]).map(|(v, _)| v)
+        let fn_id = self.struct_from_ptr_fn.ok_or_else(|| anyhow!("VM struct Dynamic runtime is not registered"))?;
+        let fn_ref = self.get_fn_ref(ctx, fn_id);
+        let call_inst = ctx.builder.ins().call(fn_ref, &[base, ty_ptr]);
+        Ok(ctx.builder.inst_results(call_inst)[0])
     }
 
     pub(crate) fn bool_value(&mut self, ctx: &mut BuildContext, vt: (Value, Type)) -> Result<Value> {

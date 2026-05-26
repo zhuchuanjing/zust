@@ -1,5 +1,6 @@
 use super::FnVariant;
 use crate::JITRunTime;
+use crate::memory::{alloc_dynamic, alloc_struct_bytes};
 use anyhow::Result;
 use cranelift::prelude::AbiParam;
 use cranelift_module::{Linkage, Module};
@@ -12,15 +13,13 @@ extern "C" fn any_clone(addr: *const Dynamic) -> *const Dynamic {
     //在堆上分配内存 复制 addr 到内存中
     unsafe {
         let cloned_value = (*addr).deep_clone();
-        let ptr = Box::new(cloned_value);
-        Box::into_raw(ptr)
+        alloc_dynamic(cloned_value)
     }
 }
 
 extern "C" fn any_null() -> *const Dynamic {
     //在堆上分配内存 复制 addr 到内存中
-    let ptr = Box::new(Dynamic::Null);
-    Box::into_raw(ptr)
+    alloc_dynamic(Dynamic::Null)
 }
 
 extern "C" fn print(addr: *const Dynamic) {
@@ -46,32 +45,33 @@ extern "C" fn random(start: *const Dynamic, stop: *const Dynamic) -> *const Dyna
             if (&*start).is_int() {
                 let start = (*start).as_int().unwrap_or(0);
                 let stop = (*stop).as_int().unwrap_or(100);
-                return Box::into_raw(Box::new(Dynamic::I64(rng.random_range(start..stop))));
+                return alloc_dynamic(Dynamic::I64(rng.random_range(start..stop)));
             } else if (&*start).is_f32() || (&*start).is_f64() {
                 let start = (*start).as_float().unwrap_or(0.0);
                 let stop = (*stop).as_float().unwrap_or(1.0);
-                return Box::into_raw(Box::new(Dynamic::F64(rng.random_range(start..stop))));
+                return alloc_dynamic(Dynamic::F64(rng.random_range(start..stop)));
             }
         }
     }
-    Box::into_raw(Box::new(Dynamic::Null))
+    alloc_dynamic(Dynamic::Null)
 }
 
 extern "C" fn uuid() -> *const Dynamic {
-    Box::into_raw(Box::new(uuid::Uuid::new_v4().to_string().into()))
+    alloc_dynamic(uuid::Uuid::new_v4().to_string().into())
 }
 
-extern "C" fn struct_alloc(size: i64) -> *mut u8 {
+pub(crate) extern "C" fn struct_alloc(size: i64) -> *mut u8 {
     let size = size.max(0) as usize;
-    let mut buf = vec![0u8; size].into_boxed_slice();
-    let ptr = buf.as_mut_ptr();
-    std::mem::forget(buf);
+    let ptr = alloc_struct_bytes(size);
+    unsafe {
+        std::ptr::write_bytes(ptr, 0, size);
+    }
     ptr
 }
 
-extern "C" fn struct_from_ptr(addr: i64, ty: i64) -> *const Dynamic {
+pub(crate) extern "C" fn struct_from_ptr(addr: i64, ty: i64) -> *const Dynamic {
     let ty = unsafe { (&*(ty as *const Type)).clone() };
-    Box::into_raw(Box::new(Dynamic::Struct { addr: addr as usize, ty }))
+    alloc_dynamic(Dynamic::Struct { addr: addr as usize, ty })
 }
 
 pub(crate) extern "C" fn import_with_vm(context: *const Weak<Mutex<JITRunTime>>, addr: *const Dynamic, path: *const Dynamic) -> bool {
@@ -87,27 +87,21 @@ extern "C" fn any_len(addr: *const Dynamic) -> i64 {
 
 extern "C" fn any_keys(addr: *const Dynamic) -> *const Dynamic {
     if addr.is_null() {
-        return Box::into_raw(Box::new(Dynamic::list(Vec::new())));
+        return alloc_dynamic(Dynamic::list(Vec::new()));
     }
     let keys = match unsafe { &*addr } {
         Dynamic::Map(map) => map.read().unwrap().keys().map(|key| Dynamic::from(key.as_str())).collect(),
         _ => Vec::new(),
     };
-    Box::into_raw(Box::new(Dynamic::list(keys)))
+    alloc_dynamic(Dynamic::list(keys))
 }
 
 extern "C" fn any_iter(addr: *const Dynamic) -> *const Dynamic {
-    if addr.is_null() {
-        any_null()
-    } else {
-        let v = unsafe { Box::new((*addr).clone().into_iter()) };
-        Box::into_raw(v)
-    }
+    if addr.is_null() { any_null() } else { alloc_dynamic(unsafe { (*addr).clone().into_iter() }) }
 }
 
 extern "C" fn any_next(addr: *mut Dynamic) -> *const Dynamic {
-    let v = unsafe { Box::new((*addr).next().unwrap_or(Dynamic::Null)) };
-    Box::into_raw(v)
+    alloc_dynamic(unsafe { (*addr).next().unwrap_or(Dynamic::Null) })
 }
 
 extern "C" fn any_push(addr: *mut Dynamic, value: *mut Dynamic) {
@@ -119,12 +113,7 @@ extern "C" fn any_push(addr: *mut Dynamic, value: *mut Dynamic) {
 }
 
 extern "C" fn any_pop(addr: *mut Dynamic) -> *const Dynamic {
-    if addr.is_null() {
-        any_null()
-    } else {
-        let v = unsafe { Box::new((*addr).pop().unwrap_or(Dynamic::Null)) };
-        Box::into_raw(v)
-    }
+    if addr.is_null() { any_null() } else { alloc_dynamic(unsafe { (*addr).pop().unwrap_or(Dynamic::Null) }) }
 }
 
 extern "C" fn get_key(addr: *const Dynamic, key: *const Dynamic) -> *const Dynamic {
@@ -132,8 +121,7 @@ extern "C" fn get_key(addr: *const Dynamic, key: *const Dynamic) -> *const Dynam
         any_null()
     } else {
         let key: &str = unsafe { &*key }.as_str();
-        let v = unsafe { Box::new((*addr).get_dynamic(key).unwrap_or(Dynamic::Null)) };
-        Box::into_raw(v)
+        alloc_dynamic(unsafe { (*addr).get_dynamic(key).unwrap_or(Dynamic::Null) })
     }
 }
 
@@ -142,8 +130,7 @@ extern "C" fn del_key(addr: *const Dynamic, key: *const Dynamic) -> *const Dynam
         any_null()
     } else {
         let key: &str = unsafe { &*key }.as_str();
-        let v = unsafe { Box::new((*addr).remove_dynamic(key).unwrap_or(Dynamic::Null)) };
-        Box::into_raw(v)
+        alloc_dynamic(unsafe { (*addr).remove_dynamic(key).unwrap_or(Dynamic::Null) })
     }
 }
 
@@ -166,12 +153,7 @@ extern "C" fn starts_with(addr: *const Dynamic, prefix: *const Dynamic) -> bool 
 }
 
 extern "C" fn get_idx(addr: *const Dynamic, idx: i64) -> *const Dynamic {
-    if addr.is_null() {
-        any_null()
-    } else {
-        let v = unsafe { Box::new((*addr).get_idx(idx as usize).unwrap_or(Dynamic::Null)) };
-        Box::into_raw(v)
-    }
+    if addr.is_null() { any_null() } else { alloc_dynamic(unsafe { (*addr).get_idx(idx as usize).unwrap_or(Dynamic::Null) }) }
 }
 
 extern "C" fn slice(addr: *const Dynamic, start: i64, stop: *const Dynamic, inclusive: bool) -> *const Dynamic {
@@ -198,7 +180,7 @@ extern "C" fn slice(addr: *const Dynamic, start: i64, stop: *const Dynamic, incl
         Dynamic::List(list) => Dynamic::list(list.read().unwrap()[start..stop].to_vec()),
         _ => Dynamic::Null,
     };
-    Box::into_raw(Box::new(sliced))
+    alloc_dynamic(sliced)
 }
 
 extern "C" fn set_key(addr: *mut Dynamic, key: *const Dynamic, value: *const Dynamic) {
@@ -217,13 +199,11 @@ extern "C" fn set_idx(addr: *mut Dynamic, idx: i64, value: *const Dynamic) {
 }
 
 extern "C" fn any_from_i64(v: i64) -> *const Dynamic {
-    let value = Box::new(Dynamic::I64(v));
-    Box::into_raw(value)
+    alloc_dynamic(Dynamic::I64(v))
 }
 
 extern "C" fn any_from_bool(v: bool) -> *const Dynamic {
-    let value = Box::new(Dynamic::Bool(v));
-    Box::into_raw(value)
+    alloc_dynamic(Dynamic::Bool(v))
 }
 
 extern "C" fn any_to_i64(addr: *const Dynamic) -> i64 {
@@ -252,8 +232,7 @@ extern "C" fn any_to_bool(addr: *const Dynamic) -> bool {
 }
 
 extern "C" fn any_from_f64(v: f64) -> *const Dynamic {
-    let value = Box::new(Dynamic::F64(v));
-    Box::into_raw(value)
+    alloc_dynamic(Dynamic::F64(v))
 }
 
 extern "C" fn any_split(addr: *mut Dynamic, s: *const Dynamic) -> *const Dynamic {
@@ -261,7 +240,7 @@ extern "C" fn any_split(addr: *mut Dynamic, s: *const Dynamic) -> *const Dynamic
         return any_null();
     }
     let s: &str = unsafe { &*s }.as_str();
-    Box::into_raw(Box::new(unsafe { (&*addr).clone() }.split(s)))
+    alloc_dynamic(unsafe { (&*addr).clone() }.split(s))
 }
 
 extern "C" fn any_to_f64(addr: *const Dynamic) -> f64 {
@@ -273,9 +252,9 @@ extern "C" fn any_to_f64(addr: *const Dynamic) -> f64 {
 
 extern "C" fn any_to_string(addr: *const Dynamic) -> *const Dynamic {
     if addr.is_null() {
-        return Box::into_raw(Box::new(Dynamic::from("")));
+        return alloc_dynamic(Dynamic::from(""));
     }
-    Box::into_raw(Box::new(Dynamic::from(unsafe { &*addr }.to_string())))
+    alloc_dynamic(Dynamic::from(unsafe { &*addr }.to_string()))
 }
 
 extern "C" fn any_binary(left: *const Dynamic, op: i32, right: *const Dynamic) -> *const Dynamic {
@@ -283,10 +262,10 @@ extern "C" fn any_binary(left: *const Dynamic, op: i32, right: *const Dynamic) -
         if right.is_null() {
             return any_null();
         }
-        return Box::into_raw(Box::new(unsafe { (&*right).clone() }));
+        return alloc_dynamic(unsafe { (&*right).clone() });
     }
     if right.is_null() {
-        return Box::into_raw(Box::new(unsafe { (&*left).clone() }));
+        return alloc_dynamic(unsafe { (&*left).clone() });
     }
     let op = BinaryOp::try_from(op).unwrap();
     unsafe {
@@ -294,8 +273,7 @@ extern "C" fn any_binary(left: *const Dynamic, op: i32, right: *const Dynamic) -
             ExprKind::Binary { left: Box::new(Expr::new(ExprKind::Value((&*left).clone()), Span::default())), op, right: Box::new(Expr::new(ExprKind::Value((&*right).clone()), Span::default())) },
             Span::default(),
         );
-        let r = Box::new(expr.compact().unwrap_or(Dynamic::Null));
-        Box::into_raw(r)
+        alloc_dynamic(expr.compact().unwrap_or(Dynamic::Null))
     }
 }
 
@@ -310,13 +288,8 @@ extern "C" fn any_logic(left: *const Dynamic, op: i32, right: *const Dynamic) ->
     }
 }
 
-pub const STD: [(&str, &[Type], Type, *const u8); 5] = [
-    ("print", &[Type::Any], Type::Void, print as *const u8),
-    ("uuid", &[], Type::Any, uuid as *const u8),
-    ("rand", &[Type::Any, Type::Any], Type::Any, random as *const u8),
-    ("__struct_alloc", &[Type::I64], Type::Any, struct_alloc as *const u8),
-    ("__struct_from_ptr", &[Type::I64, Type::I64], Type::Any, struct_from_ptr as *const u8),
-];
+pub const STD: [(&str, &[Type], Type, *const u8); 3] =
+    [("print", &[Type::Any], Type::Void, print as *const u8), ("uuid", &[], Type::Any, uuid as *const u8), ("rand", &[Type::Any, Type::Any], Type::Any, random as *const u8)];
 
 pub const ANY: [(&str, &[Type], Type, *const u8); 28] = [
     ("Any::null", &[], Type::Any, any_null as *const u8),

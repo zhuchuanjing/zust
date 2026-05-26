@@ -185,7 +185,8 @@ impl JITRunTime {
         let mut func_ctx = FunctionBuilderContext::new();
         let builder = FunctionBuilder::new(&mut ctx.func, &mut func_ctx);
 
-        let mut build_ctx = BuildContext::new(builder, &arg_tys)?;
+        let mut build_ctx = BuildContext::new(builder, &arg_tys, ret_ty.clone())?;
+        self.scope_enter(&mut build_ctx)?;
         self.compile_depth += 1;
         let stmt = Self::coerce_returns(stmt, &ret_ty);
         let gen_result = self.gen_stmt(&mut build_ctx, &stmt, None, None);

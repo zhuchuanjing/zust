@@ -8,6 +8,22 @@ Zust 是一个用 Rust 编写的类 Rust 脚本语言和运行时。它保留了
 
 English: [README.md](README.md)
 
+## 最重要 TODO：VM 托管 Dynamic 内存
+
+当前 VM 在 native 边界会返回很多 `Any`/`Dynamic` 堆对象裸指针，例如 `root::get`、map/list 索引、动态运算，以及内部用 `Box::into_raw` 分配结果的 native helper。调用方通常只是借用这些值，但 VM 还没有完整的 drop 插桩，不能覆盖表达式丢弃、变量覆盖、函数退出、`break`/`continue` 和 `return` 等路径。
+
+这意味着循环中反复创建临时 `Any` 值时，即使 ROOT 里的旧值被替换并正确释放，VM 临时值仍然可能留在内存里。ROOT 替换只负责释放 ROOT 持有的旧对象，不会回收脚本变量里由 `root::get` 等调用返回的 raw pointer。
+
+优先修复方向是让 VM 统一拥有和管理堆上的 `Dynamic` 值：
+
+1. VM 创建的 `Any` 分配统一走 VM allocator，不要散落 `Box::into_raw`。
+2. 每次进入 VM 函数时创建 per-call arena，或等价的临时对象 owner。
+3. native 返回的 `Dynamic` 指针注册到这个 owner。
+4. 函数返回值需要逃逸给 Rust 调用方或 ROOT 时，将它 promote 出临时 owner。
+5. 函数退出时释放所有没有 promote 的临时值。
+
+先实现 per-call arena，再考虑完整 tracing GC。完整 GC 必须先定义清楚 locals、闭包捕获、返回值、ROOT 持有值、struct 字段里的 `Dynamic` 指针，以及 native/custom 对象中的根集合。
+
 ## 设计思路
 
 Zust 的设计围绕几个现实目标展开：

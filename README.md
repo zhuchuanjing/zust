@@ -8,6 +8,22 @@ The project is close to a mature open-source release. The workspace now contains
 
 中文文档: [README.zh.md](README.zh.md)
 
+## Most Important TODO: VM-Owned Dynamic Memory
+
+The VM currently returns many `Any`/`Dynamic` values across native boundaries as raw heap pointers, for example values produced by `root::get`, map/list indexing, dynamic arithmetic, and native helpers that allocate with `Box::into_raw`. These values are borrowed by the callee, but the VM does not yet have complete drop instrumentation for expression discard, variable overwrite, function exit, `break`/`continue`, or `return` paths.
+
+This means loops that repeatedly create temporary `Any` values can retain memory even when the corresponding ROOT value is replaced correctly. ROOT replacement drops ROOT-owned values, but it does not reclaim VM temporary raw pointers returned to script variables.
+
+The priority fix is to introduce unified VM ownership for heap `Dynamic` values:
+
+1. Route VM-created `Any` allocations through a single VM allocator instead of scattered `Box::into_raw` calls.
+2. Create a per-call arena or equivalent temporary object owner when entering a VM function.
+3. Register native-returned `Dynamic` pointers in that owner.
+4. Promote the function return value when it must escape to the Rust caller or ROOT.
+5. Drop all non-promoted temporary values at function exit.
+
+Start with a per-call arena before attempting a full tracing GC. A full GC must first define roots across locals, closure captures, returned values, ROOT-owned values, struct fields containing `Dynamic` pointers, and native/custom objects.
+
 ## Additional Documentation
 
 - [Mandelbrot Deep Refinement and Zust BigFloat GPU Notes](MANDELBROT_REFINEMENT_BIGFLOAT_REPORT.en.md): English notes from a deep-zoom Mandelbrot experiment, covering GPU BigFloat precision, iteration count, sampling, and the server/client rendering split.

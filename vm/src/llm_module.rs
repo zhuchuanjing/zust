@@ -1,3 +1,4 @@
+use crate::memory::alloc_dynamic;
 use base64::{Engine as _, engine::general_purpose};
 use dynamic::{Dynamic, Type};
 
@@ -5,21 +6,21 @@ extern "C" fn llm_complete(openai: *const Dynamic, value: *const Dynamic) -> *co
     let openai = unsafe { (&*openai).clone() };
     let value = unsafe { (&*value).clone() };
     let result = root::sync_await!(llm::complete(openai, value, None)).unwrap_or(Dynamic::Null);
-    Box::into_raw(Box::new(result))
+    alloc_dynamic(result)
 }
 
 extern "C" fn llm_audio(openai: *const Dynamic, value: *const Dynamic) -> *const Dynamic {
     let openai = unsafe { (&*openai).clone() };
     let value = unsafe { (&*value).clone() };
     let text = root::sync_await!(llm::audio_recognize(openai, value)).ok().unwrap_or(Dynamic::Null);
-    Box::into_raw(Box::new(text))
+    alloc_dynamic(text)
 }
 
 extern "C" fn llm_tts(openai: *const Dynamic, value: *const Dynamic) -> *const Dynamic {
     let openai = unsafe { (&*openai).clone() };
     let value = unsafe { (&*value).clone() };
     let audio = root::sync_await!(llm::tts(openai, value)).ok().unwrap_or(Dynamic::Null);
-    Box::into_raw(Box::new(audio))
+    alloc_dynamic(audio)
 }
 
 extern "C" fn llm_deep(openai: *const Dynamic, value: *const Dynamic, notifier: *const Dynamic) -> *const Dynamic {
@@ -34,7 +35,7 @@ extern "C" fn llm_deep(openai: *const Dynamic, value: *const Dynamic, notifier: 
             Ok(())
         })
     });
-    Box::into_raw(Box::new(id.into()))
+    alloc_dynamic(id.into())
 }
 
 fn image_url(value: &Dynamic) -> Option<Dynamic> {
@@ -98,7 +99,7 @@ extern "C" fn llm_image(openai: *const Dynamic, value: *const Dynamic, notifier:
             Ok(())
         })
     });
-    Box::into_raw(Box::new(id.into()))
+    alloc_dynamic(id.into())
 }
 
 pub const LLM_NATIVE: [(&str, &[Type], Type, *const u8); 5] = [

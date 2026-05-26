@@ -96,10 +96,11 @@ pub struct BuildContext<'a> {
     pub builder: FunctionBuilder<'a>,
     pub(crate) vars: Vec<LocalVar>,
     pub(crate) fn_refs: Vec<(FuncId, FuncRef)>,
+    pub(crate) ret_ty: Type,
 }
 
 impl<'a> BuildContext<'a> {
-    pub fn new(mut builder: FunctionBuilder<'a>, arg_tys: &[Type]) -> Result<Self> {
+    pub fn new(mut builder: FunctionBuilder<'a>, arg_tys: &[Type], ret_ty: Type) -> Result<Self> {
         let entry_block = builder.create_block();
         builder.append_block_params_for_function_params(entry_block);
         builder.switch_to_block(entry_block);
@@ -107,7 +108,7 @@ impl<'a> BuildContext<'a> {
         for (idx, ty) in arg_tys.iter().enumerate() {
             vars.push(LocalVar::Value { val: builder.block_params(entry_block)[idx], ty: ty.clone() });
         }
-        Ok(Self { builder, vars, fn_refs: Vec::new() })
+        Ok(Self { builder, vars, fn_refs: Vec::new(), ret_ty })
     }
 
     pub fn get_fn_ref(&mut self, fn_id: FuncId) -> Option<FuncRef> {

@@ -26,6 +26,12 @@ pub struct JITRunTime {
     pub ir_disassembly: BTreeMap<SmolStr, String>,
     pub module: JITModule,
     pub consts: Vec<Option<DataId>>,
+    pub(crate) scope_enter_fn: Option<FuncId>,
+    pub(crate) scope_exit_void_fn: Option<FuncId>,
+    pub(crate) scope_exit_dynamic_fn: Option<FuncId>,
+    pub(crate) scope_exit_bytes_fn: Option<FuncId>,
+    pub(crate) struct_alloc_fn: Option<FuncId>,
+    pub(crate) struct_from_ptr_fn: Option<FuncId>,
 }
 
 // TODO(memory): 函数调用期间为 VM 内部临时 Any/struct 分配引入 arena。
@@ -178,6 +184,12 @@ impl JITRunTime {
             ir_disassembly: BTreeMap::new(),
             module,
             consts: Vec::new(),
+            scope_enter_fn: None,
+            scope_exit_void_fn: None,
+            scope_exit_dynamic_fn: None,
+            scope_exit_bytes_fn: None,
+            struct_alloc_fn: None,
+            struct_from_ptr_fn: None,
         }
     }
 
@@ -228,6 +240,57 @@ impl JITRunTime {
             }
             FnInfo::Inline { fn_ptr, arg_tys: _ } => fn_ptr(Some(ctx), args).map(|(v, t)| (v.unwrap(), t)),
         }
+    }
+
+    pub(crate) fn scope_enter(&mut self, ctx: &mut BuildContext) -> Result<()> {
+        let fn_id = self.scope_enter_fn.ok_or_else(|| anyhow!("VM scope enter runtime is not registered"))?;
+        let fn_ref = self.get_fn_ref(ctx, fn_id);
+        ctx.builder.ins().call(fn_ref, &[]);
+        Ok(())
+    }
+
+    fn scope_exit_void(&mut self, ctx: &mut BuildContext) -> Result<()> {
+        let fn_id = self.scope_exit_void_fn.ok_or_else(|| anyhow!("VM scope exit runtime is not registered"))?;
+        let fn_ref = self.get_fn_ref(ctx, fn_id);
+        ctx.builder.ins().call(fn_ref, &[]);
+        Ok(())
+    }
+
+    fn return_value(&mut self, ctx: &mut BuildContext, value: Option<(Value, Type)>) -> Result<()> {
+        let ret_ty = ctx.ret_ty.clone();
+        if ret_ty.is_void() {
+            self.scope_exit_void(ctx)?;
+            ctx.builder.ins().return_(&[]);
+            return Ok(());
+        }
+
+        let Some((value, value_ty)) = value else {
+            self.scope_exit_void(ctx)?;
+            ctx.builder.ins().return_(&[]);
+            return Ok(());
+        };
+
+        if ret_ty.is_any() {
+            let value = self.convert(ctx, (value, value_ty), Type::Any)?;
+            let fn_id = self.scope_exit_dynamic_fn.ok_or_else(|| anyhow!("VM dynamic return runtime is not registered"))?;
+            let fn_ref = self.get_fn_ref(ctx, fn_id);
+            let call_inst = ctx.builder.ins().call(fn_ref, &[value]);
+            let promoted = ctx.builder.inst_results(call_inst)[0];
+            ctx.builder.ins().return_(&[promoted]);
+        } else if self.is_aggregate_ty(&ret_ty) {
+            let value = self.convert(ctx, (value, value_ty), ret_ty.clone())?;
+            let size = ctx.builder.ins().iconst(types::I64, ret_ty.width() as i64);
+            let fn_id = self.scope_exit_bytes_fn.ok_or_else(|| anyhow!("VM aggregate return runtime is not registered"))?;
+            let fn_ref = self.get_fn_ref(ctx, fn_id);
+            let call_inst = ctx.builder.ins().call(fn_ref, &[value, size]);
+            let promoted = ctx.builder.inst_results(call_inst)[0];
+            ctx.builder.ins().return_(&[promoted]);
+        } else {
+            let value = self.convert(ctx, (value, value_ty), ret_ty)?;
+            self.scope_exit_void(ctx)?;
+            ctx.builder.ins().return_(&[value]);
+        }
+        Ok(())
     }
 
     fn call_for_side_effect(&mut self, ctx: &mut BuildContext, fn_info: FnInfo, args: Vec<Value>) -> Result<()> {
@@ -322,9 +385,10 @@ impl JITRunTime {
 
     fn struct_alloc(&mut self, ctx: &mut BuildContext, ty: &Type) -> Result<Value> {
         let size = ctx.builder.ins().iconst(types::I64, ty.width() as i64);
-        let alloc_id = self.get_id("__struct_alloc")?;
-        let alloc = self.get_fn(alloc_id, &[Type::I64])?;
-        self.call(ctx, alloc, vec![size]).map(|(v, _)| v)
+        let fn_id = self.struct_alloc_fn.ok_or_else(|| anyhow!("VM struct allocator runtime is not registered"))?;
+        let fn_ref = self.get_fn_ref(ctx, fn_id);
+        let call_inst = ctx.builder.ins().call(fn_ref, &[size]);
+        Ok(ctx.builder.inst_results(call_inst)[0])
     }
 
     fn store_struct_field(&mut self, ctx: &mut BuildContext, base: Value, idx: usize, field_ty: &Type, value: (Value, Type), struct_ty: &Type) -> Result<()> {
@@ -785,6 +849,8 @@ impl JITRunTime {
                         None => return Err(anyhow!("binary left has no value: {:?}", left)),
                     };
                     if op == &BinaryOp::Idx {
+                        let left_ty = self.compiler.symbols.get_type(&left.1).unwrap_or_else(|_| left.1.clone());
+                        let left = (left.0, left_ty);
                         if let Type::Struct { params: _, fields: _ } = &left.1 {
                             let idx = self.struct_field_index(&left.1, right)?;
                             return self.load_struct_field(ctx, left.0, idx, &left.1).map(|r| r.into());
@@ -995,13 +1061,10 @@ impl JITRunTime {
             StmtKind::Return(expr) => {
                 if let Some(expr) = expr {
                     let value = self.eval(ctx, expr)?;
-                    if let Some((r, _)) = value.get(ctx) {
-                        ctx.builder.ins().return_(&[r]);
-                    } else {
-                        ctx.builder.ins().return_(&[]);
-                    }
+                    let value = value.get(ctx);
+                    self.return_value(ctx, value)?;
                 } else {
-                    ctx.builder.ins().return_(&[]);
+                    self.return_value(ctx, None)?;
                 }
                 return Ok(true);
             }

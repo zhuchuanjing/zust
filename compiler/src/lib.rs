@@ -62,6 +62,34 @@ mod tests {
         assert_eq!(compiler.infer_fn(can_act, &[])?, Type::Bool);
         Ok(())
     }
+
+    #[test]
+    fn top_level_const_composite_resolves_const_idents() -> anyhow::Result<()> {
+        let mut compiler = Compiler::new();
+        compiler.import_code(
+            "compiler_const_table",
+            br#"
+            pub const GEM_ATK = "atk";
+            pub const GEM_DEF = "def";
+            pub const GEM_TABLE = [
+                { key: GEM_ATK, score: 3i32 },
+                { key: GEM_DEF, score: 1i32 },
+            ];
+            "#
+            .to_vec(),
+        )?;
+
+        let table = compiler.symbols.get_id("compiler_const_table::GEM_TABLE")?;
+        let (_, symbol) = compiler.symbols.get_symbol(table)?;
+        let Symbol::Const { value, .. } = symbol else {
+            panic!("GEM_TABLE should be a const symbol");
+        };
+
+        let first = value.get_idx(0).expect("first table row");
+        assert_eq!(first.get_dynamic("key").expect("key").as_str(), "atk");
+        assert_eq!(first.get_dynamic("score").expect("score").as_int(), Some(3));
+        Ok(())
+    }
 }
 
 fn has_unresolved_generic_param(ty: &Type) -> bool {
@@ -617,7 +645,8 @@ impl Compiler {
                     self.symbols.add(name, Symbol::Static { value: value.and_then(|v| v.value().ok()), ty, is_pub });
                 }
                 StmtKind::Const { name, ty, value, is_pub } => {
-                    self.symbols.add(name, Symbol::Const { value: value.value()?, ty, is_pub });
+                    let value = self.const_expr_value(&value)?;
+                    self.symbols.add(name, Symbol::Const { value, ty, is_pub });
                 }
                 StmtKind::Fn { name, generic_params, args, body, is_pub } => {
                     let (ty, args) = Type::from_args(args);
@@ -789,6 +818,44 @@ impl Compiler {
             ExprKind::Const(idx) => Ok(self.consts.get(*idx).cloned()),
             ExprKind::Typed { value, ty } if ty.is_native() => Ok(self.static_literal_value(value)?.map(|value| ty.force(value)).transpose()?),
             _ => self.static_composite_literal(expr),
+        }
+    }
+
+    fn const_expr_value(&self, expr: &Expr) -> Result<Dynamic> {
+        match &expr.kind {
+            ExprKind::Value(value) => Ok(value.clone()),
+            ExprKind::Const(idx) => self.consts.get(*idx).cloned().ok_or_else(|| Self::semantic_error(expr.span, format!("常量索引 {} 不存在", idx))),
+            ExprKind::Ident(ident) => {
+                let id = self.symbols.get_id(ident).map_err(|_| Self::semantic_error(expr.span, format!("未找到常量 {}", ident)))?;
+                match self.symbols.get_symbol(id).map(|(_, symbol)| symbol) {
+                    Ok(Symbol::Const { value, .. }) => Ok(value.clone()),
+                    Ok(Symbol::Static { value: Some(value), .. }) => Ok(value.clone()),
+                    _ => Err(Self::semantic_error(expr.span, format!("{} 不是可用于 const 的静态值", ident))),
+                }
+            }
+            ExprKind::Typed { value, ty } if ty.is_native() => Ok(ty.force(self.const_expr_value(value)?)?),
+            ExprKind::Typed { value, .. } => self.const_expr_value(value),
+            ExprKind::List(items) | ExprKind::Tuple(items) => {
+                let values = items.iter().map(|item| self.const_expr_value(item)).collect::<Result<Vec<_>>>()?;
+                Ok(Dynamic::list(values))
+            }
+            ExprKind::Dict(items) => {
+                let mut values = BTreeMap::new();
+                for (key, item) in items {
+                    values.insert(key.clone(), self.const_expr_value(item)?);
+                }
+                Ok(Dynamic::map(values))
+            }
+            ExprKind::Unary { op, value } => {
+                let value = Expr::new(ExprKind::Value(self.const_expr_value(value)?), value.span);
+                Expr::new(ExprKind::Unary { op: op.clone(), value: Box::new(value) }, expr.span).compact().ok_or_else(|| Self::semantic_error(expr.span, "const 一元表达式无法在编译期求值"))
+            }
+            ExprKind::Binary { left, op, right } => {
+                let left = Expr::new(ExprKind::Value(self.const_expr_value(left)?), left.span);
+                let right = Expr::new(ExprKind::Value(self.const_expr_value(right)?), right.span);
+                Expr::new(ExprKind::Binary { left: Box::new(left), op: op.clone(), right: Box::new(right) }, expr.span).compact().ok_or_else(|| Self::semantic_error(expr.span, "const 二元表达式无法在编译期求值"))
+            }
+            _ => Err(Self::semantic_error(expr.span, "const 只能使用字面量、已声明常量和静态 composite literal")),
         }
     }
 

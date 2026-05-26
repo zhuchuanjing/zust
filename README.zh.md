@@ -4,25 +4,25 @@ Zust 是一个用 Rust 编写的类 Rust 脚本语言和运行时。它保留了
 
 官方网站：[www.zust-lang.com](https://www.zust-lang.com)
 
-项目已经接近成熟的开源版本。当前 workspace 内各 crate 独立发版：VM crate 为 `0.9.32`，dynamic crate 为 `0.9.7`，compiler 为 `0.9.12`，parser 为 `0.9.8`，编辑器相关包为 `0.9.2`。
+项目已经接近成熟的开源版本。当前 workspace 内各 crate 独立发版：VM crate 为 `0.9.35`，dynamic crate 为 `0.9.8`，compiler 为 `0.9.15`，parser 为 `0.9.8`，编辑器相关包为 `0.9.2`。
 
 English: [README.md](README.md)
 
-## 最重要 TODO：VM 托管 Dynamic 内存
+## 最近运行时工作
 
-当前 VM 在 native 边界会返回很多 `Any`/`Dynamic` 堆对象裸指针，例如 `root::get`、map/list 索引、动态运算，以及内部用 `Box::into_raw` 分配结果的 native helper。调用方通常只是借用这些值，但 VM 还没有完整的 drop 插桩，不能覆盖表达式丢弃、变量覆盖、函数退出、`break`/`continue` 和 `return` 等路径。
+VM 托管临时内存的工作已经完成。VM 创建的 `Any`/`Dynamic` 值和生成结构体存储现在统一走 VM 内存管理器，不再散落 raw heap ownership。每个执行线程都有自己的 thread-local arena 和函数 scope；非返回临时值会在 scope 退出时释放，返回值在逃逸给 Rust 调用方或 ROOT 前会被 promote。
 
-这意味着循环中反复创建临时 `Any` 值时，即使 ROOT 里的旧值被替换并正确释放，VM 临时值仍然可能留在内存里。ROOT 替换只负责释放 ROOT 持有的旧对象，不会回收脚本变量里由 `root::get` 等调用返回的 raw pointer。
+长周期测试显示，第一次 arena 扩展之后内存会保持稳定。RSS 可能停留在 allocator 高水位，尤其是线程池中每个 worker 都有自己的 arena，但重复执行 VM 函数不会出现持续的 `Dynamic` 增长。这一模型可以用于长期运行的服务器进程。
 
-优先修复方向是让 VM 统一拥有和管理堆上的 `Dynamic` 值：
+当前模型仍然是 arena-based 临时 owner，不是 tracing GC。需要跨调用长期存在的值，应以 owned `Dynamic` map、list、primitive、bytes、custom object 或 ROOT 值的形式跨边界。不要把临时 VM 存储中的生成结构体裸地址持久写入长期容器。
 
-1. VM 创建的 `Any` 分配统一走 VM allocator，不要散落 `Box::into_raw`。
-2. 每次进入 VM 函数时创建 per-call arena，或等价的临时对象 owner。
-3. native 返回的 `Dynamic` 指针注册到这个 owner。
-4. 函数返回值需要逃逸给 Rust 调用方或 ROOT 时，将它 promote 出临时 owner。
-5. 函数退出时释放所有没有 promote 的临时值。
+最近的 compiler/runtime 修复还包括：
 
-先实现 per-call arena，再考虑完整 tracing GC。完整 GC 必须先定义清楚 locals、闭包捕获、返回值、ROOT 持有值、struct 字段里的 `Dynamic` 指针，以及 native/custom 对象中的根集合。
+- 顶层 `const` composite literal 可以引用前面声明的 const/static 值，例如 `const GEM_TABLE = [{ key: GEM_ATK }]` 会在编译期折叠。
+- 函数返回类型推断会把非泛型函数的推断返回类型写回函数符号表。
+- 嵌套结构体参数返回结构体时，调用点可以正常做静态字段访问。
+- `std::log(value)` 会用 Rust log 以 debug 格式记录动态值。
+- VM 内部内存和结构体 helper 由运行时直接注册，不再暴露到脚本符号表。
 
 ## 设计思路
 
@@ -92,7 +92,14 @@ let repeated: [u32; 3] = [0u32; 1 + 2];
 ```zust
 pub const ANSWER: i32 = 42i32;
 pub static DEFAULT_LIMIT: u32 = 1024u32;
+
+pub const GEM_ATK = "atk";
+pub const GEM_TABLE = [
+    {key: GEM_ATK, score: 3i32},
+];
 ```
+
+顶层 `const` composite literal 可以引用同一模块或已导入模块中更早声明的常量和静态值。
 
 ### 模式和修改
 
@@ -222,6 +229,16 @@ pub struct BigFloat<N> {
 ```
 
 可以参考 [zusts/bigfloat.zs](zusts/bigfloat.zs) 以及 [zusts/gpu](zusts/gpu) 下的 Mandelbrot 示例。
+
+## 标准函数
+
+`Vm::with_all()` 会注册标准运行时模块。常用标准函数可以不带模块前缀直接调用：
+
+- `print(value)`：打印动态值。
+- `log(value)`：用 Rust log 以 debug 格式记录动态值。
+- `import(module, path)`：导入另一个 `.zs` 文件，或导入存放在 `root` 中的源码对象。
+- `uuid()`：返回 UUID 字符串。
+- `rand(start, stop)`：返回 `start` 到 `stop` 之间的随机整数或浮点数。
 
 ## 动态值方法
 

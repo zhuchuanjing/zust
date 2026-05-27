@@ -1031,6 +1031,39 @@ mod tests {
     }
 
     #[test]
+    fn root_send_idx_returns_handler_value() -> anyhow::Result<()> {
+        fn echo_handler(msg: Dynamic) -> Dynamic {
+            dynamic::map!("type"=> "echo", "id"=> msg.get_dynamic("id").unwrap_or(Dynamic::Null))
+        }
+
+        let vm = Vm::with_all()?;
+        vm.import_code(
+            "vm_root_send_idx_return",
+            br#"
+            pub fn call(req) {
+                root::send_idx("local/send_idx_return_handlers", 0, req)
+            }
+            "#
+            .to_vec(),
+        )?;
+
+        root::add_list("local/send_idx_return_handlers")?;
+        let (mount, name) = root::get_mount("local/send_idx_return_handlers")?;
+        mount.push(name, root::Object::Native(echo_handler))?;
+
+        assert_eq!(vm.infer("root::send_idx", &[Type::Any, Type::I64, Type::Any])?, Type::Any);
+        let compiled = vm.get_fn("vm_root_send_idx_return::call", &[Type::Any])?;
+        assert_eq!(compiled.ret_ty(), &Type::Any);
+        let call: extern "C" fn(*const Dynamic) -> *const Dynamic = unsafe { std::mem::transmute(compiled.ptr()) };
+        let req = dynamic::map!("id"=> 42i64);
+        let result = unsafe { &*call(&req) };
+
+        assert_eq!(result.get_dynamic("type").map(|value| value.as_str().to_string()), Some("echo".to_string()));
+        assert_eq!(result.get_dynamic("id").and_then(|value| value.as_int()), Some(42));
+        Ok(())
+    }
+
+    #[test]
     fn compiles_public_hotspots_with_string_paths_and_keys() -> anyhow::Result<()> {
         let vm = Vm::with_all()?;
         vm.import_code(

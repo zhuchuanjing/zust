@@ -31,9 +31,10 @@ extern "C" fn root_send(name: *const Dynamic, value: *const Dynamic) -> *const D
     }
 }
 
-extern "C" fn root_send_idx(name: *const Dynamic, idx: i64, value: *const Dynamic) {
+extern "C" fn root_send_idx(name: *const Dynamic, idx: i64, value: *const Dynamic) -> *const Dynamic {
     unsafe {
-        let _ = root::send_idx_msg(&(*name).as_str(), idx as usize, (*value).clone());
+        let ret = root::send_idx_msg(&(*name).as_str(), idx as usize, (*value).clone()).unwrap_or(Dynamic::Null);
+        alloc_dynamic(ret)
     }
 }
 
@@ -118,7 +119,7 @@ pub const ROOT_NATIVE: [(&str, &[Type], Type, *const u8); 18] = [
     ("remove", &[Type::Any], Type::Any, root_remove as *const u8),
     ("contains", &[Type::Any], Type::Bool, root_contains as *const u8),
     ("send", &[Type::Any, Type::Any], Type::Any, root_send as *const u8),
-    ("send_idx", &[Type::Any, Type::I64, Type::Any], Type::Void, root_send_idx as *const u8),
+    ("send_idx", &[Type::Any, Type::I64, Type::Any], Type::Any, root_send_idx as *const u8),
     ("get", &[Type::Any], Type::Any, root_get as *const u8),
     ("len", &[Type::Any], Type::I64, root_len as *const u8),
     ("push", &[Type::Any, Type::Any], Type::I64, root_push as *const u8),

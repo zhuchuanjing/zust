@@ -90,6 +90,33 @@ mod tests {
         assert_eq!(first.get_dynamic("score").expect("score").as_int(), Some(3));
         Ok(())
     }
+
+    #[test]
+    fn return_map_and_struct_is_type_error() -> anyhow::Result<()> {
+        let mut compiler = Compiler::new();
+        let err = match compiler.import_code(
+            "compiler_return_map_struct",
+            br#"
+            struct S {
+                hp: i32,
+            }
+
+            pub fn make_s_or_error(flag: i32) {
+                if flag == 0 {
+                    return { error: "bad" };
+                }
+                S{hp: 123}
+            }
+            "#
+            .to_vec(),
+        ) {
+            Ok(_) => panic!("expected mismatched return types to fail"),
+            Err(err) => err,
+        };
+
+        assert!(format!("{err:#}").contains("返回类型不一致"));
+        Ok(())
+    }
 }
 
 fn has_unresolved_generic_param(ty: &Type) -> bool {
@@ -619,6 +646,9 @@ impl Compiler {
                 *ty = self.symbols.get_type(ty)?;
                 self.add_name(arg.clone());
                 self.add_ty(ty.clone());
+            }
+            if tys.iter().all(|ty| !ty.is_any()) {
+                self.check_return_type(&body)?;
             }
             let mut compiled = Vec::new();
             self.compile_stmt(body, &mut compiled, cap)?;

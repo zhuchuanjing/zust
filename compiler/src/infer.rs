@@ -3,6 +3,12 @@ use anyhow::Result;
 use dynamic::{Dynamic, Type};
 use parser::{BinaryOp, Expr, ExprKind, PatternKind, Span, Stmt, StmtKind, UnaryOp};
 
+#[derive(Clone)]
+struct ReturnInfo {
+    ty: Type,
+    shape: Option<Type>,
+}
+
 impl Compiler {
     fn merge_return_type(span: Span, left: Option<Type>, right: Type) -> Result<Type> {
         match left {
@@ -13,20 +19,79 @@ impl Compiler {
         }
     }
 
-    fn infer_return_type(&mut self, stmt: &Stmt) -> Result<Option<Type>> {
-        self.infer_returns(stmt, true).map(|(ty, _)| ty)
+    fn return_shape(&self, expr: &Expr, ty: &Type) -> Option<Type> {
+        if !ty.is_any() {
+            return if ty.is_struct() { Some(ty.clone()) } else { None };
+        }
+        match &expr.kind {
+            ExprKind::List(_) | ExprKind::Tuple(_) => Some(Type::List),
+            ExprKind::Dict(_) => Some(Type::Map),
+            ExprKind::Value(value) => Self::dynamic_return_shape(value.get_type()),
+            ExprKind::Const(idx) => self.consts.get(*idx).and_then(|value| Self::dynamic_return_shape(value.get_type())),
+            ExprKind::Typed { ty, .. } => Some(ty.clone()),
+            _ => None,
+        }
     }
 
-    fn infer_returns(&mut self, stmt: &Stmt, tail: bool) -> Result<(Option<Type>, bool)> {
+    fn dynamic_return_shape(ty: Type) -> Option<Type> {
+        match ty {
+            Type::Map => Some(Type::Map),
+            Type::List | Type::Array(_, _) => Some(Type::List),
+            _ => None,
+        }
+    }
+
+    fn infer_return_expr(&mut self, expr: &Expr) -> Result<ReturnInfo> {
+        let ty = self.infer_expr(expr)?;
+        let shape = self.return_shape(expr, &ty);
+        Ok(ReturnInfo { ty, shape })
+    }
+
+    fn merge_return_info(span: Span, left: Option<ReturnInfo>, right: ReturnInfo) -> Result<ReturnInfo> {
+        let Some(left) = left else {
+            return Ok(right);
+        };
+        if let (Some(left_shape), Some(right_shape)) = (&left.shape, &right.shape)
+            && left_shape != right_shape
+        {
+            return Err(Self::semantic_error(span, format!("返回类型不一致: {:?} 和 {:?}", left_shape, right_shape)));
+        }
+        if let Some(left_shape) = &left.shape
+            && left_shape.is_struct()
+            && right.ty.is_any()
+            && right.shape.is_none()
+        {
+            return Err(Self::semantic_error(span, format!("返回类型不一致: {:?} 和 {:?}", left_shape, Type::Any)));
+        }
+        if let Some(right_shape) = &right.shape
+            && right_shape.is_struct()
+            && left.ty.is_any()
+            && left.shape.is_none()
+        {
+            return Err(Self::semantic_error(span, format!("返回类型不一致: {:?} 和 {:?}", Type::Any, right_shape)));
+        }
+        let ty = Self::merge_return_type(span, Some(left.ty), right.ty)?;
+        Ok(ReturnInfo { ty, shape: left.shape.or(right.shape) })
+    }
+
+    fn infer_return_type(&mut self, stmt: &Stmt) -> Result<Option<Type>> {
+        self.infer_returns(stmt, true).map(|(info, _)| info.map(|info| info.ty))
+    }
+
+    pub(crate) fn check_return_type(&mut self, stmt: &Stmt) -> Result<()> {
+        self.infer_returns(stmt, true).map(|_| ())
+    }
+
+    fn infer_returns(&mut self, stmt: &Stmt, tail: bool) -> Result<(Option<ReturnInfo>, bool)> {
         match &stmt.kind {
-            StmtKind::Return(Some(expr)) => Ok((Some(self.infer_expr(expr)?), true)),
-            StmtKind::Return(None) => Ok((Some(Type::Void), true)),
+            StmtKind::Return(Some(expr)) => Ok((Some(self.infer_return_expr(expr)?), true)),
+            StmtKind::Return(None) => Ok((Some(ReturnInfo { ty: Type::Void, shape: Some(Type::Void) }), true)),
             StmtKind::Block(stmts) => {
                 let mut ret = None;
                 for (idx, stmt) in stmts.iter().enumerate() {
-                    let (ty, always_returns) = self.infer_returns(stmt, tail && idx == stmts.len().saturating_sub(1))?;
-                    if let Some(ty) = ty {
-                        ret = Some(Self::merge_return_type(stmt.span, ret, ty)?);
+                    let (info, always_returns) = self.infer_returns(stmt, tail && idx == stmts.len().saturating_sub(1))?;
+                    if let Some(info) = info {
+                        ret = Some(Self::merge_return_info(stmt.span, ret, info)?);
                     }
                     if always_returns {
                         return Ok((ret, true));
@@ -42,8 +107,8 @@ impl Compiler {
                 let (mut ret, then_returns) = self.infer_returns(then_body, tail)?;
                 let else_returns = if let Some(body) = else_body {
                     let (else_ty, else_returns) = self.infer_returns(body, tail)?;
-                    if let Some(ty) = else_ty {
-                        ret = Some(Self::merge_return_type(body.span, ret, ty)?);
+                    if let Some(info) = else_ty {
+                        ret = Some(Self::merge_return_info(body.span, ret, info)?);
                     }
                     else_returns
                 } else {
@@ -79,8 +144,8 @@ impl Compiler {
                 Ok((None, false))
             }
             StmtKind::Expr(expr, close) => {
-                let ty = self.infer_expr(expr)?;
-                Ok(if *close || !tail { (None, false) } else { (Some(ty), true) })
+                let info = self.infer_return_expr(expr)?;
+                Ok(if *close || !tail { (None, false) } else { (Some(info), true) })
             }
             _ => {
                 self.infer_stmt(stmt)?;

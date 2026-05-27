@@ -1732,6 +1732,174 @@ mod tests {
     }
 
     #[test]
+    fn string_return_survives_scope_exit() -> anyhow::Result<()> {
+        let vm = Vm::with_all()?;
+        vm.import_code(
+            "vm_string_return_scope",
+            r#"
+            pub fn source_root() {
+                "../assets/character/男主角换装"
+            }
+
+            pub fn binary_root() {
+                "character_binary/男主角换装"
+            }
+
+            pub fn runtime_binary_url() {
+                "/" + binary_root()
+            }
+
+            pub fn action_groups() {
+                let root = source_root();
+                let binary_url = runtime_binary_url();
+                let binary_root = binary_root();
+                [
+                    {
+                        id: "field_bottom",
+                        source_spine: root + "/战斗外/boy_b.spine",
+                        skeleton: binary_url + "/战斗外/boy_b/boy_b.skel.bytes",
+                        export_skeleton: binary_root + "/战斗外/boy_b/boy_b.skel.bytes"
+                    }
+                ]
+            }
+            "#
+            .as_bytes()
+            .to_vec(),
+        )?;
+
+        let compiled = vm.get_fn("vm_string_return_scope::source_root", &[])?;
+        assert_eq!(compiled.ret_ty(), &Type::Str);
+        let source_root: extern "C" fn() -> *const Dynamic = unsafe { std::mem::transmute(compiled.ptr()) };
+        let source_root = unsafe { &*source_root() };
+        assert_eq!(source_root.as_str(), "../assets/character/男主角换装");
+
+        let compiled = vm.get_fn("vm_string_return_scope::action_groups", &[])?;
+        assert_eq!(compiled.ret_ty(), &Type::Any);
+        let action_groups: extern "C" fn() -> *const Dynamic = unsafe { std::mem::transmute(compiled.ptr()) };
+        let groups = unsafe { &*action_groups() };
+        let first = groups.get_idx(0).expect("first action group");
+        assert_eq!(first.get_dynamic("source_spine").map(|value| value.as_str().to_string()), Some("../assets/character/男主角换装/战斗外/boy_b.spine".to_string()));
+        assert_eq!(first.get_dynamic("skeleton").map(|value| value.as_str().to_string()), Some("/character_binary/男主角换装/战斗外/boy_b/boy_b.skel.bytes".to_string()));
+        Ok(())
+    }
+
+    #[test]
+    fn large_dynamic_object_accepts_inline_call_fields() -> anyhow::Result<()> {
+        let vm = Vm::with_all()?;
+        let model_count = 180;
+        let combination_count = 90;
+        let models = (0..model_count)
+            .map(|idx| {
+                format!(
+                    r#"{{id: "model_{idx}", name: "模型_{idx}", source: "/美术资源/角色/少年/套装_{idx}/模型_{idx}.model.json", parts: [
+                        {{slot: "hair", path: "/模型/头发/颜色_{idx}/默认.png", z: 10}},
+                        {{slot: "body", path: "/模型/身体/套装_{idx}/默认.png", z: 1}},
+                        {{slot: "face", path: "/模型/表情/表情_{idx}/默认.png", z: 20}}
+                    ]}}"#
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(",\n");
+        let combinations = (0..combination_count)
+            .map(|idx| format!(r#"{{hair: "color_{idx}", body: "set_{idx}", face: "face_{idx}"}}"#))
+            .collect::<Vec<_>>()
+            .join(",\n");
+        let code = format!(
+            r#"
+            pub fn source_root() {{
+                "/美术资源/角色/少年/默认"
+            }}
+
+            pub fn runtime_boy_url() {{
+                "/cdn/runtime/角色/少年/少年.model.json"
+            }}
+
+            pub fn parts() {{
+                [
+                    {{id: "hair", path: "/模型/头发/黑色/默认.png", z: 10}},
+                    {{id: "body", path: "/模型/身体/校服/默认.png", z: 1}},
+                    {{id: "face", path: "/模型/表情/微笑/默认.png", z: 20}}
+                ]
+            }}
+
+            pub fn action_groups() {{
+                {{
+                    idle: [
+                        {{id: "stand", name: "站立", frames: ["待机/0001.png", "待机/0002.png"]}},
+                        {{id: "blink", name: "眨眼", frames: ["表情/眨眼/0001.png", "表情/眨眼/0002.png"]}}
+                    ],
+                    move: [
+                        {{id: "walk", name: "行走", frames: ["行走/0001.png", "行走/0002.png"]}},
+                        {{id: "run", name: "奔跑", frames: ["奔跑/0001.png", "奔跑/0002.png"]}}
+                    ]
+                }}
+            }}
+
+            pub fn default_model() {{
+                {{
+                    id: "runtime_boy",
+                    name: "运行时少年",
+                    skins: [
+                        {{id: "school", title: "校服", source: "/套装/校服/model.json"}},
+                        {{id: "casual", title: "便服", source: "/套装/便服/model.json"}}
+                    ],
+                    models: [
+                        {models}
+                    ]
+                }}
+            }}
+
+            pub fn first_nine_combinations() {{
+                [
+                    {combinations}
+                ]
+            }}
+
+            pub fn config() {{
+                {{
+                    source_root: source_root(),
+                    runtime_boy_url: runtime_boy_url(),
+                    parts: parts(),
+                    action_groups: action_groups(),
+                    default_model: default_model(),
+                    first_nine_combinations: first_nine_combinations()
+                }}
+            }}
+
+            pub fn start() {{
+                root::add("local/vm_large_inline_call_object/config", {{
+                    source_root: source_root(),
+                    runtime_boy_url: runtime_boy_url(),
+                    parts: parts(),
+                    action_groups: action_groups(),
+                    default_model: default_model(),
+                    first_nine_combinations: first_nine_combinations()
+                }})
+            }}
+            "#
+        );
+        vm.import_code(
+            "vm_large_inline_call_object",
+            code.into_bytes(),
+        )?;
+
+        let compiled = vm.get_fn("vm_large_inline_call_object::config", &[])?;
+        assert_eq!(compiled.ret_ty(), &Type::Any);
+        let config: extern "C" fn() -> *const Dynamic = unsafe { std::mem::transmute(compiled.ptr()) };
+        let result = unsafe { &*config() };
+        assert_eq!(result.get_dynamic("source_root").map(|value| value.as_str().to_string()), Some("/美术资源/角色/少年/默认".to_string()));
+        assert_eq!(result.get_dynamic("first_nine_combinations").map(|value| value.len()), Some(combination_count));
+
+        let compiled = vm.get_fn("vm_large_inline_call_object::start", &[])?;
+        assert_eq!(compiled.ret_ty(), &Type::Bool);
+        let start: extern "C" fn() -> bool = unsafe { std::mem::transmute(compiled.ptr()) };
+        assert!(start());
+        let saved = root::get("local/vm_large_inline_call_object/config")?;
+        assert_eq!(saved.get_dynamic("first_nine_combinations").map(|value| value.len()), Some(combination_count));
+        Ok(())
+    }
+
+    #[test]
     fn gpu_struct_layout_packs_and_unpacks_dynamic_maps() -> anyhow::Result<()> {
         let vm = Vm::with_all()?;
         vm.import_code(

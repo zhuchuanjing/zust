@@ -270,7 +270,7 @@ impl JITRunTime {
             return Ok(());
         };
 
-        if ret_ty.is_any() {
+        if ret_ty.is_any() || ret_ty.is_str() || matches!(ret_ty, Type::Map | Type::List | Type::Iter) {
             let value = self.convert(ctx, (value, value_ty), Type::Any)?;
             let fn_id = self.scope_exit_dynamic_fn.ok_or_else(|| anyhow!("VM dynamic return runtime is not registered"))?;
             let fn_ref = self.get_fn_ref(ctx, fn_id);

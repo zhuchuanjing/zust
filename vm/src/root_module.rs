@@ -114,7 +114,7 @@ pub const ROOT_NATIVE: [(&str, &[Type], Type, *const u8); 18] = [
     ("mount_fjall", &[Type::Any], Type::Void, root_mount_fjall as *const u8),
     ("add_list", &[Type::Any], Type::Bool, root_add_list as *const u8),
     ("add_map", &[Type::Any], Type::Bool, root_add_map as *const u8),
-    ("add", &[Type::Any, Type::Any], Type::I32, root_add as *const u8),
+    ("add", &[Type::Any, Type::Any], Type::Bool, root_add as *const u8),
     ("dir", &[Type::Any], Type::Any, root_dir as *const u8),
     ("remove", &[Type::Any], Type::Any, root_remove as *const u8),
     ("contains", &[Type::Any], Type::Bool, root_contains as *const u8),

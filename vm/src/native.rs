@@ -218,7 +218,10 @@ extern "C" fn any_to_i64(addr: *const Dynamic) -> i64 {
     if addr.is_null() {
         return 0;
     }
-    unsafe { (&*addr).as_int().unwrap_or(0) }
+    unsafe {
+        let value = &*addr;
+        value.as_int().or_else(|| value.as_float().map(|value| value as i64)).unwrap_or(0)
+    }
 }
 
 extern "C" fn any_to_bool(addr: *const Dynamic) -> bool {

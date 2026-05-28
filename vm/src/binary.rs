@@ -367,6 +367,12 @@ impl JITRunTime {
             let right = self.convert(ctx, right_vt, Type::Str)?;
             return self.any_logic(ctx, left, op, right);
         }
+        let right_float = if ty.is_float() {
+            let right = right.as_float().ok_or(anyhow!("非数字"))?;
+            Some(if ty.is_f32() { ctx.builder.ins().f32const(right as f32) } else { ctx.builder.ins().f64const(right) })
+        } else {
+            None
+        };
         match op {
             BinaryOp::Add | BinaryOp::AddAssign => {
                 if ty.is_str() {
@@ -380,16 +386,22 @@ impl JITRunTime {
                 }
                 if ty.is_int() | ty.is_uint() {
                     return Ok((ctx.builder.ins().iadd_imm(left, right.as_int().ok_or(anyhow!("非整数"))?), ty));
+                } else if ty.is_float() {
+                    return Ok((ctx.builder.ins().fadd(left, right_float.unwrap()), ty));
                 }
             }
             BinaryOp::Sub | BinaryOp::SubAssign => {
                 if ty.is_int() | ty.is_uint() {
                     return Ok((ctx.builder.ins().iadd_imm(left, -right.as_int().ok_or(anyhow!("非整数"))?), ty));
+                } else if ty.is_float() {
+                    return Ok((ctx.builder.ins().fsub(left, right_float.unwrap()), ty));
                 }
             }
             BinaryOp::Mul | BinaryOp::MulAssign => {
                 if ty.is_int() | ty.is_uint() {
                     return Ok((ctx.builder.ins().imul_imm(left, right.as_int().ok_or(anyhow!("非整数"))?), ty));
+                } else if ty.is_float() {
+                    return Ok((ctx.builder.ins().fmul(left, right_float.unwrap()), ty));
                 }
             }
             BinaryOp::Div | BinaryOp::DivAssign => {
@@ -397,6 +409,8 @@ impl JITRunTime {
                     return Ok((ctx.builder.ins().sdiv_imm(left, right.as_int().ok_or(anyhow!("非整数"))?), ty));
                 } else if ty.is_uint() {
                     return Ok((ctx.builder.ins().udiv_imm(left, right.as_int().ok_or(anyhow!("非整数"))?), ty));
+                } else if ty.is_float() {
+                    return Ok((ctx.builder.ins().fdiv(left, right_float.unwrap()), ty));
                 }
             }
             BinaryOp::Shl | BinaryOp::ShlAssign => {
@@ -425,6 +439,8 @@ impl JITRunTime {
                     return Ok((ctx.builder.ins().icmp_imm(IntCC::Equal, left, right.as_int().unwrap()), Type::Bool));
                 } else if ty.is_bool() {
                     return Ok((ctx.builder.ins().icmp_imm(IntCC::Equal, left, bool_imm().unwrap()), Type::Bool));
+                } else if ty.is_float() {
+                    return Ok((ctx.builder.ins().fcmp(FloatCC::Equal, left, right_float.unwrap()), Type::Bool));
                 }
             }
             BinaryOp::Ne => {
@@ -432,6 +448,8 @@ impl JITRunTime {
                     return Ok((ctx.builder.ins().icmp_imm(IntCC::NotEqual, left, right.as_int().unwrap()), Type::Bool));
                 } else if ty.is_bool() {
                     return Ok((ctx.builder.ins().icmp_imm(IntCC::NotEqual, left, bool_imm().unwrap()), Type::Bool));
+                } else if ty.is_float() {
+                    return Ok((ctx.builder.ins().fcmp(FloatCC::NotEqual, left, right_float.unwrap()), Type::Bool));
                 }
             }
             BinaryOp::Le => {
@@ -439,6 +457,8 @@ impl JITRunTime {
                     return Ok((ctx.builder.ins().icmp_imm(IntCC::SignedLessThanOrEqual, left, right.as_int().unwrap()), Type::Bool));
                 } else if ty.is_uint() {
                     return Ok((ctx.builder.ins().icmp_imm(IntCC::UnsignedLessThanOrEqual, left, right.as_int().unwrap()), Type::Bool));
+                } else if ty.is_float() {
+                    return Ok((ctx.builder.ins().fcmp(FloatCC::LessThanOrEqual, left, right_float.unwrap()), Type::Bool));
                 }
             }
             BinaryOp::Lt => {
@@ -446,6 +466,8 @@ impl JITRunTime {
                     return Ok((ctx.builder.ins().icmp_imm(IntCC::SignedLessThan, left, right.as_int().unwrap()), Type::Bool));
                 } else if ty.is_uint() {
                     return Ok((ctx.builder.ins().icmp_imm(IntCC::UnsignedLessThan, left, right.as_int().unwrap()), Type::Bool));
+                } else if ty.is_float() {
+                    return Ok((ctx.builder.ins().fcmp(FloatCC::LessThan, left, right_float.unwrap()), Type::Bool));
                 }
             }
             BinaryOp::Ge => {
@@ -453,6 +475,8 @@ impl JITRunTime {
                     return Ok((ctx.builder.ins().icmp_imm(IntCC::SignedGreaterThanOrEqual, left, right.as_int().unwrap()), Type::Bool));
                 } else if ty.is_uint() {
                     return Ok((ctx.builder.ins().icmp_imm(IntCC::UnsignedGreaterThanOrEqual, left, right.as_int().unwrap()), Type::Bool));
+                } else if ty.is_float() {
+                    return Ok((ctx.builder.ins().fcmp(FloatCC::GreaterThanOrEqual, left, right_float.unwrap()), Type::Bool));
                 }
             }
             BinaryOp::Gt => {
@@ -460,6 +484,8 @@ impl JITRunTime {
                     return Ok((ctx.builder.ins().icmp_imm(IntCC::SignedGreaterThan, left, right.as_int().unwrap()), Type::Bool));
                 } else if ty.is_uint() {
                     return Ok((ctx.builder.ins().icmp_imm(IntCC::UnsignedGreaterThan, left, right.as_int().unwrap()), Type::Bool));
+                } else if ty.is_float() {
+                    return Ok((ctx.builder.ins().fcmp(FloatCC::GreaterThan, left, right_float.unwrap()), Type::Bool));
                 }
             }
             BinaryOp::Mod | BinaryOp::ModAssign => {

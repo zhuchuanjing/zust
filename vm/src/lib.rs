@@ -684,6 +684,107 @@ mod tests {
     }
 
     #[test]
+    fn casts_any_float_to_i32_without_zeroing() -> anyhow::Result<()> {
+        let vm = Vm::with_all()?;
+        vm.import_code(
+            "vm_any_float_to_i32",
+            br#"
+            pub fn direct(value) {
+                value as i32
+            }
+
+            pub fn map_field(value) {
+                let field = value.v;
+                field as i32
+            }
+
+            pub fn damage(attacker, def_rate) {
+                let x = attacker.atk * (1.0 - def_rate);
+                x as i32
+            }
+            "#
+            .to_vec(),
+        )?;
+
+        let compiled = vm.get_fn("vm_any_float_to_i32::direct", &[Type::Any])?;
+        assert_eq!(compiled.ret_ty(), &Type::I32);
+        let direct: extern "C" fn(*const Dynamic) -> i32 = unsafe { std::mem::transmute(compiled.ptr()) };
+        let value = Dynamic::from(9.5f64);
+        assert_eq!(direct(&value), 9);
+
+        let compiled = vm.get_fn("vm_any_float_to_i32::map_field", &[Type::Any])?;
+        assert_eq!(compiled.ret_ty(), &Type::I32);
+        let map_field: extern "C" fn(*const Dynamic) -> i32 = unsafe { std::mem::transmute(compiled.ptr()) };
+        let value = dynamic::map!("v"=> 9.5f64);
+        assert_eq!(map_field(&value), 9);
+
+        let compiled = vm.get_fn("vm_any_float_to_i32::damage", &[Type::Any, Type::Any])?;
+        assert_eq!(compiled.ret_ty(), &Type::I32);
+        let damage: extern "C" fn(*const Dynamic, *const Dynamic) -> i32 = unsafe { std::mem::transmute(compiled.ptr()) };
+        let attacker = dynamic::map!("atk"=> 64i64);
+        let def_rate = Dynamic::from(0.17f64);
+        assert_eq!(damage(&attacker, &def_rate), 53);
+        Ok(())
+    }
+
+    #[test]
+    fn binary_imm_promotes_integer_literals_for_float_left_values() -> anyhow::Result<()> {
+        let vm = Vm::with_all()?;
+        vm.import_code(
+            "vm_float_binary_imm",
+            br#"
+            pub fn add_f32(value: f32) {
+                value + 1i32
+            }
+
+            pub fn sub_f32(value: f32) {
+                value - 1i32
+            }
+
+            pub fn mul_f32(value: f32) {
+                value * 2i32
+            }
+
+            pub fn div_f32(value: f32) {
+                value / 2i32
+            }
+
+            pub fn gt_f32(value: f32) {
+                value > 2i32
+            }
+            "#
+            .to_vec(),
+        )?;
+
+        let compiled = vm.get_fn("vm_float_binary_imm::add_f32", &[Type::F32])?;
+        assert_eq!(compiled.ret_ty(), &Type::F32);
+        let add_f32: extern "C" fn(f32) -> f32 = unsafe { std::mem::transmute(compiled.ptr()) };
+        assert_eq!(add_f32(2.5), 3.5);
+
+        let compiled = vm.get_fn("vm_float_binary_imm::sub_f32", &[Type::F32])?;
+        assert_eq!(compiled.ret_ty(), &Type::F32);
+        let sub_f32: extern "C" fn(f32) -> f32 = unsafe { std::mem::transmute(compiled.ptr()) };
+        assert_eq!(sub_f32(2.5), 1.5);
+
+        let compiled = vm.get_fn("vm_float_binary_imm::mul_f32", &[Type::F32])?;
+        assert_eq!(compiled.ret_ty(), &Type::F32);
+        let mul_f32: extern "C" fn(f32) -> f32 = unsafe { std::mem::transmute(compiled.ptr()) };
+        assert_eq!(mul_f32(2.5), 5.0);
+
+        let compiled = vm.get_fn("vm_float_binary_imm::div_f32", &[Type::F32])?;
+        assert_eq!(compiled.ret_ty(), &Type::F32);
+        let div_f32: extern "C" fn(f32) -> f32 = unsafe { std::mem::transmute(compiled.ptr()) };
+        assert_eq!(div_f32(5.0), 2.5);
+
+        let compiled = vm.get_fn("vm_float_binary_imm::gt_f32", &[Type::F32])?;
+        assert_eq!(compiled.ret_ty(), &Type::Bool);
+        let gt_f32: extern "C" fn(f32) -> bool = unsafe { std::mem::transmute(compiled.ptr()) };
+        assert!(gt_f32(2.5));
+        assert!(!gt_f32(1.5));
+        Ok(())
+    }
+
+    #[test]
     fn any_keys_returns_map_keys_and_empty_list_for_other_values() -> anyhow::Result<()> {
         let vm = Vm::with_all()?;
         vm.import_code(

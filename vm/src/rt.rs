@@ -326,73 +326,40 @@ impl JITRunTime {
     }
 
     pub(crate) fn short_circuit_logic(&mut self, ctx: &mut BuildContext, left: (Value, Type), op: BinaryOp, right: &Expr) -> Result<(Value, Type)> {
-        let is_any = left.1.is_any();
-        if is_any {
-            let left_cond = self.bool_value(ctx, left.clone())?;
-            let rhs_block = ctx.builder.create_block();
-            let short_block = ctx.builder.create_block();
-            let end_block = ctx.builder.create_block();
-            ctx.builder.append_block_param(end_block, ptr_type());
+        let left = self.bool_value(ctx, left)?;
+        let rhs_block = ctx.builder.create_block();
+        let short_block = ctx.builder.create_block();
+        let end_block = ctx.builder.create_block();
+        ctx.builder.append_block_param(end_block, types::I8);
 
-            match op {
-                BinaryOp::And => {
-                    ctx.builder.ins().brif(left_cond, rhs_block, &[], short_block, &[]);
-                }
-                BinaryOp::Or => {
-                    ctx.builder.ins().brif(left_cond, short_block, &[], rhs_block, &[]);
-                }
-                _ => unreachable!(),
+        match op {
+            BinaryOp::And => {
+                ctx.builder.ins().brif(left, rhs_block, &[], short_block, &[]);
             }
-
-            ctx.builder.switch_to_block(rhs_block);
-            let right = self.eval(ctx, right)?.get(ctx).unwrap();
-            let right_any = self.convert(ctx, right, Type::Any)?;
-            ctx.builder.ins().jump(end_block, &[cranelift::codegen::ir::BlockArg::Value(right_any)]);
-            ctx.builder.seal_block(rhs_block);
-
-            ctx.builder.switch_to_block(short_block);
-            ctx.builder.ins().jump(end_block, &[cranelift::codegen::ir::BlockArg::Value(left.0)]);
-            ctx.builder.seal_block(short_block);
-
-            ctx.builder.switch_to_block(end_block);
-            let result = ctx.builder.block_params(end_block)[0];
-            Ok((result, Type::Any))
-        } else {
-            let left = self.bool_value(ctx, left)?;
-            let rhs_block = ctx.builder.create_block();
-            let short_block = ctx.builder.create_block();
-            let end_block = ctx.builder.create_block();
-            ctx.builder.append_block_param(end_block, types::I8);
-
-            match op {
-                BinaryOp::And => {
-                    ctx.builder.ins().brif(left, rhs_block, &[], short_block, &[]);
-                }
-                BinaryOp::Or => {
-                    ctx.builder.ins().brif(left, short_block, &[], rhs_block, &[]);
-                }
-                _ => unreachable!(),
+            BinaryOp::Or => {
+                ctx.builder.ins().brif(left, short_block, &[], rhs_block, &[]);
             }
-
-            ctx.builder.switch_to_block(rhs_block);
-            let right = self.eval(ctx, right)?.get(ctx).unwrap();
-            let right = self.bool_value(ctx, right)?;
-            ctx.builder.ins().jump(end_block, &[cranelift::codegen::ir::BlockArg::Value(right)]);
-            ctx.builder.seal_block(rhs_block);
-
-            ctx.builder.switch_to_block(short_block);
-            let short_value = match op {
-                BinaryOp::And => ctx.builder.ins().iconst(types::I8, 0),
-                BinaryOp::Or => ctx.builder.ins().iconst(types::I8, 1),
-                _ => unreachable!(),
-            };
-            ctx.builder.ins().jump(end_block, &[cranelift::codegen::ir::BlockArg::Value(short_value)]);
-            ctx.builder.seal_block(short_block);
-
-            ctx.builder.switch_to_block(end_block);
-            let result = ctx.builder.block_params(end_block)[0];
-            Ok((result, Type::Bool))
+            _ => unreachable!(),
         }
+
+        ctx.builder.switch_to_block(rhs_block);
+        let right = self.eval(ctx, right)?.get(ctx).unwrap();
+        let right = self.bool_value(ctx, right)?;
+        ctx.builder.ins().jump(end_block, &[cranelift::codegen::ir::BlockArg::Value(right)]);
+        ctx.builder.seal_block(rhs_block);
+
+        ctx.builder.switch_to_block(short_block);
+        let short_value = match op {
+            BinaryOp::And => ctx.builder.ins().iconst(types::I8, 0),
+            BinaryOp::Or => ctx.builder.ins().iconst(types::I8, 1),
+            _ => unreachable!(),
+        };
+        ctx.builder.ins().jump(end_block, &[cranelift::codegen::ir::BlockArg::Value(short_value)]);
+        ctx.builder.seal_block(short_block);
+
+        ctx.builder.switch_to_block(end_block);
+        let result = ctx.builder.block_params(end_block)[0];
+        Ok((result, Type::Bool))
     }
 
     fn struct_alloc(&mut self, ctx: &mut BuildContext, ty: &Type) -> Result<Value> {
@@ -857,7 +824,6 @@ impl JITRunTime {
                     let assign_expr = if op.is_assign() { Some(left.clone()) } else { None };
                     let left = match self.eval(ctx, left)?.get(ctx) {
                         Some(left) => left,
-                        None if matches!(op, BinaryOp::And | BinaryOp::Or) => self.get_null_value(ctx)?,
                         None => return Err(anyhow!("binary left has no value: {:?}", left)),
                     };
                     if op == &BinaryOp::Idx {

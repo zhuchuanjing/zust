@@ -149,7 +149,11 @@ impl SymbolTable {
                 {
                     return Ok((idx, field_ty.clone()));
                 }
-                return Ok((usize::MAX, Type::Any));
+                match name {
+                    "is_map" | "is_list" | "is_string" | "is_null" | "contains" | "starts_with" => return Ok((usize::MAX, Type::Bool)),
+                    "len" => return Ok((usize::MAX, Type::I32)),
+                    _ => return Ok((usize::MAX, Type::Any)),
+                }
             }
             Type::Struct { params: _, fields: _ } => {
                 return ty.get_field(name).map(|(idx, ty)| (idx, ty.clone()));

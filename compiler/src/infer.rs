@@ -232,7 +232,10 @@ impl Compiler {
             },
             ExprKind::Binary { left, op, right } => {
                 let assign_idx = if op.is_assign() { if let ExprKind::Var(idx) = &left.kind { Some(*idx) } else { None } } else { None };
-                let ty = if op.is_logic() { Type::Bool } else if op == &BinaryOp::Idx {
+                let ty = if op.is_logic() {
+                    let left_ty = self.infer_expr(left)?;
+                    if matches!(op, BinaryOp::And | BinaryOp::Or) && left_ty.is_any() { Type::Any } else { Type::Bool }
+                } else if op == &BinaryOp::Idx {
                     let left_ty = self.infer_expr(left)?;
                     if let Type::Array(elem_ty, _) = left_ty {
                         (*elem_ty).clone()

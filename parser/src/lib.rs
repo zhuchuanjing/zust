@@ -530,28 +530,63 @@ impl Parser {
         while self.pos < self.buf.len() && self.buf[self.pos] <= b'9' && self.buf[self.pos] >= b'0' {
             self.pos += 1;
         }
+        let mut is_float = false;
         if self.pos < self.buf.len() && self.buf[self.pos] == b'.' && self.ahead().map(|ch| ch <= b'9' && ch >= b'0').unwrap_or(false) {
+            is_float = true;
             self.pos += 1;
             while self.pos < self.buf.len() && self.buf[self.pos] <= b'9' && self.buf[self.pos] >= b'0' {
                 self.pos += 1;
             }
-            if self.pos < self.buf.len() && (self.buf[self.pos] == b'e' || self.buf[self.pos] == b'E') && self.ahead().map(|ch| ch <= b'9' && ch >= b'0').unwrap_or(false) {
+        }
+        if self.pos < self.buf.len() && (self.buf[self.pos] == b'e' || self.buf[self.pos] == b'E') {
+            let mut exp_pos = self.pos + 1;
+            if exp_pos < self.buf.len() && (self.buf[exp_pos] == b'+' || self.buf[exp_pos] == b'-') {
+                exp_pos += 1;
+            }
+            if exp_pos < self.buf.len() && self.buf[exp_pos] <= b'9' && self.buf[exp_pos] >= b'0' {
+                is_float = true;
+                self.pos = exp_pos + 1;
                 while self.pos < self.buf.len() && self.buf[self.pos] <= b'9' && self.buf[self.pos] >= b'0' {
                     self.pos += 1;
                 }
             }
-            if self.pos > start {
-                let text = String::from_utf8_lossy(&self.buf[start..self.pos]).to_string();
-                let suffix = self.numeric_suffix();
+        }
+        if self.pos > start {
+            let text = String::from_utf8_lossy(&self.buf[start..self.pos]).to_string();
+            let suffix = self.numeric_suffix();
+            if is_float {
                 return self.float_literal(&text, suffix);
             }
-        } else {
-            if self.pos > start {
-                let text = String::from_utf8_lossy(&self.buf[start..self.pos]).to_string();
-                let suffix = self.numeric_suffix();
-                return self.int_literal(&text, 10, suffix);
-            }
+            return self.int_literal(&text, 10, suffix);
         }
         Err(ParserErr::NotNumber.into())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_scientific_float_suffixes() {
+        let mut parser = Parser::new(b"1.7976931348623157e308f64".to_vec());
+        assert_eq!(parser.number().unwrap(), Dynamic::F64(1.7976931348623157e308));
+
+        let mut parser = Parser::new(b"1e-3f32".to_vec());
+        assert_eq!(parser.number().unwrap(), Dynamic::F32(1e-3f32));
+    }
+
+    #[test]
+    fn parses_immediate_closure_call() {
+        let mut parser = Parser::new(b"|| { 1i32 }()".to_vec());
+        let expr = parser.get_expr().unwrap();
+        let ExprKind::Call { obj, params } = expr.kind else {
+            panic!("expected closure call, got {expr:?}");
+        };
+        assert!(params.is_empty());
+        let ExprKind::Closure { args, .. } = obj.kind else {
+            panic!("expected closure callee, got {obj:?}");
+        };
+        assert!(args.is_empty());
     }
 }

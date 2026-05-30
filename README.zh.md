@@ -130,6 +130,10 @@ for i in 0..10 {
     print(i);
 }
 
+// for 可以直接迭代动态 list 和 map 的值：
+for item in some_list { ... }
+for value in some_map { ... }
+
 let label = if list.len() > 0 { "non-empty" } else { "empty" };
 
 let value = 0i32;
@@ -141,6 +145,23 @@ loop {
     break;
 }
 ```
+
+`for in` 在动态 list/map 上直接迭代值；迭代 map 的 key 请用 `.keys()`。**`for in` 不迭代字符串**（不会按字符遍历）。
+
+### 语言限制
+
+Zust 有意不实现 Rust 的全部语法特性，以下是已知的设计差异和当前限制：
+
+| 特性 | Zust 行为 | 原因 |
+|------|----------|------|
+| `break value` | 不支持，只能 `break;` | `break` 是纯控制流语句 |
+| `loop` 作为表达式 | 不支持 | 同上，用变量赋值替代 |
+| 代码块 `{...}` 作为表达式 | 直接写 `let y = { ... }` 报错 | 用 `\|\|{...}()` 即调闭包替代 |
+| `struct`/`impl`/`const` 在函数内 | 不支持，只能顶层定义 | 编译器不支持局部类型定义 |
+| 嵌套函数 (`fn` 在 `fn` 内) | 部分场景触发编译器崩溃 | 提取到顶层或用闭包 |
+| 整数溢出 | panic（不回绕） | 安全策略，类似 Rust debug |
+| `!` 对 float/Any | 不支持 | 仅 bool（逻辑取反）和 int/uint（按位取反） |
+| `for ch in "hello"` | 不迭代字符 | 用 `while` + `get_idx` 替代 |
 
 ### 结构体和 impl
 
@@ -205,6 +226,12 @@ pub fn demo_closure() {
 
     add_base(identity(5i32))
 }
+
+// 闭包可以立即调用：
+pub fn immediate_closure() {
+    let r = || { 1i32 + 2i32 }();
+    r
+}
 ```
 
 ### 导入模块
@@ -244,7 +271,7 @@ pub struct BigFloat<N> {
 
 动态值暴露常用成员方法：
 
-- 类型和复制辅助：`is_map()`、`is_list()`、`clone()`、`len()`、`keys()`、`to_string()`。
+- 类型和复制辅助：`is_map()`、`is_list()`、`is_string()`、`is_null()`、`clone()`、`len()`、`keys()`、`to_string()`。
 - List 和字符串辅助：`push(value)`、`pop()`、`split(sep)`、`slice(start, stop, inclusive)`。
 - Map 和索引辅助：`get_idx(idx)`、`set_idx(idx, value)`、`get_key(key)`、`set_key(key, value)`、`del_key(key)`、`contains(value)`、`starts_with(prefix)`。
 - 迭代辅助：`iter()`、`next()`。

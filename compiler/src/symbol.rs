@@ -154,6 +154,13 @@ impl SymbolTable {
             Type::Struct { params: _, fields: _ } => {
                 return ty.get_field(name).map(|(idx, ty)| (idx, ty.clone()));
             }
+            Type::Str => {
+                let any_method = match name {
+                    "len" | "contains" | "split" | "starts_with" | "is_string" | "is_null" => format!("Any::{}", name),
+                    _ => return Err(anyhow!("未发现 symbol {:?} {}", ty, name)),
+                };
+                return Ok((usize::MAX, Type::Symbol { id: self.get_id(&any_method)?, params: Vec::new() }));
+            }
             Type::Symbol { id, params: _ } => *id,
             Type::Vec(_, _) => self.get_id("Vec")?,
             Type::Fn { tys: _, ret } => {
@@ -161,8 +168,8 @@ impl SymbolTable {
             }
             _ => {
                 //增加一个外部函数定义
-                if name == "is_map" || name == "is_list" {
-                    return Ok((usize::MAX, Type::Bool));
+                if matches!(name, "is_map" | "is_list" | "is_string" | "is_null") {
+                    return Ok((usize::MAX, Type::Symbol { id: self.get_id(&format!("Any::{}", name))?, params: Vec::new() }));
                 }
                 return Err(anyhow!("未发现 symbol {:?} {}", ty, name));
             }

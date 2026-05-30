@@ -12,6 +12,7 @@ impl SpirvCompiler {
         match op {
             UnaryOp::Neg if value.ty.is_float() => Ok(Value { id: self.builder.f_negate(ty_id, None, value.id)?, ty: value.ty }),
             UnaryOp::Neg if value.ty.is_int() || value.ty.is_uint() => Ok(Value { id: self.builder.s_negate(ty_id, None, value.id)?, ty: value.ty }),
+            UnaryOp::Not if value.ty.is_int() || value.ty.is_uint() => Ok(Value { id: self.builder.not(ty_id, None, value.id)?, ty: value.ty }),
             UnaryOp::Not => {
                 let bool_id = self.get_type(SpirvTy::Value(Type::Bool));
                 let value = self.bool_value(value)?;

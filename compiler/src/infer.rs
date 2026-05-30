@@ -1,7 +1,7 @@
 use super::{Compiler, Symbol};
 use anyhow::Result;
 use dynamic::{Dynamic, Type};
-use parser::{BinaryOp, Expr, ExprKind, PatternKind, Span, Stmt, StmtKind, UnaryOp};
+use parser::{BinaryOp, Expr, ExprKind, Pattern, PatternKind, Span, Stmt, StmtKind, UnaryOp};
 
 #[derive(Clone)]
 struct ReturnInfo {
@@ -10,6 +10,49 @@ struct ReturnInfo {
 }
 
 impl Compiler {
+    fn add_pattern_bindings_for_infer(&mut self, pat: &Pattern, expr_ty: Type) -> Result<()> {
+        match &pat.kind {
+            PatternKind::Ident { name, ty } => {
+                let annotated_ty = self.symbols.get_type(ty)?;
+                self.add_name(name.clone());
+                self.add_ty(if annotated_ty.is_any() { expr_ty } else { annotated_ty });
+            }
+            PatternKind::Var { idx, .. } => self.set_ty(*idx, expr_ty),
+            PatternKind::Tuple(pats) => {
+                if let Type::Tuple(tys) = expr_ty {
+                    for (pat, ty) in pats.iter().zip(tys) {
+                        self.add_pattern_bindings_for_infer(pat, ty)?;
+                    }
+                } else {
+                    for pat in pats {
+                        self.add_pattern_bindings_for_infer(pat, Type::Any)?;
+                    }
+                }
+            }
+            PatternKind::List { elems, .. } => {
+                for pat in elems {
+                    self.add_pattern_bindings_for_infer(pat, Type::Any)?;
+                }
+            }
+            PatternKind::Wildcard => {
+                self.add_name("".into());
+                self.add_ty(expr_ty);
+            }
+            PatternKind::Literal(_) | PatternKind::Member(_, _) | PatternKind::Idx(_, _) => {}
+        }
+        Ok(())
+    }
+
+    fn for_pattern_ty(&mut self, range: &Expr) -> Result<Type> {
+        if matches!(range.kind, ExprKind::Range { .. }) {
+            return self.infer_expr(range);
+        }
+        Ok(match self.infer_expr(range)? {
+            Type::Array(elem_ty, _) | Type::Vec(elem_ty, _) => elem_ty.as_ref().clone(),
+            _ => Type::Any,
+        })
+    }
+
     fn merge_return_type(span: Span, left: Option<Type>, right: Type) -> Result<Type> {
         match left {
             Some(left) if left == right => Ok(left),
@@ -125,18 +168,8 @@ impl Compiler {
             }
             StmtKind::Loop(body) => self.infer_returns(body, false),
             StmtKind::For { pat, range, body } => {
-                if let PatternKind::Var { idx, .. } = &pat.kind {
-                    let ty = self.infer_expr(range)?;
-                    self.set_ty(*idx, ty);
-                } else if let PatternKind::Tuple(pats) = &pat.kind {
-                    let ty = self.infer_expr(range)?;
-                    assert!(ty.is_any());
-                    for pat in pats {
-                        if let Some(idx) = pat.var() {
-                            self.set_ty(idx, Type::Any);
-                        }
-                    }
-                }
+                let ty = self.for_pattern_ty(range)?;
+                self.add_pattern_bindings_for_infer(pat, ty)?;
                 self.infer_returns(body, false).map(|(ty, _)| (ty, false))
             }
             StmtKind::Let { .. } => {
@@ -164,6 +197,22 @@ impl Compiler {
                 let idx = self.top() + (*idx as usize);
                 if idx < self.tys.len() { self.symbols.get_type(&self.tys[idx]) } else { Ok(Type::Any) }
             }
+            ExprKind::Ident(ident) => {
+                for idx in (self.top()..self.names.len()).rev() {
+                    if self.names[idx].eq(ident) && idx < self.tys.len() {
+                        return self.symbols.get_type(&self.tys[idx]);
+                    }
+                }
+                let id = self.symbols.get_id(ident).map_err(|_| Self::semantic_error(expr.span, format!("未找到标识符 {}", ident)))?;
+                match self.symbols.get_symbol(id)?.1 {
+                    Symbol::Const { ty, .. } => Ok(ty.clone()),
+                    Symbol::Static { ty, .. } => Ok(ty.clone()),
+                    Symbol::Struct(ty, _) => Ok(ty.clone()),
+                    Symbol::Fn { .. } => Ok(Type::Symbol { id, params: Vec::new() }),
+                    Symbol::Native(ty) => Ok(ty.clone()),
+                    s => Err(Self::semantic_error(expr.span, format!("符号 {:?} 不是变量、常量、静态变量、结构体", s))),
+                }
+            }
             ExprKind::Id(id, _) => match self.symbols.get_symbol(*id)?.1 {
                 Symbol::Const { ty, .. } => Ok(ty.clone()),
                 Symbol::Static { ty, .. } => Ok(ty.clone()),
@@ -175,8 +224,8 @@ impl Compiler {
             ExprKind::AssocId { id, params } => Ok(Type::Symbol { id: *id, params: params.clone() }),
             ExprKind::Unary { op, value } => match op {
                 UnaryOp::Not => {
-                    self.infer_expr(value.as_ref())?;
-                    Ok(Type::Bool)
+                    let ty = self.infer_expr(value.as_ref())?;
+                    if ty.is_int() || ty.is_uint() { Ok(ty) } else { Ok(Type::Bool) }
                 }
                 UnaryOp::Neg => self.infer_expr(value.as_ref()),
                 UnaryOp::Unknow => Ok(Type::Any),
@@ -466,34 +515,13 @@ impl Compiler {
                 self.infer_stmt(body)
             }
             StmtKind::For { pat, range, body } => {
-                if let PatternKind::Var { idx, .. } = &pat.kind {
-                    let ty = self.infer_expr(range)?;
-                    self.set_ty(*idx, ty);
-                } else if let PatternKind::Tuple(pats) = &pat.kind {
-                    let ty = self.infer_expr(range)?;
-                    assert!(ty.is_any());
-                    for pat in pats {
-                        if let Some(idx) = pat.var() {
-                            self.set_ty(idx, Type::Any);
-                        }
-                    }
-                }
+                let ty = self.for_pattern_ty(range)?;
+                self.add_pattern_bindings_for_infer(pat, ty)?;
                 self.infer_stmt(body)
             }
             StmtKind::Let { pat, value } => {
                 let expr_ty = if let StmtKind::Expr(expr, _) = &value.kind { self.infer_expr(expr)? } else { self.infer_stmt(value)? };
-                if let PatternKind::Ident { ty, .. } = &pat.kind {
-                    let annotated_ty = self.symbols.get_type(ty)?;
-                    if annotated_ty.is_any() {
-                        self.add_ty(expr_ty);
-                    } else {
-                        self.add_ty(annotated_ty);
-                    }
-                } else if let PatternKind::Var { idx, .. } = &pat.kind {
-                    self.set_ty(*idx, expr_ty);
-                } else if matches!(pat.kind, PatternKind::Wildcard) {
-                    self.add_ty(expr_ty);
-                }
+                self.add_pattern_bindings_for_infer(pat, expr_ty)?;
                 Ok(Type::Void)
             }
             _ => Ok(Type::Void),

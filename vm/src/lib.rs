@@ -817,6 +817,131 @@ mod tests {
     }
 
     #[test]
+    fn string_methods_work_on_static_string_and_any_string_values() -> anyhow::Result<()> {
+        let vm = Vm::with_all()?;
+        vm.import_code(
+            "vm_string_methods",
+            br#"
+            pub fn static_string_methods(text: string) {
+                let parts = text.split(",");
+                text.starts_with("alpha")
+                    && text.is_string()
+                    && !text.is_null()
+                    && parts.len() == 2
+                    && parts.get_idx(0) == "alpha"
+                    && parts.get_idx(1) == "beta"
+            }
+
+            pub fn any_string_methods(value) {
+                let parts = value.split(",");
+                value.starts_with("alpha")
+                    && value.is_string()
+                    && !value.is_null()
+                    && parts.len() == 2
+                    && parts.get_idx(0) == "alpha"
+                    && parts.get_idx(1) == "beta"
+            }
+
+            pub fn any_null_methods(value) {
+                value.is_null() && !value.is_string()
+            }
+            "#
+            .to_vec(),
+        )?;
+
+        let compiled = vm.get_fn("vm_string_methods::static_string_methods", &[Type::Str])?;
+        assert_eq!(compiled.ret_ty(), &Type::Bool);
+        let static_string_methods: extern "C" fn(*const Dynamic) -> bool = unsafe { std::mem::transmute(compiled.ptr()) };
+        let text = Dynamic::from("alpha,beta");
+        assert!(static_string_methods(&text));
+
+        let compiled = vm.get_fn("vm_string_methods::any_string_methods", &[Type::Any])?;
+        assert_eq!(compiled.ret_ty(), &Type::Bool);
+        let any_string_methods: extern "C" fn(*const Dynamic) -> bool = unsafe { std::mem::transmute(compiled.ptr()) };
+        assert!(any_string_methods(&text));
+
+        let compiled = vm.get_fn("vm_string_methods::any_null_methods", &[Type::Any])?;
+        assert_eq!(compiled.ret_ty(), &Type::Bool);
+        let any_null_methods: extern "C" fn(*const Dynamic) -> bool = unsafe { std::mem::transmute(compiled.ptr()) };
+        let value = Dynamic::Null;
+        assert!(any_null_methods(&value));
+        Ok(())
+    }
+
+    #[test]
+    fn primitive_type_check_methods_call_any_runtime() -> anyhow::Result<()> {
+        let vm = Vm::with_all()?;
+        vm.import_code(
+            "vm_primitive_type_check_methods",
+            br#"
+            pub fn int_checks() {
+                !42i64.is_list()
+                    && !42i64.is_map()
+                    && !42i64.is_string()
+                    && !42i64.is_null()
+            }
+
+            pub fn bool_checks() {
+                !true.is_list() && !true.is_map() && !true.is_null()
+            }
+            "#
+            .to_vec(),
+        )?;
+
+        let compiled = vm.get_fn("vm_primitive_type_check_methods::int_checks", &[])?;
+        assert_eq!(compiled.ret_ty(), &Type::Bool);
+        let int_checks: extern "C" fn() -> bool = unsafe { std::mem::transmute(compiled.ptr()) };
+        assert!(int_checks());
+
+        let compiled = vm.get_fn("vm_primitive_type_check_methods::bool_checks", &[])?;
+        assert_eq!(compiled.ret_ty(), &Type::Bool);
+        let bool_checks: extern "C" fn() -> bool = unsafe { std::mem::transmute(compiled.ptr()) };
+        assert!(bool_checks());
+        Ok(())
+    }
+
+    #[test]
+    fn for_loop_iterates_any_list_and_map_values() -> anyhow::Result<()> {
+        let vm = Vm::with_all()?;
+        vm.import_code(
+            "vm_for_any_collections",
+            br#"
+            pub fn list_sum(items) {
+                let total = 0i64;
+                for item in items {
+                    total += item;
+                }
+                total
+            }
+
+            pub fn map_sum(data) {
+                let total = 0i64;
+                for (key, value) in data {
+                    total += value;
+                }
+                total
+            }
+            "#
+            .to_vec(),
+        )?;
+
+        let compiled = vm.get_fn("vm_for_any_collections::list_sum", &[Type::Any])?;
+        assert_eq!(compiled.ret_ty(), &Type::Any);
+        let list_sum: extern "C" fn(*const Dynamic) -> *const Dynamic = unsafe { std::mem::transmute(compiled.ptr()) };
+        let items = Dynamic::list(vec![1i64.into(), 2i64.into(), 3i64.into()]);
+        let result = unsafe { &*list_sum(&items) };
+        assert_eq!(result.as_int(), Some(6));
+
+        let compiled = vm.get_fn("vm_for_any_collections::map_sum", &[Type::Any])?;
+        assert_eq!(compiled.ret_ty(), &Type::Any);
+        let map_sum: extern "C" fn(*const Dynamic) -> *const Dynamic = unsafe { std::mem::transmute(compiled.ptr()) };
+        let data = dynamic::map!("a"=> 4i64, "b"=> 5i64);
+        let result = unsafe { &*map_sum(&data) };
+        assert_eq!(result.as_int(), Some(9));
+        Ok(())
+    }
+
+    #[test]
     fn compares_concrete_value_with_string_literal_as_string() -> anyhow::Result<()> {
         let vm = Vm::with_all()?;
         vm.import_code(
@@ -1016,6 +1141,36 @@ mod tests {
 
         let compiled = vm.get_fn("vm_unary_not_any_loop_var::count_missing", &[Type::Any])?;
         assert_eq!(compiled.ret_ty(), &Type::I32);
+        Ok(())
+    }
+
+    #[test]
+    fn closure_literal_can_be_called_immediately() -> anyhow::Result<()> {
+        let vm = Vm::with_all()?;
+        vm.import_code(
+            "vm_closure_immediate_call",
+            br#"
+            pub fn no_args() {
+                let r = || { 1i32 }();
+                r
+            }
+
+            pub fn with_arg() {
+                |value: i32| { value + 1i32 }(2i32)
+            }
+            "#
+            .to_vec(),
+        )?;
+
+        let compiled = vm.get_fn("vm_closure_immediate_call::no_args", &[])?;
+        assert_eq!(compiled.ret_ty(), &Type::I32);
+        let no_args: extern "C" fn() -> i32 = unsafe { std::mem::transmute(compiled.ptr()) };
+        assert_eq!(no_args(), 1);
+
+        let compiled = vm.get_fn("vm_closure_immediate_call::with_arg", &[])?;
+        assert_eq!(compiled.ret_ty(), &Type::I32);
+        let with_arg: extern "C" fn() -> i32 = unsafe { std::mem::transmute(compiled.ptr()) };
+        assert_eq!(with_arg(), 3);
         Ok(())
     }
 
@@ -1901,10 +2056,7 @@ mod tests {
             })
             .collect::<Vec<_>>()
             .join(",\n");
-        let combinations = (0..combination_count)
-            .map(|idx| format!(r#"{{hair: "color_{idx}", body: "set_{idx}", face: "face_{idx}"}}"#))
-            .collect::<Vec<_>>()
-            .join(",\n");
+        let combinations = (0..combination_count).map(|idx| format!(r#"{{hair: "color_{idx}", body: "set_{idx}", face: "face_{idx}"}}"#)).collect::<Vec<_>>().join(",\n");
         let code = format!(
             r#"
             pub fn source_root() {{
@@ -1979,10 +2131,7 @@ mod tests {
             }}
             "#
         );
-        vm.import_code(
-            "vm_large_inline_call_object",
-            code.into_bytes(),
-        )?;
+        vm.import_code("vm_large_inline_call_object", code.into_bytes())?;
 
         let compiled = vm.get_fn("vm_large_inline_call_object::config", &[])?;
         assert_eq!(compiled.ret_ty(), &Type::Any);
@@ -2187,6 +2336,562 @@ mod tests {
         let result = unsafe { &*result };
 
         assert!(result.as_custom::<NavMapForFunctionArg>().is_some());
+        Ok(())
+    }
+
+    // ---- 新增边界条件测试 ----
+
+    #[test]
+    fn dynamic_type_checks_on_null_and_primitive_values() -> anyhow::Result<()> {
+        let vm = Vm::with_all()?;
+        vm.import_code(
+            "vm_dynamic_type_checks",
+            br#"
+            pub fn is_list_on_int() {
+                let x = 42i64;
+                x.is_list()
+            }
+
+            pub fn is_map_on_int() {
+                let x = 42i64;
+                x.is_map()
+            }
+
+            pub fn is_null_on_int() {
+                let x = 42i64;
+                x.is_null()
+            }
+            "#
+            .to_vec(),
+        )?;
+
+        let compiled = vm.get_fn("vm_dynamic_type_checks::is_list_on_int", &[])?;
+        assert_eq!(compiled.ret_ty(), &Type::Bool);
+        let is_list_on_int: extern "C" fn() -> bool = unsafe { std::mem::transmute(compiled.ptr()) };
+        assert!(!is_list_on_int());
+
+        let compiled = vm.get_fn("vm_dynamic_type_checks::is_map_on_int", &[])?;
+        assert_eq!(compiled.ret_ty(), &Type::Bool);
+        let is_map_on_int: extern "C" fn() -> bool = unsafe { std::mem::transmute(compiled.ptr()) };
+        assert!(!is_map_on_int());
+
+        let compiled = vm.get_fn("vm_dynamic_type_checks::is_null_on_int", &[])?;
+        assert_eq!(compiled.ret_ty(), &Type::Bool);
+        let is_null_on_int: extern "C" fn() -> bool = unsafe { std::mem::transmute(compiled.ptr()) };
+        assert!(!is_null_on_int());
+        Ok(())
+    }
+
+    #[test]
+    fn empty_for_loop_range_has_zero_iterations() -> anyhow::Result<()> {
+        let vm = Vm::with_all()?;
+        vm.import_code(
+            "vm_empty_for_range",
+            br#"
+            pub fn empty_exclusive() {
+                let count = 0i32;
+                for i in 0..0 {
+                    count += i;
+                }
+                count
+            }
+
+            pub fn single_inclusive_iteration() {
+                let count = 0i32;
+                for i in 5..=5 {
+                    count += i;
+                }
+                count
+            }
+            "#
+            .to_vec(),
+        )?;
+
+        let compiled = vm.get_fn("vm_empty_for_range::empty_exclusive", &[])?;
+        assert_eq!(compiled.ret_ty(), &Type::I32);
+        let empty_exclusive: extern "C" fn() -> i32 = unsafe { std::mem::transmute(compiled.ptr()) };
+        assert_eq!(empty_exclusive(), 0);
+
+        let compiled = vm.get_fn("vm_empty_for_range::single_inclusive_iteration", &[])?;
+        assert_eq!(compiled.ret_ty(), &Type::I32);
+        let single_inclusive: extern "C" fn() -> i32 = unsafe { std::mem::transmute(compiled.ptr()) };
+        assert_eq!(single_inclusive(), 5);
+        Ok(())
+    }
+
+    #[test]
+    fn map_contains_key_on_non_existent_and_nested_keys() -> anyhow::Result<()> {
+        let vm = Vm::with_all()?;
+        vm.import_code(
+            "vm_map_contains",
+            br#"
+            pub fn contains_existing(data) {
+                data.contains("name")
+            }
+
+            pub fn contains_missing(data) {
+                data.contains("nothing")
+            }
+            "#
+            .to_vec(),
+        )?;
+
+        let compiled = vm.get_fn("vm_map_contains::contains_existing", &[Type::Any])?;
+        assert_eq!(compiled.ret_ty(), &Type::Bool);
+        let contains_existing: extern "C" fn(*const Dynamic) -> bool = unsafe { std::mem::transmute(compiled.ptr()) };
+        let data = dynamic::map!("name"=> "test");
+        assert!(contains_existing(&data));
+
+        let compiled = vm.get_fn("vm_map_contains::contains_missing", &[Type::Any])?;
+        assert_eq!(compiled.ret_ty(), &Type::Bool);
+        let contains_missing: extern "C" fn(*const Dynamic) -> bool = unsafe { std::mem::transmute(compiled.ptr()) };
+        assert!(!contains_missing(&data));
+        Ok(())
+    }
+
+    #[test]
+    fn list_pop_on_empty_list_returns_null() -> anyhow::Result<()> {
+        let vm = Vm::with_all()?;
+        vm.import_code(
+            "vm_pop_empty",
+            br#"
+            pub fn pop_new_list() {
+                let items = [];
+                let value = items.pop();
+                let still_empty = items.len() == 0;
+                {value: value, empty: still_empty}
+            }
+
+            pub fn pop_until_empty() {
+                let items = [1i64, 2i64];
+                items.pop();
+                let last = items.pop();
+                let drained = items.pop();
+                {last: last, drained: drained}
+            }
+            "#
+            .to_vec(),
+        )?;
+
+        let compiled = vm.get_fn("vm_pop_empty::pop_new_list", &[])?;
+        assert_eq!(compiled.ret_ty(), &Type::Any);
+        let pop_new_list: extern "C" fn() -> *const Dynamic = unsafe { std::mem::transmute(compiled.ptr()) };
+        let result = unsafe { &*pop_new_list() };
+        assert!(result.get_dynamic("value").is_some_and(|v| v.is_null()));
+        assert_eq!(result.get_dynamic("empty").and_then(|v| v.as_bool()), Some(true));
+
+        let compiled = vm.get_fn("vm_pop_empty::pop_until_empty", &[])?;
+        assert_eq!(compiled.ret_ty(), &Type::Any);
+        let pop_until_empty: extern "C" fn() -> *const Dynamic = unsafe { std::mem::transmute(compiled.ptr()) };
+        let result = unsafe { &*pop_until_empty() };
+        assert_eq!(result.get_dynamic("last").and_then(|v| v.as_int()), Some(1));
+        assert!(result.get_dynamic("drained").is_some_and(|v| v.is_null()));
+        Ok(())
+    }
+
+    #[test]
+    fn void_function_with_multiple_code_paths() -> anyhow::Result<()> {
+        let vm = Vm::with_all()?;
+        vm.import_code(
+            "vm_void_multi_path",
+            br#"
+            pub fn log_if_positive(value: i64) {
+                if value > 0 {
+                    print(value);
+                    return;
+                }
+                if value < 0 {
+                    print(-value);
+                    return;
+                }
+                print(0);
+            }
+            "#
+            .to_vec(),
+        )?;
+
+        let compiled = vm.get_fn("vm_void_multi_path::log_if_positive", &[Type::I64])?;
+        assert!(compiled.ret_ty().is_void());
+        Ok(())
+    }
+
+    #[test]
+    fn any_method_call_chain_on_returned_dynamic_value() -> anyhow::Result<()> {
+        let vm = Vm::with_all()?;
+        vm.import_code(
+            "vm_any_method_chain",
+            br#"
+            pub fn get_tags(data) {
+                let tags = data.tags;
+                if tags.is_list() {
+                    return tags.len();
+                }
+                0
+            }
+            "#
+            .to_vec(),
+        )?;
+
+        let compiled = vm.get_fn("vm_any_method_chain::get_tags", &[Type::Any])?;
+        assert_eq!(compiled.ret_ty(), &Type::I32);
+        let get_tags: extern "C" fn(*const Dynamic) -> i32 = unsafe { std::mem::transmute(compiled.ptr()) };
+        let data = dynamic::map!("tags"=> Dynamic::list(vec!["a".into(), "b".into(), "c".into()]));
+        assert_eq!(get_tags(&data), 3);
+
+        let empty_data = Dynamic::Null;
+        assert_eq!(get_tags(&empty_data), 0);
+        Ok(())
+    }
+
+    #[test]
+    fn root_get_returns_null_for_missing_key_which_compares_correctly() -> anyhow::Result<()> {
+        let vm = Vm::with_all()?;
+        vm.import_code(
+            "vm_root_get_missing",
+            br#"
+            pub fn check_missing() {
+                let existing = root::get("local/vm_root_get_missing_test");
+                if existing.is_map() {
+                    return false;
+                }
+                true
+            }
+            "#
+            .to_vec(),
+        )?;
+
+        let compiled = vm.get_fn("vm_root_get_missing::check_missing", &[])?;
+        assert_eq!(compiled.ret_ty(), &Type::Bool);
+        let check_missing: extern "C" fn() -> bool = unsafe { std::mem::transmute(compiled.ptr()) };
+        assert!(check_missing());
+        Ok(())
+    }
+
+    #[test]
+    fn map_get_key_on_null_map_returns_null() -> anyhow::Result<()> {
+        let vm = Vm::with_all()?;
+        vm.import_code(
+            "vm_get_key_null_map",
+            br#"
+            pub fn get_key_null(data) {
+                data.get_key("missing")
+            }
+            "#
+            .to_vec(),
+        )?;
+
+        let compiled = vm.get_fn("vm_get_key_null_map::get_key_null", &[Type::Any])?;
+        assert_eq!(compiled.ret_ty(), &Type::Any);
+        let get_key_null: extern "C" fn(*const Dynamic) -> *const Dynamic = unsafe { std::mem::transmute(compiled.ptr()) };
+
+        let data_map = dynamic::map!("exists"=> 1i64);
+        let missing = unsafe { &*get_key_null(&data_map) };
+        assert!(missing.is_null());
+
+        let null = Dynamic::Null;
+        let result = unsafe { &*get_key_null(&null) };
+        assert!(result.is_null());
+        Ok(())
+    }
+
+    #[test]
+    fn keys_on_empty_map_returns_empty_list() -> anyhow::Result<()> {
+        let vm = Vm::with_all()?;
+        vm.import_code(
+            "vm_keys_empty_map",
+            br#"
+            pub fn empty_map_keys() {
+                let data = {};
+                data.keys().len()
+            }
+            "#
+            .to_vec(),
+        )?;
+
+        let compiled = vm.get_fn("vm_keys_empty_map::empty_map_keys", &[])?;
+        assert_eq!(compiled.ret_ty(), &Type::I32);
+        let empty_map_keys: extern "C" fn() -> i32 = unsafe { std::mem::transmute(compiled.ptr()) };
+        assert_eq!(empty_map_keys(), 0);
+        Ok(())
+    }
+
+    #[test]
+    fn cast_between_all_integer_widths() -> anyhow::Result<()> {
+        let vm = Vm::with_all()?;
+        vm.import_code(
+            "vm_cast_integer_widths",
+            br#"
+            pub fn i64_to_i32(value: i64) {
+                value as i32
+            }
+
+            pub fn i32_to_i64(value: i32) {
+                value as i64
+            }
+
+            pub fn u32_to_i64(value: u32) {
+                value as i64
+            }
+            "#
+            .to_vec(),
+        )?;
+
+        let compiled = vm.get_fn("vm_cast_integer_widths::i64_to_i32", &[Type::I64])?;
+        assert_eq!(compiled.ret_ty(), &Type::I32);
+        let i64_to_i32: extern "C" fn(i64) -> i32 = unsafe { std::mem::transmute(compiled.ptr()) };
+        assert_eq!(i64_to_i32(42), 42);
+
+        let compiled = vm.get_fn("vm_cast_integer_widths::i32_to_i64", &[Type::I32])?;
+        assert_eq!(compiled.ret_ty(), &Type::I64);
+        let i32_to_i64: extern "C" fn(i32) -> i64 = unsafe { std::mem::transmute(compiled.ptr()) };
+        assert_eq!(i32_to_i64(-1), -1);
+
+        let compiled = vm.get_fn("vm_cast_integer_widths::u32_to_i64", &[Type::U32])?;
+        assert_eq!(compiled.ret_ty(), &Type::I64);
+        let u32_to_i64: extern "C" fn(u32) -> i64 = unsafe { std::mem::transmute(compiled.ptr()) };
+        assert_eq!(u32_to_i64(42), 42);
+        Ok(())
+    }
+
+    #[test]
+    fn boolean_literals_in_complex_expression_trees() -> anyhow::Result<()> {
+        let vm = Vm::with_all()?;
+        vm.import_code(
+            "vm_complex_boolean",
+            br#"
+            pub fn exclusive_or(a: bool, b: bool) {
+                (a && !b) || (!a && b)
+            }
+
+            pub fn implies(a: bool, b: bool) {
+                !a || b
+            }
+            "#
+            .to_vec(),
+        )?;
+
+        let compiled = vm.get_fn("vm_complex_boolean::exclusive_or", &[Type::Bool, Type::Bool])?;
+        assert_eq!(compiled.ret_ty(), &Type::Bool);
+        let exclusive_or: extern "C" fn(bool, bool) -> bool = unsafe { std::mem::transmute(compiled.ptr()) };
+        assert!(exclusive_or(true, false));
+        assert!(exclusive_or(false, true));
+        assert!(!exclusive_or(true, true));
+        assert!(!exclusive_or(false, false));
+
+        let compiled = vm.get_fn("vm_complex_boolean::implies", &[Type::Bool, Type::Bool])?;
+        assert_eq!(compiled.ret_ty(), &Type::Bool);
+        let implies: extern "C" fn(bool, bool) -> bool = unsafe { std::mem::transmute(compiled.ptr()) };
+        assert!(implies(false, true));
+        assert!(implies(false, false));
+        assert!(implies(true, true));
+        assert!(!implies(true, false));
+        Ok(())
+    }
+
+    #[test]
+    fn concrete_struct_method_returning_self_type() -> anyhow::Result<()> {
+        let vm = Vm::with_all()?;
+        vm.import_code(
+            "vm_struct_method_self",
+            br#"
+            pub struct Vec3 {
+                x: f64,
+                y: f64,
+                z: f64,
+            }
+
+            impl Vec3 {
+                pub fn add(self: Vec3, other: Vec3) {
+                    Vec3{x: self.x + other.x, y: self.y + other.y, z: self.z + other.z}
+                }
+            }
+
+            pub fn run() {
+                let v1 = Vec3{x: 1.0f64, y: 2.0f64, z: 3.0f64};
+                let v2 = Vec3{x: 4.0f64, y: 5.0f64, z: 6.0f64};
+                let sum = v1.add(v2);
+                sum.x + sum.y + sum.z
+            }
+            "#
+            .to_vec(),
+        )?;
+
+        let compiled = vm.get_fn("vm_struct_method_self::run", &[])?;
+        assert_eq!(compiled.ret_ty(), &Type::F64);
+        let run: extern "C" fn() -> f64 = unsafe { std::mem::transmute(compiled.ptr()) };
+        assert_eq!(run(), 21.0);
+        Ok(())
+    }
+
+    #[test]
+    fn deep_nested_struct_access_with_multiple_field_levels() -> anyhow::Result<()> {
+        let vm = Vm::with_all()?;
+        vm.import_code(
+            "vm_deep_nested_struct",
+            br#"
+            pub struct A {
+                value: i64,
+            }
+
+            pub struct B {
+                a: A,
+            }
+
+            pub struct C {
+                b: B,
+            }
+
+            pub fn direct_access() {
+                let c = C{b: B{a: A{value: 99}}};
+                c.b.a.value
+            }
+
+            pub fn via_variable() {
+                let c = C{b: B{a: A{value: 77}}};
+                let b = c.b;
+                let a = b.a;
+                a.value
+            }
+            "#
+            .to_vec(),
+        )?;
+
+        let compiled = vm.get_fn("vm_deep_nested_struct::direct_access", &[])?;
+        assert_eq!(compiled.ret_ty(), &Type::I64);
+        let direct_access: extern "C" fn() -> i64 = unsafe { std::mem::transmute(compiled.ptr()) };
+        assert_eq!(direct_access(), 99);
+
+        let compiled = vm.get_fn("vm_deep_nested_struct::via_variable", &[])?;
+        assert_eq!(compiled.ret_ty(), &Type::I64);
+        let via_variable: extern "C" fn() -> i64 = unsafe { std::mem::transmute(compiled.ptr()) };
+        assert_eq!(via_variable(), 77);
+        Ok(())
+    }
+
+    #[test]
+    fn array_index_with_dynamic_value_via_method() -> anyhow::Result<()> {
+        let vm = Vm::with_all()?;
+        vm.import_code(
+            "vm_array_idx_dynamic",
+            br#"
+            pub fn get_by_idx(list, idx) {
+                list.get_idx(idx)
+            }
+            "#
+            .to_vec(),
+        )?;
+
+        let compiled = vm.get_fn("vm_array_idx_dynamic::get_by_idx", &[Type::Any, Type::I64])?;
+        assert_eq!(compiled.ret_ty(), &Type::Any);
+        let get_by_idx: extern "C" fn(*const Dynamic, i64) -> *const Dynamic = unsafe { std::mem::transmute(compiled.ptr()) };
+
+        let list = Dynamic::list(vec!["a".into(), "b".into()]);
+        let first = unsafe { &*get_by_idx(&list, 0) };
+        assert_eq!(first.as_str(), "a");
+
+        let out = unsafe { &*get_by_idx(&list, 10) };
+        assert!(out.is_null());
+        Ok(())
+    }
+
+    #[test]
+    fn dynamic_field_access_with_optional_or_fallback() -> anyhow::Result<()> {
+        let vm = Vm::with_all()?;
+        vm.import_code(
+            "vm_dynamic_or_fallback",
+            br#"
+            pub fn with_fallback(data) {
+                data.name || "unknown"
+            }
+
+            pub fn with_fallback_missing(data) {
+                data.nickname || "unnamed"
+            }
+            "#
+            .to_vec(),
+        )?;
+
+        let compiled = vm.get_fn("vm_dynamic_or_fallback::with_fallback", &[Type::Any])?;
+        assert_eq!(compiled.ret_ty(), &Type::Any);
+        let with_fallback: extern "C" fn(*const Dynamic) -> *const Dynamic = unsafe { std::mem::transmute(compiled.ptr()) };
+        let data = dynamic::map!("name"=> "Alice");
+        let result = unsafe { &*with_fallback(&data) };
+        assert_eq!(result.as_str(), "Alice");
+
+        let compiled = vm.get_fn("vm_dynamic_or_fallback::with_fallback_missing", &[Type::Any])?;
+        let with_fallback_missing: extern "C" fn(*const Dynamic) -> *const Dynamic = unsafe { std::mem::transmute(compiled.ptr()) };
+        let result = unsafe { &*with_fallback_missing(&data) };
+        assert_eq!(result.as_str(), "unnamed");
+        Ok(())
+    }
+
+    #[test]
+    fn for_in_loop_iterates_over_list_and_map_directly() -> anyhow::Result<()> {
+        let vm = Vm::with_all()?;
+        vm.import_code(
+            "vm_for_in_collection",
+            br#"
+            pub fn sum_list(items) {
+                let total = 0i64;
+                for item in items {
+                    total = total + 1;
+                }
+                total
+            }
+
+            pub fn count_map_keys(data) {
+                let count = 0i64;
+                for key in data.keys() {
+                    count = count + 1;
+                }
+                count
+            }
+
+            pub fn for_in_list_works(items) {
+                let exists = false;
+                for item in items {
+                    exists = true;
+                }
+                exists
+            }
+
+            pub fn for_in_map_values_works(data) {
+                let exists = false;
+                for value in data {
+                    exists = true;
+                }
+                exists
+            }
+            "#
+            .to_vec(),
+        )?;
+
+        let compiled = vm.get_fn("vm_for_in_collection::sum_list", &[Type::Any])?;
+        assert_eq!(compiled.ret_ty(), &Type::I64);
+        let sum_list: extern "C" fn(*const Dynamic) -> i64 = unsafe { std::mem::transmute(compiled.ptr()) };
+        let items = Dynamic::list(vec![Dynamic::from(1i64), Dynamic::from(2i64), Dynamic::from(3i64)]);
+        assert_eq!(sum_list(&items), 3);
+
+        let data = dynamic::map!("x"=> 1i64, "y"=> 2i64);
+        let compiled = vm.get_fn("vm_for_in_collection::count_map_keys", &[Type::Any])?;
+        assert_eq!(compiled.ret_ty(), &Type::I64);
+        let count_map_keys: extern "C" fn(*const Dynamic) -> i64 = unsafe { std::mem::transmute(compiled.ptr()) };
+        assert_eq!(count_map_keys(&data), 2);
+
+        let compiled = vm.get_fn("vm_for_in_collection::for_in_list_works", &[Type::Any])?;
+        assert_eq!(compiled.ret_ty(), &Type::Bool);
+        let for_in_list_works: extern "C" fn(*const Dynamic) -> bool = unsafe { std::mem::transmute(compiled.ptr()) };
+        let empty = Dynamic::list(Vec::new());
+        assert!(!for_in_list_works(&empty));
+        assert!(for_in_list_works(&items));
+
+        let compiled = vm.get_fn("vm_for_in_collection::for_in_map_values_works", &[Type::Any])?;
+        assert_eq!(compiled.ret_ty(), &Type::Bool);
+        let for_in_map_values_works: extern "C" fn(*const Dynamic) -> bool = unsafe { std::mem::transmute(compiled.ptr()) };
+        let empty_map = dynamic::map!();
+        assert!(!for_in_map_values_works(&empty_map));
+        assert!(for_in_map_values_works(&data));
+
         Ok(())
     }
 }

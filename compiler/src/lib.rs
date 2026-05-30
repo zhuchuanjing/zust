@@ -92,6 +92,84 @@ mod tests {
     }
 
     #[test]
+    fn const_unary_neg_handles_min_integer_literal() -> anyhow::Result<()> {
+        let mut compiler = Compiler::new();
+        compiler.import_code(
+            "compiler_const_min_int",
+            br#"
+            pub const MIN_I32: i32 = -2147483648i32;
+            "#
+            .to_vec(),
+        )?;
+
+        let id = compiler.symbols.get_id("compiler_const_min_int::MIN_I32")?;
+        let (_, symbol) = compiler.symbols.get_symbol(id)?;
+        let Symbol::Const { value, .. } = symbol else {
+            panic!("MIN_I32 should be a const symbol");
+        };
+        assert_eq!(value.as_int(), Some(i32::MIN as i64));
+        Ok(())
+    }
+
+    #[test]
+    fn return_check_resolves_function_args_before_body_compile() -> anyhow::Result<()> {
+        let mut compiler = Compiler::new();
+        compiler.import_code(
+            "compiler_return_check_args",
+            br#"
+            pub fn no_value_return(flag: bool) {
+                if flag {
+                    return;
+                }
+            }
+
+            pub fn tail_if(flag: bool) {
+                if flag {
+                    1
+                } else {
+                    2
+                }
+            }
+
+            pub fn loop_index(low: i64, high: i64) {
+                let total = 0i64;
+                for i in low..high {
+                    total += i;
+                }
+                total
+            }
+
+            pub fn closure_capture() {
+                let base = 10i32;
+                let add_base = |value: i32| {
+                    value + base
+                };
+                add_base(1i32)
+            }
+
+            pub fn destructured_names() {
+                let (left, right) = (3i32, 4i32);
+                let [first, second] = [5i32, 6i32];
+                let _ = first;
+                left + right + second
+            }
+            "#
+            .to_vec(),
+        )?;
+
+        let no_value_return = compiler.symbols.get_id("compiler_return_check_args::no_value_return")?;
+        assert_eq!(compiler.infer_fn(no_value_return, &[Type::Bool])?, Type::Void);
+
+        let tail_if = compiler.symbols.get_id("compiler_return_check_args::tail_if")?;
+        assert_eq!(compiler.infer_fn(tail_if, &[Type::Bool])?, Type::I32);
+
+        let loop_index = compiler.symbols.get_id("compiler_return_check_args::loop_index")?;
+        assert_eq!(compiler.infer_fn(loop_index, &[Type::I64, Type::I64])?, Type::I64);
+
+        Ok(())
+    }
+
+    #[test]
     fn return_map_and_struct_is_type_error() -> anyhow::Result<()> {
         let mut compiler = Compiler::new();
         let err = match compiler.import_code(
@@ -647,8 +725,11 @@ impl Compiler {
                 self.add_name(arg.clone());
                 self.add_ty(ty.clone());
             }
-            if tys.iter().all(|ty| !ty.is_any()) {
-                self.check_return_type(&body)?;
+            if cap.names.is_empty() && tys.iter().all(|ty| !ty.is_any()) {
+                let saved_state = (self.frames.clone(), self.names.clone(), self.tys.clone());
+                let result = self.check_return_type(&body);
+                self.restore_local_state(saved_state);
+                result?;
             }
             let mut compiled = Vec::new();
             self.compile_stmt(body, &mut compiled, cap)?;
@@ -877,8 +958,12 @@ impl Compiler {
                 Ok(Dynamic::map(values))
             }
             ExprKind::Unary { op, value } => {
-                let value = Expr::new(ExprKind::Value(self.const_expr_value(value)?), value.span);
-                Expr::new(ExprKind::Unary { op: op.clone(), value: Box::new(value) }, expr.span).compact().ok_or_else(|| Self::semantic_error(expr.span, "const 一元表达式无法在编译期求值"))
+                let value = self.const_expr_value(value)?;
+                match op {
+                    parser::UnaryOp::Neg => Ok(-value),
+                    parser::UnaryOp::Not => Ok(!value),
+                    parser::UnaryOp::Unknow => Err(Self::semantic_error(expr.span, "const 一元表达式无法在编译期求值")),
+                }
             }
             ExprKind::Binary { left, op, right } => {
                 let left = Expr::new(ExprKind::Value(self.const_expr_value(left)?), left.span);
@@ -914,7 +999,8 @@ impl Compiler {
                 let mut compiled = self.compile_fn(names.as_slice(), &mut tys.clone(), *body.clone(), &mut Capture::default())?;
                 let (ty, args) = Type::from_args(args.clone());
                 let body_stmt = if compiled.len() == 1 { compiled.pop().unwrap() } else { Stmt::new(StmtKind::Block(compiled), expr.span) };
-                let fn_id = self.symbols.add(SmolStr::from(""), Symbol::Fn { ty, args, generic_params: Vec::new(), cap: local_cap, body: Arc::new(body_stmt), is_pub: false });
+                let name = SmolStr::from(format!("__closure_{}_{}", expr.span.start, expr.span.end));
+                let fn_id = self.symbols.add(name, Symbol::Fn { ty, args, generic_params: Vec::new(), cap: local_cap, body: Arc::new(body_stmt), is_pub: false });
                 Ok(Expr::new(ExprKind::Id(fn_id, None), expr.span))
             }
             ExprKind::Value(v) => {

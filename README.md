@@ -137,6 +137,10 @@ for i in 0..10 {
     print(i);
 }
 
+// for can iterate dynamic lists and maps directly:
+for item in some_list { ... }
+for value in some_map { ... }
+
 let label = if list.len() > 0 { "non-empty" } else { "empty" };
 
 let value = 0i32;
@@ -148,6 +152,23 @@ loop {
     break;
 }
 ```
+
+`for in` iterates values directly over dynamic lists and maps. To iterate map keys, use `.keys()`. **`for in` does not iterate strings** (no character-level traversal).
+
+### Language Limitations
+
+Zust intentionally omits several Rust features. Known design differences and current limitations:
+
+| Feature | Zust Behavior | Reason |
+|---------|--------------|--------|
+| `break value` | Not supported, only `break;` | `break` is a pure control-flow statement |
+| `loop` as expression | Not supported | Use variable assignment instead |
+| Block `{...}` as expression | `let y = { ... }` produces a parse error | Use `\|\|{...}()` immediate closure call |
+| `struct`/`impl`/`const` inside functions | Not supported, top-level only | Compiler does not support local type definitions |
+| Nested function (`fn` inside `fn`) | May trigger compiler crash in some cases | Hoist to top level or use closures |
+| Integer overflow | Panics (does not wrap) | Safety policy, similar to Rust debug mode |
+| `!` on float/Any | Not supported | Only bool (logical NOT) and int/uint (bitwise NOT) |
+| `for ch in "hello"` | Does not iterate characters | Use `while` + `get_idx` instead |
 
 ### Structs And Impl Blocks
 
@@ -212,6 +233,12 @@ pub fn demo_closure() {
 
     add_base(identity(5i32))
 }
+
+// closures can be called immediately:
+pub fn immediate_closure() {
+    let r = || { 1i32 + 2i32 }();
+    r
+}
 ```
 
 ### Imports
@@ -255,7 +282,7 @@ The standard functions are available without a module prefix:
 
 Dynamic values expose common methods:
 
-- Type and copy helpers: `is_map()`, `is_list()`, `clone()`, `len()`, `keys()`, `to_string()`.
+- Type and copy helpers: `is_map()`, `is_list()`, `is_string()`, `is_null()`, `clone()`, `len()`, `keys()`, `to_string()`.
 - List and string helpers: `push(value)`, `pop()`, `split(sep)`, `slice(start, stop, inclusive)`.
 - Map and index helpers: `get_idx(idx)`, `set_idx(idx, value)`, `get_key(key)`, `set_key(key, value)`, `del_key(key)`, `contains(value)`, `starts_with(prefix)`.
 - Iteration helpers: `iter()`, `next()`.

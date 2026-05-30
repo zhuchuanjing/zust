@@ -46,6 +46,14 @@ extern "C" fn any_is_list(addr: *const Dynamic) -> bool {
     !addr.is_null() && unsafe { (*addr).is_list() }
 }
 
+extern "C" fn any_is_string(addr: *const Dynamic) -> bool {
+    !addr.is_null() && unsafe { (*addr).is_str() }
+}
+
+extern "C" fn any_is_null(addr: *const Dynamic) -> bool {
+    addr.is_null() || unsafe { (*addr).is_null() }
+}
+
 extern "C" fn random(start: *const Dynamic, stop: *const Dynamic) -> *const Dynamic {
     if !start.is_null() && !stop.is_null() {
         let mut rng = rand::rng();
@@ -306,10 +314,12 @@ pub const STD: [(&str, &[Type], Type, *const u8); 4] = [
     ("rand", &[Type::Any, Type::Any], Type::Any, random as *const u8),
 ];
 
-pub const ANY: [(&str, &[Type], Type, *const u8); 28] = [
+pub const ANY: [(&str, &[Type], Type, *const u8); 30] = [
     ("Any::null", &[], Type::Any, any_null as *const u8),
     ("Any::is_map", &[Type::Any], Type::Bool, any_is_map as *const u8),
     ("Any::is_list", &[Type::Any], Type::Bool, any_is_list as *const u8),
+    ("Any::is_string", &[Type::Any], Type::Bool, any_is_string as *const u8),
+    ("Any::is_null", &[Type::Any], Type::Bool, any_is_null as *const u8),
     ("Any::clone", &[Type::Any], Type::Any, any_clone as *const u8),
     ("Any::len", &[Type::Any], Type::I32, any_len as *const u8),
     ("Any::keys", &[Type::Any], Type::Any, any_keys as *const u8),

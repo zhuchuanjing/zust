@@ -55,6 +55,7 @@ impl MetalCompiler {
                 let value = self.gen_expr(value)?;
                 match op {
                     UnaryOp::Neg => Ok(Value { code: format!("(-{})", value.code), ty: value.ty }),
+                    UnaryOp::Not if value.ty.is_int() || value.ty.is_uint() => Ok(Value { code: format!("(~{})", value.code), ty: value.ty }),
                     UnaryOp::Not => Ok(Value { code: format!("(!{})", self.bool_expr(value)?.code), ty: Type::Bool }),
                     _ => bail!("unsupported Metal unary op {op:?}"),
                 }

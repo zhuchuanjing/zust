@@ -227,7 +227,7 @@ impl MetalCompiler {
             ExprKind::Value(value) => Some(value.get_type()),
             ExprKind::Typed { ty, .. } => Some(self.resolve_type(ty)),
             ExprKind::Var(idx) => self.vars.get(*idx as usize).and_then(Clone::clone).map(|var| var.ty),
-            ExprKind::Unary { op: UnaryOp::Not, .. } => Some(Type::Bool),
+            ExprKind::Unary { op: UnaryOp::Not, value } => self.infer_expr_ty(value).map(|ty| if ty.is_int() || ty.is_uint() { ty } else { Type::Bool }),
             ExprKind::Unary { value, .. } => self.infer_expr_ty(value),
             ExprKind::Binary { left, op, right } => {
                 if op.is_logic() {

@@ -6,10 +6,10 @@ impl Neg for Dynamic {
     fn neg(self) -> Self::Output {
         use Dynamic::*;
         match self {
-            I8(i) => I8(-i),
-            I16(i) => I16(-i),
-            I32(i) => I32(-i),
-            I64(i) => I64(-i),
+            I8(i) => I8(i.wrapping_neg()),
+            I16(i) => I16(i.wrapping_neg()),
+            I32(i) => I32(i.wrapping_neg()),
+            I64(i) => I64(i.wrapping_neg()),
             F32(f) => F32(-f),
             F64(f) => F64(-f),
             _ => Null,
@@ -22,6 +22,14 @@ impl Not for Dynamic {
     fn not(self) -> Self::Output {
         match self {
             Self::Bool(b) => Self::Bool(!b),
+            Self::I8(i) => Self::I8(!i),
+            Self::I16(i) => Self::I16(!i),
+            Self::I32(i) => Self::I32(!i),
+            Self::I64(i) => Self::I64(!i),
+            Self::U8(i) => Self::U8(!i),
+            Self::U16(i) => Self::U16(!i),
+            Self::U32(i) => Self::U32(!i),
+            Self::U64(i) => Self::U64(!i),
             _ => Self::Null,
         }
     }
@@ -181,6 +189,26 @@ impl BitAnd for Dynamic {
             (Dynamic::U64(l), Dynamic::U64(r)) => Dynamic::U64(l & r),
             (_, _) => Dynamic::Null,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn negating_signed_min_values_does_not_panic() {
+        assert_eq!(-Dynamic::I8(i8::MIN), Dynamic::I8(i8::MIN));
+        assert_eq!(-Dynamic::I16(i16::MIN), Dynamic::I16(i16::MIN));
+        assert_eq!(-Dynamic::I32(i32::MIN), Dynamic::I32(i32::MIN));
+        assert_eq!(-Dynamic::I64(i64::MIN), Dynamic::I64(i64::MIN));
+    }
+
+    #[test]
+    fn not_is_logical_for_bool_and_bitwise_for_ints() {
+        assert_eq!(!Dynamic::Bool(false), Dynamic::Bool(true));
+        assert_eq!(!Dynamic::I32(0b1010), Dynamic::I32(!0b1010));
+        assert_eq!(!Dynamic::U32(0b1010), Dynamic::U32(!0b1010));
     }
 }
 

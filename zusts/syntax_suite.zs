@@ -225,6 +225,9 @@ pub fn test_closures_arrays_ranges_and_calls() {
     let add_base = |value: i32| {
         value + base
     };
+    let immediate = || {
+        1i32
+    }();
 
     let repeated: [u32; 3] = [0u32; 1 + 2];
 
@@ -239,6 +242,7 @@ pub fn test_closures_arrays_ranges_and_calls() {
 
     add_base(5i32) == 15i32
         && add_i32(1i32, 2i32) == 3i32
+        && immediate == 1i32
         && repeated[0] == 0u32
         && repeated[1] == 0u32
         && repeated[2] == 0u32

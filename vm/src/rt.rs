@@ -5,7 +5,7 @@ use std::collections::{BTreeMap, HashMap, VecDeque};
 
 use crate::context::LocalVar;
 
-use super::{FnInfo, FnVariant, PTR_TYPE, context::BuildContext, ptr_type};
+use super::{FnInfo, FnVariant, PTR_TYPE, context::BuildContext, get_type, ptr_type};
 use cranelift::prelude::*;
 use cranelift_jit::{JITBuilder, JITModule};
 use cranelift_module::{DataDescription, DataId, FuncId, Module};
@@ -217,12 +217,24 @@ impl JITRunTime {
                 }
             }
             UnaryOp::Not => {
-                if left.1.is_any() {
-                    return Err(anyhow!("defer any-bool not handling"));
+                if left.1.is_int() || left.1.is_uint() {
+                    let all_ones = ctx.builder.ins().iconst(get_type(&left.1)?, -1);
+                    return Ok((ctx.builder.ins().bxor(left.0, all_ones), left.1));
                 }
                 let zero = ctx.builder.ins().iconst(types::I8, 0);
                 let one = ctx.builder.ins().iconst(types::I8, 1);
-                let is_zero = ctx.builder.ins().icmp_imm(IntCC::Equal, left.0, 0);
+                let cond = if left.1.is_bool() {
+                    left.0
+                } else if left.1.is_f32() {
+                    let zero = ctx.builder.ins().f32const(0.0);
+                    ctx.builder.ins().fcmp(FloatCC::NotEqual, left.0, zero)
+                } else if left.1.is_f64() {
+                    let zero = ctx.builder.ins().f64const(0.0);
+                    ctx.builder.ins().fcmp(FloatCC::NotEqual, left.0, zero)
+                } else {
+                    return Err(anyhow!("未实现 {:?} {:?}", left, op));
+                };
+                let is_zero = ctx.builder.ins().icmp_imm(IntCC::Equal, cond, 0);
                 return Ok((ctx.builder.ins().select(is_zero, one, zero), Type::Bool));
             }
             _ => {}
@@ -822,7 +834,7 @@ impl JITRunTime {
             }
             ExprKind::Unary { op, value } => {
                 let v = self.eval(ctx, value)?.get(ctx).unwrap();
-                if op == &UnaryOp::Not {
+                if op == &UnaryOp::Not && v.1.is_any() {
                     let cond = self.bool_value(ctx, v)?;
                     let zero = ctx.builder.ins().iconst(types::I8, 0);
                     let one = ctx.builder.ins().iconst(types::I8, 1);

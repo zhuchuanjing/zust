@@ -762,7 +762,8 @@ impl Parser {
             self.pos += 1;
             let args = crate::parse_list!(self, Vec::new(), b'|', b',', self.ident_typed()?);
             let body = Box::new(self.block()?);
-            Ok((Expr::new(ExprKind::Closure { args, body }, Span::new(start, self.current_pos())), true))
+            let expr = Expr::new(ExprKind::Closure { args, body }, Span::new(start, self.current_pos()));
+            Ok((self.postfix_expr(start, expr)?, true))
         } else if let Some(this_op) = self.binary_op() {
             let (left, close) = left.ok_or(anyhow!("{:?} need left value", this_op))?;
             if this_op == BinaryOp::RangeOpen {

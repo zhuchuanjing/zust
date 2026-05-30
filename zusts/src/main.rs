@@ -14,6 +14,23 @@ const SYNTAX_BOOL_TESTS: &[&str] = &[
     "syntax_suite::test_closures_arrays_ranges_and_calls",
 ];
 
+const SYNTAX_EDGE_BOOL_TESTS: &[&str] = &[
+    "syntax_edge::test_int_extremes",
+    "syntax_edge::test_empty_containers",
+    "syntax_edge::test_nested_patterns",
+    "syntax_edge::test_nested_loops",
+    "syntax_edge::test_nested_if_chain",
+    "syntax_edge::test_dynamic_list_operations",
+    "syntax_edge::test_dynamic_map_operations",
+    "syntax_edge::test_string_split",
+    "syntax_edge::test_range_expressions",
+    "syntax_edge::test_bitwise_operations",
+    "syntax_edge::test_negation_on_types",
+    "syntax_edge::test_compound_assign_all_ops",
+    "syntax_edge::test_array_index_assign",
+    "syntax_edge::test_string_concat_all_types",
+];
+
 fn main() -> Result<()> {
     let vm = vm::Vm::with_all()?;
 
@@ -25,6 +42,7 @@ fn main() -> Result<()> {
     vm_import_file(&vm, "test", "test.zs")?;
     vm_import_file(&vm, "qsort", "qsort.zs")?;
     vm_import_file(&vm, "syntax_suite", "syntax_suite.zs")?;
+    vm_import_file(&vm, "syntax_edge", "syntax_edge.zs")?;
     vm_import_file(&vm, "test_recursive_bug", "bug_tests/test_recursive_bug.zs")?;
     vm_import_file(&vm, "test_is_list_minimal", "bug_tests/test_is_list_minimal.zs")?;
 
@@ -32,6 +50,9 @@ fn main() -> Result<()> {
 
     // 运行保留下来的回归示例
     for name in SYNTAX_BOOL_TESTS {
+        run_bool_test(&vm, name)?;
+    }
+    for name in SYNTAX_EDGE_BOOL_TESTS {
         run_bool_test(&vm, name)?;
     }
     run_test(&vm, "test_recursive_bug::run_all_tests", &[])?;
@@ -240,6 +261,16 @@ mod tests {
         let vm = vm::Vm::with_all()?;
         vm_import_file(&vm, "syntax_suite", "syntax_suite.zs")?;
         for name in SYNTAX_BOOL_TESTS {
+            run_bool_test(&vm, name)?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn syntax_edge_regression() -> Result<()> {
+        let vm = vm::Vm::with_all()?;
+        vm_import_file(&vm, "syntax_edge", "syntax_edge.zs")?;
+        for name in SYNTAX_EDGE_BOOL_TESTS {
             run_bool_test(&vm, name)?;
         }
         Ok(())

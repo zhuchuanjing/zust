@@ -2894,4 +2894,148 @@ mod tests {
 
         Ok(())
     }
+
+    #[test]
+    fn concurrent_100_threads_no_memory_leak() -> anyhow::Result<()> {
+        let vm = Vm::with_all()?;
+        vm.import_code(
+            "vm_stress",
+            br#"
+            pub fn heavy_alloc(idx: i64) {
+                let items = [];
+                let i = 0;
+                while i < 50 {
+                    items.push({
+                        id: i + idx,
+                        name: "item-" + i,
+                        tags: ["tag-a", "tag-b", "tag-c"],
+                        meta: {
+                            created: 1234567890i64,
+                            score: (i * 3.14f64) as i64,
+                            extra: "prefix/" + i + "/" + idx
+                        }
+                    });
+                    i = i + 1;
+                }
+                items
+            }
+
+            pub fn string_concat_stress() {
+                let i = 0;
+                let result = "";
+                while i < 200 {
+                    result = result + "data-" + i + ",";
+                    i = i + 1;
+                }
+                result
+            }
+            "#
+            .to_vec(),
+        )?;
+
+        let (heavy_ptr, _) = vm.get_fn_ptr("vm_stress::heavy_alloc", &[Type::I64])?;
+        let (concat_ptr, _) = vm.get_fn_ptr("vm_stress::string_concat_stress", &[])?;
+
+        let threads: usize = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(4)
+            .max(100);
+        let iters_per_thread = 200;
+        let total_calls = threads * iters_per_thread * 2;
+
+        let before = current_rss_kb();
+        eprintln!("threads={threads} iters_per_thread={iters_per_thread} total_calls={total_calls} rss_before={before}KB");
+
+        // Round 1: first concurrent execution (arena warm-up)
+        run_stress_round(threads, iters_per_thread, heavy_ptr as usize, concat_ptr as usize);
+        let r1 = current_rss_kb();
+        eprintln!("rss_after_round1={r1}KB");
+
+        // Round 2: should stabilize (no unbounded growth)
+        run_stress_round(threads, iters_per_thread, heavy_ptr as usize, concat_ptr as usize);
+        let r2 = current_rss_kb();
+        eprintln!("rss_after_round2={r2}KB");
+
+        // Round 3: final check
+        run_stress_round(threads, iters_per_thread, heavy_ptr as usize, concat_ptr as usize);
+        let r3 = current_rss_kb();
+        eprintln!("rss_after_round3={r3}KB");
+
+        // Growth should decrease (memory stabilizes after arena allocation in round 1)
+        let d12 = r2.saturating_sub(r1);
+        let d23 = r3.saturating_sub(r2);
+        eprintln!("delta_r1→r2={d12}KB delta_r2→r3={d23}KB");
+
+        // After arena warm-up, subsequent rounds should not grow significantly.
+        // Allow up to 10 MB growth per round (OS page cache, thread stack reuse, etc.)
+        let max_growth_kb = 10 * 1024;
+        assert!(
+            d12 < max_growth_kb && d23 < max_growth_kb,
+            "memory keeps growing between rounds: round1={r1} round2={r2} round3={r3} delta12={d12}KB delta23={d23}KB (max allowed={max_growth_kb}KB)"
+        );
+
+        Ok(())
+    }
+
+    fn run_stress_round(threads: usize, iters: usize, heavy_ptr: usize, concat_ptr: usize) {
+        std::thread::scope(|scope| {
+            let mut handles = Vec::with_capacity(threads);
+            for t in 0..threads {
+                let heavy_ptr = heavy_ptr;
+                let concat_ptr = concat_ptr;
+                handles.push(scope.spawn(move || {
+                    let heavy_fn: extern "C" fn(i64) -> *const Dynamic =
+                        unsafe { std::mem::transmute(heavy_ptr as *const u8) };
+                    let concat_fn: extern "C" fn() -> *const Dynamic =
+                        unsafe { std::mem::transmute(concat_ptr as *const u8) };
+                    for i in 0..iters {
+                        // heavy_alloc: drop returned value to free heap allocation
+                        let r_ptr = heavy_fn((t * iters + i) as i64);
+                        assert!(!r_ptr.is_null());
+                        unsafe {
+                            let r = &*r_ptr;
+                            assert!(r.len() > 0, "heavy_alloc returned empty list");
+                            drop(Box::from_raw(r_ptr as *mut Dynamic));
+                        }
+
+                        // concat: same, drop returned value
+                        let s_ptr = concat_fn();
+                        assert!(!s_ptr.is_null());
+                        unsafe {
+                            let s = &*s_ptr;
+                            assert!(s.len() > 0, "string_concat_stress returned empty");
+                            drop(Box::from_raw(s_ptr as *mut Dynamic));
+                        }
+                    }
+                }));
+            }
+            for h in handles {
+                h.join().unwrap();
+            }
+        });
+    }
+
+    fn current_rss_kb() -> u64 {
+    // macOS: use ps
+    let pid = std::process::id();
+    if let Ok(output) = std::process::Command::new("ps")
+        .args(["-p", &pid.to_string(), "-o", "rss="])
+        .output()
+    {
+        if let Ok(s) = String::from_utf8(output.stdout) {
+            if let Some(kb) = s.trim().parse::<u64>().ok() {
+                return kb;
+            }
+        }
+    }
+    // Linux fallback: /proc/self/statm
+    if let Ok(statm) = std::fs::read_to_string("/proc/self/statm") {
+        let parts: Vec<&str> = statm.split_whitespace().collect();
+        if let Some(rss_pages) = parts.get(1).and_then(|s| s.parse::<u64>().ok()) {
+            return rss_pages * 4; // pages (4KB) → KB
+        }
+    }
+    0
+}
+
 }

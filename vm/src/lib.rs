@@ -2517,6 +2517,53 @@ mod tests {
     }
 
     #[test]
+    fn infers_any_arg_function_return_before_body_compile() -> anyhow::Result<()> {
+        let vm = Vm::with_all()?;
+        vm.import_code(
+            "vm_infer_any_arg_return",
+            br#"
+            pub fn caller(candidate) {
+                let center = polygon_center(candidate.visualPolygon);
+                center[0]
+            }
+
+            pub fn polygon_center(point_list) {
+                let total_x = 0;
+                let total_y = 0;
+                let count = 0;
+                if point_list.is_list() {
+                    for point in point_list {
+                        if point.is_list() && point.len() >= 2 {
+                            total_x += point[0];
+                            total_y += point[1];
+                            count += 1;
+                        }
+                    }
+                }
+                if count == 0 {
+                    return [0, 0];
+                }
+                [total_x / count, total_y / count]
+            }
+            "#
+            .to_vec(),
+        )?;
+
+        let compiled = vm.get_fn("vm_infer_any_arg_return::caller", &[Type::Any])?;
+        assert_eq!(compiled.ret_ty(), &Type::Any);
+        let caller: extern "C" fn(*const Dynamic) -> *const Dynamic = unsafe { std::mem::transmute(compiled.ptr()) };
+        let candidate = dynamic::map!(
+            "visualPolygon"=> Dynamic::list(vec![
+                Dynamic::list(vec![2i64.into(), 4i64.into()]),
+                Dynamic::list(vec![6i64.into(), 8i64.into()]),
+            ])
+        );
+        let result = unsafe { &*caller(&candidate) };
+        assert_eq!(result.as_int(), Some(4));
+        Ok(())
+    }
+
+    #[test]
     fn root_get_returns_null_for_missing_key_which_compares_correctly() -> anyhow::Result<()> {
         let vm = Vm::with_all()?;
         vm.import_code(

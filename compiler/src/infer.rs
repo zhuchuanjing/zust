@@ -415,14 +415,24 @@ impl Compiler {
                     self.fns.insert(id, vec![(generic_args.to_vec(), fn_tys.clone(), Type::Any)]);
                 }
                 let top = self.tys.len();
-                self.tys.append(&mut fn_tys.clone());
-                for c in cap.vars.iter() {
-                    self.tys.push(self.tys[self.top() + *c].clone());
-                }
                 self.frames.push(top);
+                for (arg, ty) in args.iter().zip(fn_tys.iter()) {
+                    self.add_name(arg.clone());
+                    self.add_ty(ty.clone());
+                }
+                for c in cap.vars.iter() {
+                    if let Some((name, ty)) = cap.names.get(*c) {
+                        self.add_name(name.clone());
+                        self.add_ty(ty.clone());
+                    } else {
+                        self.add_name("".into());
+                        self.add_ty(Type::Any);
+                    }
+                }
                 let ret_ty = self.infer_return_type(&body).map(|ty| ty.unwrap_or(Type::Void));
                 if let Some(top) = self.frames.pop() {
                     self.tys.truncate(top);
+                    self.names.truncate(top);
                 }
                 let ret_ty = match ret_ty {
                     Ok(ret_ty) => self.symbols.get_type(&ret_ty).unwrap_or(ret_ty),

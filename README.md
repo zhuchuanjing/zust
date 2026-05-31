@@ -341,13 +341,13 @@ Responses are maps with `status`, `ok`, `url`, `@headers`, and `body`. JSON bodi
 
 ### `llm`
 
-`llm` wraps generic model, image, audio, and TTS requests. The first argument is provider configuration; the later arguments are request payloads and optional notifier objects.
+`llm` wraps model, image, audio, and TTS requests. The first argument is model configuration, usually with `url`, `model`, `key`, and optional request defaults. If `url` is missing, GLM, Doubao, DeepSeek, and Qwen-compatible URLs are inferred from `model`.
 
-- `llm::complete(openai, value)`.
-- `llm::image(openai, value, notifier)`.
-- `llm::audio(openai, value)`.
-- `llm::tts(openai, value)`.
-- `llm::deep(openai, value, notifier)`: start an async completion task and notify progress through `root`.
+- `llm::complete(model, value)`: input can be text, text plus image URLs, or text plus video URLs. Output is `Dynamic`.
+- `llm::image(model, value, notifier)`: input is text plus optional image URLs. The call returns a local task id; the result can be read from `local/tasks/{id}` and is also sent through the notifier when provided.
+- `llm::audio(model, value)`: input audio is passed by URL or data URL. Output is text.
+- `llm::tts(model, value)`: input is text or `{text/input: ...}`. Output is audio bytes or an audio URL.
+- `llm::deep(model, value, notifier)`: start an async completion task and notify progress through `root`.
 
 ### `db`
 

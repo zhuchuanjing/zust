@@ -45,22 +45,64 @@ use futures_util::stream::StreamExt;
 use tokio::io::BufReader;
 use tokio_util::io::StreamReader; // 关键转换工具
 
-pub async fn complete(openai: Dynamic, msg: Dynamic, tx: Option<Dynamic>) -> Result<Dynamic> {
-    if uses_responses_api(&openai, &msg) {
-        let body = if msg.is_map() && msg.contains("input") { msg } else { map!("input"=> list!(map!("role"=> "user", "content"=> response_content(msg)))) };
-        return post("responses", openai, body, tx).await;
+fn model_name(options: &Dynamic) -> String {
+    options
+        .get_dynamic("model")
+        .or_else(|| options.get_dynamic("text_model"))
+        .or_else(|| options.get_dynamic("vision_model"))
+        .or_else(|| options.get_dynamic("image_model"))
+        .or_else(|| options.get_dynamic("tts_model"))
+        .or_else(|| options.get_dynamic("asr_model"))
+        .or_else(|| options.get_dynamic("audio_model"))
+        .map(|v| v.as_str().to_ascii_lowercase())
+        .unwrap_or_default()
+}
+
+fn normalize_provider(options: Dynamic) -> Result<Dynamic> {
+    if options.contains("url") {
+        return Ok(options);
     }
 
-    if msg.is_list() {
-        let mut list = Dynamic::list(Vec::new());
-        for idx in 0..msg.len() {
-            list.push(chat_content_item(msg.get_idx(idx).unwrap()));
-        }
-        post("chat/completions", openai, map!("messages"=> list!(map!("role"=> "user", "content"=> list))), tx).await
+    let model = model_name(&options);
+    if model.starts_with("glm") || model.contains("zhipu") {
+        options.insert("url", "https://open.bigmodel.cn/api/paas/v4");
+    } else if model.starts_with("doubao") || model.contains("ark") || model.contains("volcengine") {
+        options.insert("url", "https://ark.cn-beijing.volces.com/api/v3");
+    } else if model.starts_with("deepseek") {
+        options.insert("url", "https://api.deepseek.com");
+    } else if model.starts_with("qwen") || model.contains("dashscope") {
+        options.insert("url", "https://dashscope.aliyuncs.com/compatible-mode/v1");
+    }
+
+    if options.contains("url") { Ok(options) } else { Err(anyhow!("没有 url；也不能从 model 识别服务商")) }
+}
+
+fn with_kind_model(options: Dynamic, kind: &str) -> Result<Dynamic> {
+    let options = normalize_provider(options)?;
+    let model_key = match kind {
+        "complete" => options.get_dynamic("vision_model").or_else(|| options.get_dynamic("text_model")),
+        "image" => options.get_dynamic("image_model"),
+        "tts" => options.get_dynamic("tts_model").or_else(|| options.get_dynamic("audio_model")),
+        "audio" => options.get_dynamic("asr_model").or_else(|| options.get_dynamic("audio_model")),
+        _ => None,
+    };
+    if let Some(model) = model_key {
+        options.insert("model", model);
+    }
+    Ok(options)
+}
+
+pub async fn complete(bigmodel: Dynamic, msg: Dynamic, tx: Option<Dynamic>) -> Result<Dynamic> {
+    let bigmodel = with_kind_model(bigmodel, "complete")?;
+    if uses_responses_api(&bigmodel, &msg) {
+        let body = if msg.is_map() && msg.contains("input") { msg } else { map!("input"=> list!(map!("role"=> "user", "content"=> response_content(msg)))) };
+        return post("responses", bigmodel, body, tx).await;
+    }
+
+    if msg.is_map() && msg.contains("messages") {
+        post("chat/completions", bigmodel, msg, tx).await
     } else {
-        let mut msg_text = String::new();
-        to_markdown(&msg, &mut msg_text);
-        post("chat/completions", openai, map!("messages"=> list!(map!("role"=> "user", "content"=> msg_text))), tx).await
+        post("chat/completions", bigmodel, map!("messages"=> list!(map!("role"=> "user", "content"=> chat_content(msg)))), tx).await
     }
 }
 
@@ -97,15 +139,115 @@ fn contains_responses_content(msg: &Dynamic) -> bool {
     false
 }
 
+fn chat_content(msg: Dynamic) -> Dynamic {
+    if msg.is_list() {
+        let mut content = Dynamic::list(Vec::new());
+        for idx in 0..msg.len() {
+            if let Some(item) = msg.get_idx(idx) {
+                content.push(chat_content_item(item));
+            }
+        }
+        return content;
+    }
+
+    if msg.is_map() {
+        if let Some(content) = msg.get_dynamic("content") {
+            return chat_content(content);
+        }
+
+        let mut content = Dynamic::list(Vec::new());
+        if let Some(text) = msg.get_dynamic("text").or_else(|| msg.get_dynamic("prompt")) {
+            content.push(map!("type"=> "text", "text"=> text));
+        }
+        push_media_items(&mut content, &msg, &["image", "image_url"], "image");
+        push_media_items(&mut content, &msg, &["images"], "image");
+        push_media_items(&mut content, &msg, &["video", "video_url"], "video");
+        push_media_items(&mut content, &msg, &["videos"], "video");
+        if content.len() > 0 {
+            return content;
+        }
+    }
+
+    let mut msg_text = String::new();
+    to_markdown(&msg, &mut msg_text);
+    msg_text.into()
+}
+
+fn push_media_items(content: &mut Dynamic, msg: &Dynamic, keys: &[&str], media_type: &str) {
+    for key in keys {
+        if let Some(value) = msg.get_dynamic(key) {
+            push_media_value(content, value, media_type);
+        }
+    }
+}
+
+fn push_media_value(content: &mut Dynamic, value: Dynamic, media_type: &str) {
+    if value.is_list() {
+        for idx in 0..value.len() {
+            if let Some(item) = value.get_idx(idx) {
+                push_media_value(content, item, media_type);
+            }
+        }
+        return;
+    }
+
+    content.push(match media_type {
+        "video" => video_content_item(value),
+        _ => image_content_item(value),
+    });
+}
+
+fn image_content_item(item: Dynamic) -> Dynamic {
+    if item.is_map() && item.contains("type") {
+        item
+    } else if item.is_map() {
+        if let Some(url) = item.get_dynamic("url").or_else(|| item.get_dynamic("image_url")).or_else(|| item.get_dynamic("image")) {
+            map!("type"=> "image_url", "image_url"=> map!("url"=> url))
+        } else {
+            map!("type"=> "text", "text"=> item)
+        }
+    } else {
+        map!("type"=> "image_url", "image_url"=> map!("url"=> item))
+    }
+}
+
+fn video_content_item(item: Dynamic) -> Dynamic {
+    if item.is_map() && item.contains("type") {
+        item
+    } else if item.is_map() {
+        if let Some(url) = item.get_dynamic("url").or_else(|| item.get_dynamic("video_url")).or_else(|| item.get_dynamic("video")) {
+            map!("type"=> "video", "video"=> list!(url))
+        } else {
+            map!("type"=> "text", "text"=> item)
+        }
+    } else {
+        map!("type"=> "video", "video"=> list!(item))
+    }
+}
+
 fn chat_content_item(item: Dynamic) -> Dynamic {
     if item.is_map() && item.contains("type") {
         item
     } else if item.is_str() {
         let text = item.as_str();
-        if text.starts_with("http://") || text.starts_with("https://") || text.starts_with("data:image/") { map!("type"=> "image_url", "image_url"=> map!("url"=> item)) } else { map!("type"=> "text", "text"=> item) }
+        if text.starts_with("data:video/") || looks_like_video_url(text) {
+            video_content_item(item)
+        } else if text.starts_with("data:image/") || looks_like_image_url(text) || text.starts_with("http://") || text.starts_with("https://") {
+            image_content_item(item)
+        } else {
+            map!("type"=> "text", "text"=> item)
+        }
     } else {
         map!("type"=> "text", "text"=> item)
     }
+}
+
+fn looks_like_image_url(text: &str) -> bool {
+    (text.starts_with("http://") || text.starts_with("https://")) && [".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp"].iter().any(|suffix| text.to_ascii_lowercase().contains(suffix))
+}
+
+fn looks_like_video_url(text: &str) -> bool {
+    (text.starts_with("http://") || text.starts_with("https://")) && [".mp4", ".mov", ".webm", ".m4v", ".avi"].iter().any(|suffix| text.to_ascii_lowercase().contains(suffix))
 }
 
 fn response_content(msg: Dynamic) -> Dynamic {
@@ -133,20 +275,131 @@ fn response_content_item(item: Dynamic) -> Dynamic {
 }
 
 pub async fn image(openai: Dynamic, msg: Dynamic, tx: Option<Dynamic>) -> Result<Dynamic> {
-    let mut msg_text = String::new();
+    let openai = with_kind_model(openai, "image")?;
+    if uses_dashscope_multimodal_image(&openai) {
+        return post("services/aigc/multimodal-generation/generation", openai, dashscope_image_body(msg), tx).await;
+    }
+    post("images/generations", openai, image_body(msg), tx).await
+}
+
+fn image_body(msg: Dynamic) -> Dynamic {
+    if msg.is_map() {
+        if msg.contains("prompt") || msg.contains("input") {
+            let body = msg.deep_clone();
+            if !body.contains("prompt")
+                && let Some(input) = body.remove_dynamic("input")
+            {
+                body.insert("prompt", input);
+            }
+            return body;
+        }
+        if let Some(text) = msg.get_dynamic("text") {
+            let body = map!("prompt"=> text);
+            copy_image_urls(&body, &msg);
+            return body;
+        }
+    }
+
     if msg.is_list() {
         let mut list = Dynamic::list(Vec::new());
         for idx in 0..msg.len() {
-            list.push(msg.get_idx(idx).unwrap());
+            if let Some(item) = msg.get_idx(idx) {
+                list.push(item);
+            }
         }
-        post("images/generations", openai, map!("prompt"=> list.to_markdown()), tx).await
+        map!("prompt"=> list.to_markdown())
     } else {
+        let mut msg_text = String::new();
         to_markdown(&msg, &mut msg_text);
-        post("images/generations", openai, map!("prompt"=> msg_text), tx).await
+        map!("prompt"=> msg_text)
     }
 }
 
+fn copy_image_urls(body: &Dynamic, msg: &Dynamic) {
+    for key in ["image", "image_url", "images"] {
+        if let Some(value) = msg.get_dynamic(key) {
+            body.insert(key, value);
+        }
+    }
+}
+
+fn uses_dashscope_multimodal_image(options: &Dynamic) -> bool {
+    let kind = options.get_dynamic("kind").map(|v| v.as_str().to_string()).unwrap_or_default();
+    if kind == "dashscope_qwen_image_edit" || kind == "dashscope_multimodal_image" {
+        return true;
+    }
+
+    let url = options.get_dynamic("url").map(|v| v.as_str().to_string()).unwrap_or_default();
+    let model = options.get_dynamic("model").map(|v| v.as_str().to_ascii_lowercase()).unwrap_or_default();
+    url.contains("dashscope.aliyuncs.com/api/v1") && (model.starts_with("qwen-image") || model.starts_with("wan"))
+}
+
+fn dashscope_image_body(msg: Dynamic) -> Dynamic {
+    let parameters = dashscope_image_parameters(&msg);
+    let mut content = Dynamic::list(Vec::new());
+    let mut prompt = Dynamic::Null;
+
+    if msg.is_map() {
+        if let Some(text) = msg.get_dynamic("prompt").or_else(|| msg.get_dynamic("text")).or_else(|| msg.get_dynamic("input")) {
+            prompt = text;
+        }
+        for key in ["image", "image_url"] {
+            if let Some(image) = msg.get_dynamic(key) {
+                content.push(map!("image"=> image));
+            }
+        }
+        for key in ["images", "referenceImages", "reference_images"] {
+            if let Some(images) = msg.get_dynamic(key) {
+                push_dashscope_images(&mut content, images);
+            }
+        }
+    } else {
+        prompt = msg;
+    }
+
+    if !prompt.is_null() {
+        content.push(map!("text"=> prompt));
+    }
+
+    let body = map!(
+        "input"=> map!(
+            "messages"=> list!(
+                map!("role"=> "user", "content"=> content)
+            )
+        )
+    );
+    body.insert("parameters", parameters);
+    body
+}
+
+fn push_dashscope_images(content: &mut Dynamic, images: Dynamic) {
+    if images.is_list() {
+        for idx in 0..images.len() {
+            if let Some(image) = images.get_idx(idx) {
+                push_dashscope_images(content, image);
+            }
+        }
+    } else if images.is_map() {
+        if let Some(url) = images.get_dynamic("url").or_else(|| images.get_dynamic("image")).or_else(|| images.get_dynamic("image_url")) {
+            content.push(map!("image"=> url));
+        }
+    } else if images.is_str() {
+        content.push(map!("image"=> images));
+    }
+}
+
+fn dashscope_image_parameters(msg: &Dynamic) -> Dynamic {
+    let parameters = map!();
+    for key in ["size", "n", "watermark", "seed", "negative_prompt", "prompt_extend", "bbox_list"] {
+        if let Some(value) = msg.get_dynamic(key) {
+            parameters.insert(key, value);
+        }
+    }
+    parameters
+}
+
 pub async fn tts(openai: Dynamic, msg: Dynamic) -> Result<Dynamic> {
+    let openai = with_kind_model(openai, "tts")?;
     let body = if msg.is_map() {
         if !msg.contains("input") {
             if let Some(text) = msg.remove_dynamic("text") {
@@ -258,6 +511,7 @@ pub fn notify(tx: &Dynamic, msg: Dynamic) -> Result<()> {
 
 use base64::{Engine as _, engine::general_purpose};
 pub async fn audio_recognize(bigmodel: Dynamic, audio: Dynamic) -> Result<Dynamic> {
+    let bigmodel = with_kind_model(bigmodel, "audio")?;
     let url = bigmodel.get_dynamic("url").ok_or(anyhow!("没有 url"))?;
     let app_id = bigmodel.get_dynamic("app_id").ok_or(anyhow!("没有 app_id"))?;
     let access_token = bigmodel.get_dynamic("access_token").ok_or(anyhow!("没有 access_token"))?;
@@ -304,7 +558,23 @@ fn copy_request_options(options: &Dynamic, msg: &Dynamic) {
 
 fn copy_request_options_except(options: &Dynamic, msg: &Dynamic, skipped_keys: &[&str]) {
     for key in options.keys() {
-        if key != "url" && key != "key" && key != "api" && key != "endpoint" && key != "method" && !skipped_keys.iter().any(|skipped| key.as_str() == *skipped) {
+        if key != "url"
+            && key != "key"
+            && key != "api"
+            && key != "endpoint"
+            && key != "method"
+            && key != "kind"
+            && key != "provider"
+            && key != "name"
+            && key != "brand"
+            && key != "text_model"
+            && key != "vision_model"
+            && key != "image_model"
+            && key != "audio_model"
+            && key != "tts_model"
+            && key != "asr_model"
+            && !skipped_keys.iter().any(|skipped| key.as_str() == *skipped)
+        {
             msg.insert(key.clone(), options.get_dynamic(key.as_str()).unwrap());
         }
     }
@@ -454,11 +724,82 @@ fn decode_llm_response(t: Dynamic, raw_text: &str) -> Result<Dynamic> {
     if let Some(data) = t.remove_dynamic("data").and_then(|c| c.into_vec::<Dynamic>()).and_then(|v| v.into_iter().next()) {
         return Ok(data);
     }
+    if let Some(output) = t.get_dynamic("output")
+        && let Some(decoded) = decode_output(output)
+    {
+        return Ok(decoded);
+    }
     if let Some(content) = decode_responses_text(&t) {
         return decode_text_content(content, raw_text);
     }
     let choice = t.remove_dynamic("choices").and_then(|c| c.into_vec::<Dynamic>()).and_then(|v| v.into_iter().next()).ok_or_else(|| anyhow!("LLM 响应缺少 data[0] 或 choices[0]: {raw_text}"))?;
     if let Some(content) = choice.remove_dynamic("message").and_then(|m| m.remove_dynamic("content")) { decode_text_content(content, raw_text) } else { Err(anyhow!("结果不是 json")) }
+}
+
+fn decode_output(output: Dynamic) -> Option<Dynamic> {
+    if output.is_list() {
+        for idx in 0..output.len() {
+            let item = output.get_idx(idx)?;
+            if let Some(decoded) = decode_output(item) {
+                return Some(decoded);
+            }
+        }
+        return None;
+    }
+
+    if !output.is_map() {
+        return None;
+    }
+
+    for key in ["task_id", "url", "image_url", "image", "output_url", "b64_json", "base64", "audio_url"] {
+        if output.contains(key) {
+            return Some(output);
+        }
+    }
+
+    if let Some(choices) = output.get_dynamic("choices")
+        && choices.is_list()
+    {
+        for idx in 0..choices.len() {
+            let choice = choices.get_idx(idx)?;
+            if let Some(message) = choice.get_dynamic("message")
+                && let Some(content) = message.get_dynamic("content")
+                && let Some(decoded) = decode_output_content(content)
+            {
+                return Some(decoded);
+            }
+        }
+    }
+
+    if let Some(results) = output.get_dynamic("results")
+        && let Some(decoded) = decode_output(results)
+    {
+        return Some(decoded);
+    }
+
+    None
+}
+
+fn decode_output_content(content: Dynamic) -> Option<Dynamic> {
+    if content.is_list() {
+        for idx in 0..content.len() {
+            let item = content.get_idx(idx)?;
+            if let Some(decoded) = decode_output_content(item) {
+                return Some(decoded);
+            }
+        }
+        return None;
+    }
+
+    if content.is_map() {
+        for key in ["image", "image_url", "url", "output_url", "text"] {
+            if content.contains(key) {
+                return Some(content);
+            }
+        }
+    }
+
+    None
 }
 
 fn decode_responses_text(t: &Dynamic) -> Option<Dynamic> {
@@ -685,6 +1026,40 @@ mod test {
 
         assert!(decoded.get_dynamic("ok").unwrap().is_true());
         assert_eq!(decoded.get_dynamic("name").unwrap().as_str(), "pdf");
+        Ok(())
+    }
+
+    #[test]
+    fn model_name_can_infer_qwen_url() -> anyhow::Result<()> {
+        let options = map!("model"=> "qwen-plus", "key"=> "sk-test");
+        let normalized = super::normalize_provider(options)?;
+
+        assert_eq!(normalized.get_dynamic("url").unwrap().as_str(), "https://dashscope.aliyuncs.com/compatible-mode/v1");
+        Ok(())
+    }
+
+    #[test]
+    fn dashscope_image_body_uses_existing_engine_shape() {
+        let body = super::dashscope_image_body(map!(
+            "prompt"=> "extend",
+            "image"=> "https://example.test/base.jpg",
+            "referenceImages"=> list!("https://example.test/ref.png")
+        ));
+        let messages = body.get_dynamic("input").unwrap().get_dynamic("messages").unwrap();
+        let content = messages.get_idx(0).unwrap().get_dynamic("content").unwrap();
+
+        assert_eq!(content.get_idx(0).unwrap().get_dynamic("image").unwrap().as_str(), "https://example.test/base.jpg");
+        assert_eq!(content.get_idx(1).unwrap().get_dynamic("image").unwrap().as_str(), "https://example.test/ref.png");
+        assert_eq!(content.get_idx(2).unwrap().get_dynamic("text").unwrap().as_str(), "extend");
+    }
+
+    #[test]
+    fn decode_dashscope_async_task_id() -> anyhow::Result<()> {
+        let raw = r#"{"output":{"task_id":"task-123","task_status":"PENDING"},"request_id":"req"}"#;
+        let (body, _) = Dynamic::from_json(raw.as_bytes())?;
+        let decoded = super::decode_llm_response(body, raw)?;
+
+        assert_eq!(decoded.get_dynamic("task_id").unwrap().as_str(), "task-123");
         Ok(())
     }
 }

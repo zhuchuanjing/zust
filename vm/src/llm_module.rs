@@ -1,6 +1,8 @@
 use crate::memory::alloc_dynamic;
+use anyhow::Result;
 use base64::{Engine as _, engine::general_purpose};
 use dynamic::{Dynamic, Type};
+use std::future::Future;
 
 extern "C" fn llm_complete(openai: *const Dynamic, value: *const Dynamic) -> *const Dynamic {
     let openai = unsafe { (&*openai).clone() };
@@ -23,17 +25,58 @@ extern "C" fn llm_tts(openai: *const Dynamic, value: *const Dynamic) -> *const D
     alloc_dynamic(audio)
 }
 
+fn task_value(id: &str, status: &str, info: Dynamic) -> Dynamic {
+    dynamic::map!("id"=> id, "status"=> status, "info"=> info)
+}
+
+fn start_llm_task<F, Fut>(info: Dynamic, f: F) -> Dynamic
+where
+    F: FnOnce() -> Fut + 'static + Send,
+    Fut: Future<Output = Result<Dynamic>> + 'static + Send,
+{
+    let id = uuid::Uuid::new_v4().to_string();
+    let path = format!("local/tasks/{}", id);
+    let running = task_value(&id, "running", info.deep_clone());
+    let done_id = id.clone();
+    let done_path = path.clone();
+    let done_info = info.deep_clone();
+    let runner = async move {
+        match f().await {
+            Ok(result) => {
+                let _ = root::add_value(&done_path, dynamic::map!("id"=> done_id, "status"=> "done", "info"=> done_info, "result"=> result));
+                Ok(())
+            }
+            Err(err) => {
+                let _ = root::add_value(&done_path, dynamic::map!("id"=> done_id, "status"=> "error", "info"=> done_info, "error"=> err.to_string()));
+                Err(err)
+            }
+        }
+    };
+
+    let object = if tokio::runtime::Handle::try_current().is_ok() {
+        root::Object::Task(tokio::task::spawn(runner), running)
+    } else {
+        root::Object::ThreadTask(
+            std::thread::spawn(move || {
+                let rt = tokio::runtime::Runtime::new().unwrap();
+                rt.block_on(runner)
+            }),
+            running,
+        )
+    };
+    let _ = root::add(&path, object);
+    id.into()
+}
+
 extern "C" fn llm_deep(openai: *const Dynamic, value: *const Dynamic, notifier: *const Dynamic) -> *const Dynamic {
     //启动一个任务 使用 消息点来接收 中间消息
     let openai = unsafe { (&*openai).clone() };
     let value = unsafe { (&*value).clone() };
     let notifier = unsafe { (&*notifier).clone() };
-    let id = root::start_task(value.clone(), || {
-        Box::pin(async move {
-            let r = llm::complete(openai, value, Some(notifier.clone())).await?;
-            llm::notify(&notifier, r)?;
-            Ok(())
-        })
+    let id = start_llm_task(value.clone(), || async move {
+        let r = llm::complete(openai, value, Some(notifier.clone())).await?;
+        llm::notify(&notifier, r.clone())?;
+        Ok(r)
     });
     alloc_dynamic(id.into())
 }
@@ -70,34 +113,32 @@ extern "C" fn llm_image(openai: *const Dynamic, value: *const Dynamic, notifier:
     let openai = unsafe { (&*openai).clone() };
     let value = unsafe { (&*value).clone() };
     let notifier = unsafe { (&*notifier).clone() };
-    let id = root::start_task(value.clone(), || {
-        Box::pin(async move {
-            let r = llm::image(openai, value, Some(notifier.clone())).await?;
-            if let (Some(world_id), Some(image_id)) = (notifier.get_dynamic("world_id"), notifier.get_dynamic("image_id")) {
-                // 从外部 URL 下载图片，存入 redis/images 提供长期访问
-                let image_name = format!("world-{}-{}", world_id.as_str(), image_id.as_str());
-                let local_url = store_generated_image(&r, &image_name).await.unwrap_or_default();
-                // 图片元信息存入 redis/worlds/{id}/images/{image_id}
-                let image_key = format!("redis/worlds/{}/images/{}", world_id.as_str(), image_id.as_str());
-                let image_info = dynamic::map!();
-                image_info.insert("id", image_id.clone());
-                image_info.insert("kind", "world_intro");
-                image_info.insert("status", "ready");
-                if !local_url.is_empty() {
-                    image_info.insert("url", local_url.clone());
-                }
-                if let Some(prompt) = notifier.get_dynamic("prompt") {
-                    image_info.insert("prompt", prompt.clone());
-                }
-                let _ = root::add_value(&image_key, image_info.clone());
-                // 通知客户端刷新
-                let ws_msg = dynamic::map!("type" => "world_image_ready", "world_id" => world_id.clone(), "image_id" => image_id.clone(), "image" => image_info);
-                let _ = llm::notify(&notifier, ws_msg);
-            } else {
-                let _ = llm::notify(&notifier, r);
+    let id = start_llm_task(value.clone(), || async move {
+        let r = llm::image(openai, value, Some(notifier.clone())).await?;
+        if let (Some(world_id), Some(image_id)) = (notifier.get_dynamic("world_id"), notifier.get_dynamic("image_id")) {
+            // 从外部 URL 下载图片，存入 redis/images 提供长期访问
+            let image_name = format!("world-{}-{}", world_id.as_str(), image_id.as_str());
+            let local_url = store_generated_image(&r, &image_name).await.unwrap_or_default();
+            // 图片元信息存入 redis/worlds/{id}/images/{image_id}
+            let image_key = format!("redis/worlds/{}/images/{}", world_id.as_str(), image_id.as_str());
+            let image_info = dynamic::map!();
+            image_info.insert("id", image_id.clone());
+            image_info.insert("kind", "world_intro");
+            image_info.insert("status", "ready");
+            if !local_url.is_empty() {
+                image_info.insert("url", local_url.clone());
             }
-            Ok(())
-        })
+            if let Some(prompt) = notifier.get_dynamic("prompt") {
+                image_info.insert("prompt", prompt.clone());
+            }
+            let _ = root::add_value(&image_key, image_info.clone());
+            // 通知客户端刷新
+            let ws_msg = dynamic::map!("type" => "world_image_ready", "world_id" => world_id.clone(), "image_id" => image_id.clone(), "image" => image_info);
+            let _ = llm::notify(&notifier, ws_msg);
+        } else {
+            let _ = llm::notify(&notifier, r.clone());
+        }
+        Ok(r)
     });
     alloc_dynamic(id.into())
 }

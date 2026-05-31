@@ -276,10 +276,12 @@ fn response_content_item(item: Dynamic) -> Dynamic {
 
 pub async fn image(openai: Dynamic, msg: Dynamic, tx: Option<Dynamic>) -> Result<Dynamic> {
     let openai = with_kind_model(openai, "image")?;
-    if uses_dashscope_multimodal_image(&openai) {
-        return post("services/aigc/multimodal-generation/generation", openai, dashscope_image_body(msg), tx).await;
-    }
-    post("images/generations", openai, image_body(msg), tx).await
+    let result = if uses_dashscope_multimodal_image(&openai) {
+        post("services/aigc/multimodal-generation/generation", openai.clone(), dashscope_image_body(msg), tx).await?
+    } else {
+        post("images/generations", openai.clone(), image_body(msg), tx).await?
+    };
+    image_url_result(&openai, result).await
 }
 
 fn image_body(msg: Dynamic) -> Dynamic {
@@ -396,6 +398,117 @@ fn dashscope_image_parameters(msg: &Dynamic) -> Dynamic {
         }
     }
     parameters
+}
+
+async fn image_url_result(options: &Dynamic, result: Dynamic) -> Result<Dynamic> {
+    if let Some(url) = find_download_url(&result) {
+        return Ok(map!("url"=> url));
+    }
+
+    if let Some(task_id) = result.get_dynamic("task_id") {
+        return poll_image_task(options, task_id.as_str()).await;
+    }
+
+    Err(anyhow!("图片模型结果缺少可下载 url"))
+}
+
+async fn poll_image_task(options: &Dynamic, task_id: &str) -> Result<Dynamic> {
+    let url = options.get_dynamic("url").ok_or(anyhow!("没有 url"))?;
+    let key = options.get_dynamic("key");
+    let task_url = dashscope_task_url(url.as_str(), task_id);
+    let interval_ms = options.get_dynamic("task_poll_interval_ms").and_then(|v| v.as_int()).unwrap_or(2000).max(200) as u64;
+    let max_polls = options.get_dynamic("task_poll_max").and_then(|v| v.as_int()).unwrap_or(180).max(1);
+    let client = reqwest::Client::new();
+
+    for _ in 0..max_polls {
+        let mut req = client.get(&task_url);
+        if let Some(key) = key.clone() {
+            req = req.header("authorization", format!("Bearer {}", key.as_str()));
+        }
+        let resp = req.send().await?;
+        let status = resp.status();
+        let text = resp.text().await?;
+        if !status.is_success() {
+            return Err(anyhow!("图片任务查询失败 HTTP {}: {}", status.as_u16(), text.trim()));
+        }
+
+        let (body, _) = Dynamic::from_json(text.as_bytes())?;
+        if let Some(url) = find_download_url(&body) {
+            return Ok(map!("url"=> url));
+        }
+
+        let output = body.get_dynamic("output").unwrap_or(body);
+        if let Some(status) = output.get_dynamic("task_status") {
+            let status = status.as_str();
+            if matches!(status, "FAILED" | "CANCELED" | "UNKNOWN") {
+                let message = output.get_dynamic("message").map(|v| v.as_str().to_string()).unwrap_or_else(|| status.to_string());
+                return Err(anyhow!("图片任务失败: {}", message));
+            }
+        }
+
+        tokio::time::sleep(std::time::Duration::from_millis(interval_ms)).await;
+    }
+
+    Err(anyhow!("图片任务超时: {}", task_id))
+}
+
+fn dashscope_task_url(url: &str, task_id: &str) -> String {
+    let base = url.trim_end_matches('/');
+    let base = if let Some((prefix, _)) = base.split_once("/services/") {
+        prefix
+    } else if let Some((prefix, _)) = base.split_once("/compatible-mode/") {
+        prefix
+    } else {
+        base
+    };
+    format!("{}/tasks/{}", base.trim_end_matches('/'), task_id)
+}
+
+fn find_download_url(value: &Dynamic) -> Option<Dynamic> {
+    if value.is_str() {
+        let text = value.as_str();
+        if is_download_url(text) {
+            return Some(value.clone());
+        }
+        return None;
+    }
+
+    if value.is_list() {
+        for idx in 0..value.len() {
+            if let Some(item) = value.get_idx(idx)
+                && let Some(url) = find_download_url(&item)
+            {
+                return Some(url);
+            }
+        }
+        return None;
+    }
+
+    if !value.is_map() {
+        return None;
+    }
+
+    for key in ["url", "image_url", "output_url", "output_image_url", "image"] {
+        if let Some(item) = value.get_dynamic(key)
+            && let Some(url) = find_download_url(&item)
+        {
+            return Some(url);
+        }
+    }
+
+    for key in ["output", "results", "choices", "message", "content", "data"] {
+        if let Some(item) = value.get_dynamic(key)
+            && let Some(url) = find_download_url(&item)
+        {
+            return Some(url);
+        }
+    }
+
+    None
+}
+
+fn is_download_url(text: &str) -> bool {
+    text.starts_with("http://") || text.starts_with("https://") || text.starts_with("data:image/")
 }
 
 pub async fn tts(openai: Dynamic, msg: Dynamic) -> Result<Dynamic> {
@@ -1060,6 +1173,25 @@ mod test {
         let decoded = super::decode_llm_response(body, raw)?;
 
         assert_eq!(decoded.get_dynamic("task_id").unwrap().as_str(), "task-123");
+        Ok(())
+    }
+
+    #[test]
+    fn find_download_url_extracts_nested_image_url() -> anyhow::Result<()> {
+        let raw = r#"{"output":{"task_status":"SUCCEEDED","results":[{"url":"https://example.test/image.png"}]}}"#;
+        let (body, _) = Dynamic::from_json(raw.as_bytes())?;
+        let url = super::find_download_url(&body).expect("url");
+
+        assert_eq!(url.as_str(), "https://example.test/image.png");
+        Ok(())
+    }
+
+    #[test]
+    fn find_download_url_ignores_task_id_without_url() -> anyhow::Result<()> {
+        let raw = r#"{"output":{"task_id":"task-123","task_status":"RUNNING"}}"#;
+        let (body, _) = Dynamic::from_json(raw.as_bytes())?;
+
+        assert!(super::find_download_url(&body).is_none());
         Ok(())
     }
 }

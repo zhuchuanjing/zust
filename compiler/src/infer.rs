@@ -414,8 +414,8 @@ impl Compiler {
                 } else {
                     self.fns.insert(id, vec![(generic_args.to_vec(), fn_tys.clone(), Type::Any)]);
                 }
-                let top = self.tys.len();
-                self.frames.push(top);
+                let saved_state = self.take_local_state();
+                self.frames.push(0);
                 for (arg, ty) in args.iter().zip(fn_tys.iter()) {
                     self.add_name(arg.clone());
                     self.add_ty(ty.clone());
@@ -430,10 +430,7 @@ impl Compiler {
                     }
                 }
                 let ret_ty = self.infer_return_type(&body).map(|ty| ty.unwrap_or(Type::Void));
-                if let Some(top) = self.frames.pop() {
-                    self.tys.truncate(top);
-                    self.names.truncate(top);
-                }
+                self.restore_local_state(saved_state);
                 let ret_ty = match ret_ty {
                     Ok(ret_ty) => self.symbols.get_type(&ret_ty).unwrap_or(ret_ty),
                     Err(err) => {

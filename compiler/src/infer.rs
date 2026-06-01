@@ -1,4 +1,4 @@
-use super::{Compiler, Symbol};
+use super::{Compiler, FnInferRet, Symbol};
 use anyhow::Result;
 use dynamic::{Dynamic, Type};
 use parser::{BinaryOp, Expr, ExprKind, Pattern, PatternKind, Span, Stmt, StmtKind, UnaryOp};
@@ -232,7 +232,9 @@ impl Compiler {
             },
             ExprKind::Binary { left, op, right } => {
                 let assign_idx = if op.is_assign() { if let ExprKind::Var(idx) = &left.kind { Some(*idx) } else { None } } else { None };
-                let ty = if op.is_logic() { Type::Bool } else if op == &BinaryOp::Idx {
+                let ty = if op.is_logic() {
+                    Type::Bool
+                } else if op == &BinaryOp::Idx {
                     let left_ty = self.infer_expr(left)?;
                     if let Type::Array(elem_ty, _) = left_ty {
                         (*elem_ty).clone()
@@ -303,6 +305,32 @@ impl Compiler {
                         args.push(self.infer_expr(p)?);
                     }
                     self.infer_fn(*id, &args)
+                } else if let ExprKind::Ident(name) = &obj.kind {
+                    for idx in (self.top()..self.names.len()).rev() {
+                        if self.names[idx].eq(name) && idx < self.tys.len() {
+                            return if let Type::Symbol { id, .. } = &self.tys[idx] {
+                                let id = *id;
+                                let mut args = Vec::new();
+                                for p in params {
+                                    args.push(self.infer_expr(p)?);
+                                }
+                                self.infer_fn(id, &args)
+                            } else {
+                                Ok(Type::Any)
+                            };
+                        }
+                    }
+                    let Ok(id) = self.symbols.get_id(name) else {
+                        return Ok(Type::Any);
+                    };
+                    if !self.symbols.get_symbol(id)?.1.is_fn() {
+                        return Err(Self::semantic_error(obj.span, format!("符号 {} 不是函数", name)));
+                    }
+                    let mut args = Vec::new();
+                    for p in params {
+                        args.push(self.infer_expr(p)?);
+                    }
+                    self.infer_fn(id, &args)
                 } else if obj.is_idx() {
                     let (target, _, method) = obj.clone().binary().unwrap();
                     let ty = self.infer_expr(&target)?;
@@ -407,12 +435,15 @@ impl Compiler {
                 if let Some(fns) = self.fns.get_mut(&id) {
                     for f in fns.iter() {
                         if f.0 == generic_args && f.1 == fn_tys {
-                            return self.symbols.get_type(&f.2);
+                            return match &f.2 {
+                                FnInferRet::Done(ret_ty) => self.symbols.get_type(ret_ty),
+                                FnInferRet::Pending => Ok(Type::Any),
+                            };
                         }
                     }
-                    fns.push((generic_args.to_vec(), fn_tys.clone(), Type::Any));
+                    fns.push((generic_args.to_vec(), fn_tys.clone(), FnInferRet::Pending));
                 } else {
-                    self.fns.insert(id, vec![(generic_args.to_vec(), fn_tys.clone(), Type::Any)]);
+                    self.fns.insert(id, vec![(generic_args.to_vec(), fn_tys.clone(), FnInferRet::Pending)]);
                 }
                 let saved_state = self.take_local_state();
                 self.frames.push(0);
@@ -439,7 +470,7 @@ impl Compiler {
                             .fns
                             .get_mut(&id)
                             .map(|fns| {
-                                fns.retain(|item| item.0 != generic_args || item.1 != fn_tys || item.2 != Type::Any);
+                                fns.retain(|item| item.0 != generic_args || item.1 != fn_tys || !matches!(item.2, FnInferRet::Pending));
                                 fns.is_empty()
                             })
                             .unwrap_or(false);
@@ -450,7 +481,7 @@ impl Compiler {
                     }
                 };
                 self.fns.get_mut(&id).map(|f| {
-                    f.iter_mut().find(|item| item.0 == generic_args && item.1 == fn_tys).map(|item| item.2 = ret_ty.clone());
+                    f.iter_mut().find(|item| item.0 == generic_args && item.1 == fn_tys).map(|item| item.2 = FnInferRet::Done(ret_ty.clone()));
                 });
                 if generic_args.is_empty()
                     && let Some((_, Symbol::Fn { ty: Type::Fn { ret, .. }, .. })) = self.symbols.get_symbol_mut(id)

@@ -10,13 +10,19 @@ use std::{
 pub use symbol::{Symbol, SymbolTable, eval_const_int_type, substitute_type};
 
 #[derive(Clone)]
+enum FnInferRet {
+    Pending,
+    Done(Type),
+}
+
+#[derive(Clone)]
 pub struct Compiler {
     pub symbols: SymbolTable,
     pub frames: Vec<usize>,
     pub tys: Vec<Type>,
     pub consts: Vec<Dynamic>,
     names: Vec<SmolStr>,
-    fns: BTreeMap<u32, Vec<(Vec<Type>, Vec<Type>, Type)>>,
+    fns: BTreeMap<u32, Vec<(Vec<Type>, Vec<Type>, FnInferRet)>>,
     importing_paths: BTreeSet<PathBuf>,
 }
 
@@ -166,6 +172,59 @@ mod tests {
         let loop_index = compiler.symbols.get_id("compiler_return_check_args::loop_index")?;
         assert_eq!(compiler.infer_fn(loop_index, &[Type::I64, Type::I64])?, Type::I64);
 
+        Ok(())
+    }
+
+    #[test]
+    fn forward_function_call_in_bool_condition_infers_callee_first() -> anyhow::Result<()> {
+        let mut compiler = Compiler::new();
+        compiler.import_code(
+            "compiler_forward_bool",
+            br#"
+            pub fn can_start() {
+                if is_ready() {
+                    return true;
+                }
+                false
+            }
+
+            pub fn is_ready() {
+                true
+            }
+            "#
+            .to_vec(),
+        )?;
+
+        let can_start = compiler.symbols.get_id("compiler_forward_bool::can_start")?;
+        assert_eq!(compiler.infer_fn(can_start, &[])?, Type::Bool);
+
+        let is_ready = compiler.symbols.get_id("compiler_forward_bool::is_ready")?;
+        assert_eq!(compiler.infer_fn(is_ready, &[])?, Type::Bool);
+        Ok(())
+    }
+
+    #[test]
+    fn inferred_return_cache_keeps_pending_separate_from_any() -> anyhow::Result<()> {
+        let mut compiler = Compiler::new();
+        compiler.import_code(
+            "compiler_pending_any",
+            br#"
+            pub fn dynamic_value(value) {
+                value
+            }
+
+            pub fn bool_value() {
+                true
+            }
+            "#
+            .to_vec(),
+        )?;
+
+        let dynamic_value = compiler.symbols.get_id("compiler_pending_any::dynamic_value")?;
+        assert_eq!(compiler.infer_fn(dynamic_value, &[Type::Any])?, Type::Any);
+
+        let bool_value = compiler.symbols.get_id("compiler_pending_any::bool_value")?;
+        assert_eq!(compiler.infer_fn(bool_value, &[])?, Type::Bool);
         Ok(())
     }
 
@@ -812,20 +871,22 @@ impl Compiler {
                     continue;
                 }
             }
-            if let Some(s) = self.symbols.take(id) {
-                match s {
-                    Symbol::Fn { ty, args, generic_params, mut cap, body, is_pub } => {
-                        if let Type::Fn { mut tys, ret } = ty {
-                            let compiled = self.compile_fn(&args, &mut tys, Arc::try_unwrap(body).unwrap(), &mut cap)?;
-                            for s in compiled.iter() {
-                                log::info!("{}", s);
-                            }
-                            self.symbols.symbols[id as usize] = Symbol::Fn { ty: Type::Fn { tys, ret }, args, generic_params, cap, body: Arc::new(Stmt::new(StmtKind::Block(compiled), Span::default())), is_pub };
-                            fn_ids.push(id);
+            if let Some(s) = self.symbols.get_symbol(id).ok().map(|(_, symbol)| symbol.clone()) {
+                if let Symbol::Fn { ty, args, generic_params, mut cap, body, is_pub } = s {
+                    if let Type::Fn { mut tys, ret } = ty {
+                        let compiled = self.compile_fn(&args, &mut tys, body.as_ref().clone(), &mut cap)?;
+                        for s in compiled.iter() {
+                            log::info!("{}", s);
                         }
-                    }
-                    _ => {
-                        self.symbols.symbols[id as usize] = s;
+                        self.symbols.symbols[id as usize] = Symbol::Fn {
+                            ty: Type::Fn { tys, ret },
+                            args,
+                            generic_params,
+                            cap,
+                            body: Arc::new(Stmt::new(StmtKind::Block(compiled), Span::default())),
+                            is_pub,
+                        };
+                        fn_ids.push(id);
                     }
                 }
             }

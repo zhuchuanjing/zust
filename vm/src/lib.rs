@@ -2134,6 +2134,77 @@ mod tests {
     }
 
     #[test]
+    fn http_serve_accepts_inline_config_map() -> anyhow::Result<()> {
+        let vm = Vm::with_all()?;
+        vm.import_code(
+            "vm_http_serve_inline_config",
+            br#"
+            pub fn start() {
+                let server = http::serve({host: "127.0.0.1:5192"});
+                server
+            }
+            "#
+            .to_vec(),
+        )?;
+
+        let compiled = vm.get_fn("vm_http_serve_inline_config::start", &[])?;
+        assert_eq!(compiled.ret_ty(), &Type::Any);
+        Ok(())
+    }
+
+    #[test]
+    fn http_serve_accepts_variable_and_quoted_static_key() -> anyhow::Result<()> {
+        let vm = Vm::with_all()?;
+        vm.import_code(
+            "vm_http_serve_quoted_static",
+            br#"
+            pub fn start(server_addr) {
+                let http_server = http::serve({
+                    host: server_addr,
+                    ws: true,
+                    upload: "upload",
+                    "static": {
+                        path: "/",
+                        dir: "public/local"
+                    }
+                });
+                http_server
+            }
+            "#
+            .to_vec(),
+        )?;
+
+        let compiled = vm.get_fn("vm_http_serve_quoted_static::start", &[Type::Any])?;
+        assert_eq!(compiled.ret_ty(), &Type::Any);
+        Ok(())
+    }
+
+    #[test]
+    fn load_script_accepts_http_serve_inline_config() -> anyhow::Result<()> {
+        let vm = Vm::with_all()?;
+        let (_fn_ptr, ty) = vm.load(
+            br#"
+            let server_addr = "127.0.0.1:5192";
+            let http_server = http::serve({
+                host: server_addr,
+                ws: true,
+                upload: "upload",
+                "static": {
+                    path: "/",
+                    dir: "public/local"
+                }
+            });
+            http_server
+            "#
+            .to_vec(),
+            "arg".into(),
+        )?;
+
+        assert_eq!(ty, Type::Any);
+        Ok(())
+    }
+
+    #[test]
     fn gpu_struct_layout_packs_and_unpacks_dynamic_maps() -> anyhow::Result<()> {
         let vm = Vm::with_all()?;
         vm.import_code(

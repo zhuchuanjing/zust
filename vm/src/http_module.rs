@@ -300,6 +300,7 @@ fn upload_bytes_result(object_name: Dynamic, bytes: Dynamic) -> Result<Dynamic> 
 
 fn start_server(input: Dynamic) -> Dynamic {
     match server_options(input).and_then(|options| {
+        prepare_server_runtime(&options)?;
         let info = map!("host"=> options.host.clone(), "port"=> options.port as i64, "api_prefix"=> options.api_prefix.clone());
         if !options.upload_paths.is_empty() {
             info.insert("upload", Dynamic::list(options.upload_paths.iter().cloned().map(Dynamic::from).collect()));
@@ -319,6 +320,13 @@ fn start_server(input: Dynamic) -> Dynamic {
         Ok(result) => result,
         Err(err) => map!("ok"=> false, "error"=> err.to_string()),
     }
+}
+
+fn prepare_server_runtime(options: &ServerOptions) -> Result<()> {
+    if !options.ws_paths.is_empty() {
+        ensure_ws_list()?;
+    }
+    Ok(())
 }
 
 #[derive(Clone)]
@@ -362,9 +370,6 @@ async fn run_server(options: ServerOptions) -> Result<()> {
     let route = format!("/{}/{{*path}}", options.api_prefix.trim_matches('/'));
     let mut app = Router::new().route("/health", get(http_health)).route(&route, get(api_dispatch).post(api_dispatch));
 
-    if !options.ws_paths.is_empty() {
-        root::add_list("local/ws")?;
-    }
     for ws_path in &options.ws_paths {
         app = app.route(ws_path, get(ws_upgrade));
     }
@@ -731,9 +736,16 @@ async fn handle_socket(socket: WebSocket, token: String, session: Dynamic) {
 }
 
 fn register_ws_sender() -> Result<usize> {
-    root::add_list("local/ws")?;
+    ensure_ws_list()?;
     let (mount, name) = root::get_mount("local/ws")?;
     mount.push(name, root::Object::Native(ws_send_native))
+}
+
+fn ensure_ws_list() -> Result<()> {
+    if root::get_mount("local/ws").and_then(|(mount, name)| mount.len(name).map(|_| ())).is_ok() {
+        return Ok(());
+    }
+    root::add_list("local/ws")
 }
 
 fn ws_send_native(payload: Dynamic) -> Dynamic {
@@ -991,6 +1003,17 @@ mod tests {
         assert_eq!(options.static_dirs.len(), 2);
         assert_eq!(options.static_dirs[0].dir, "public");
         assert_eq!(options.static_dirs[1].path, "/assets");
+        Ok(())
+    }
+
+    #[test]
+    fn prepare_server_runtime_creates_ws_list() -> anyhow::Result<()> {
+        let options = super::server_options(map!("host"=> "0.0.0.0:8080", "ws"=> "/ws"))?;
+
+        super::prepare_server_runtime(&options)?;
+
+        let (mount, name) = root::get_mount("local/ws")?;
+        assert_eq!(mount.len(name)?, 0);
         Ok(())
     }
 

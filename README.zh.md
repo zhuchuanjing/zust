@@ -279,6 +279,128 @@ pub struct BigFloat<N> {
 
 普通脚本语法，例如 `list[idx]`、`map.key`、`value.len()` 和动态算术，都会降到这些辅助方法上。
 
+## HTTP、LLM 和 OSS 模块
+
+`Vm::with_all()` 会注册 `http`、`llm` 和 `oss` 模块。它们都以 `Dynamic` 作为边界，因此 Zust 脚本可以直接传 map、list、字符串、数字和 bytes。
+
+### HTTP 客户端
+
+```zust
+let page = http::get("https://example.com");
+
+let response = http::request({
+    method: "POST",
+    url: "https://api.example.com/items",
+    json: {name: "zust"},
+    headers: {"x-client": "zust"}
+});
+```
+
+常用函数：
+
+- `http::get(url)`。
+- `http::post(url, body)`。
+- `http::request(options)`。
+- `http::upload(object_name, bytes)`：用 `local/oss` 配置把 `Vec<u8>` bytes 上传到 OSS，返回 `{ok, object_name, oss_url, url}`。
+
+响应是 map，包含 `status`、`ok`、`url`、`@headers` 和 `body`。JSON 响应会解码成 `Dynamic`，文本和二进制分别返回字符串或 bytes。
+
+### HTTP Server 和 WebSocket
+
+```zust
+root::add_fn("local/http/post/echo", "app::echo");
+
+pub fn echo(req) {
+    {
+        ok: true,
+        method: req["@method"],
+        path: req["@path"],
+        query: req["@query"],
+        body: req,
+    }
+}
+
+pub fn start() {
+    http::serve("0.0.0.0:8080", true)
+}
+```
+
+`http::serve(addr, ws)` 启动 HTTP server。`addr` 是 `"host:port"` 字符串，例如 `"0.0.0.0:8080"`；`ws` 是是否启用 WebSocket。HTTP API 按 ROOT 分发：`/api/foo` 会映射到 `local/http/{method}/foo`，其中 `method` 为小写。
+
+请求 payload 会包含 `@method`、`@path`、`@header`、可选 `@query`，以及成功解析的 JSON body 字段。handler 默认返回 JSON；可以用 `@status`、`@content-type` 和 `@body` 控制状态码、content type 和原始响应 body。
+
+当 `ws` 为 `true` 时，server 默认监听 `/ws`。连接会挂载到 `local/ws` 下；可选 handler 路径为 `local/ws_handlers/auth`、`connect`、`message` 和 `disconnect`。二进制 WebSocket 消息按 MessagePack 解码；文本消息优先按 JSON 解码，否则作为字符串。
+
+```zust
+root::add_fn("local/ws_handlers/message", "app::ws_message");
+
+pub fn ws_message(req) {
+    let idx = req.idx;
+    root::send_idx("local/ws", idx, {
+        idx: idx,
+        type: "echo",
+        message: req.message,
+    });
+}
+```
+
+### LLM
+
+`llm` 封装文本、图片、语音识别和 TTS 请求。第一个参数是模型配置，通常包含 `url`、`model`、`key` 和可选请求默认值。如果缺少 `url`，会按 `model` 推断 GLM、Doubao、DeepSeek、Qwen 兼容地址。
+
+```zust
+let model = {
+    model: "deepseek-chat",
+    key: root::get("local/keys/deepseek"),
+};
+
+let answer = llm::complete(model, "用一句话介绍 Zust。");
+
+let vision = llm::complete(model, {
+    text: "这张图里有什么？",
+    image: "https://example.com/image.png",
+});
+
+let task_id = llm::deep(model, {prompt: "写一份长报告"}, "local/llm/progress");
+```
+
+常用函数：
+
+- `llm::complete(model, value)`：文本、图片 URL、视频 URL 等多模态输入，返回 `Dynamic`。
+- `llm::image(model, value, notifier)`：图片生成或编辑，返回本地任务 id，完成后结果也会发给 notifier。
+- `llm::audio(model, value)`：语音识别，输入可用 URL 或 bytes，输出文字。
+- `llm::tts(model, value)`：输入文字或 `{text/input: ...}`，输出音频 bytes 或音频 URL。
+- `llm::deep(model, value, notifier)`：启动异步补全任务，并通过 ROOT 通知进度。
+
+大体积二进制输入应优先上传到对象存储，再把 URL 传给支持 URL 输入的模型，避免把大 payload 塞进 LLM 请求体。
+
+### OSS 上传
+
+`oss` 模块提供直接的 Aliyun OSS 上传入口，适合 LLM 工作流里的图片、音频、视频和其他大文件。
+
+先把配置写入 ROOT：
+
+```zust
+root::add("local/oss", {
+    access_id: "...",
+    access_key: "...",
+    region: "cn-hangzhou",
+    bucket: "my-bucket",
+});
+```
+
+直接上传 `Vec<u8>` bytes：
+
+```zust
+let uploaded = oss::upload("llm/input/audio.wav", audio_bytes);
+
+let audio_text = llm::audio(model, {
+    url: uploaded.url,
+});
+```
+
+`http::upload(object_name, bytes)` 是 HTTP 模块里暴露的同一个直接上传入口，适合已经在服务端 HTTP 流程里使用时调用。
+
 ## 最小 VM 示例
 
 最小宿主流程是：

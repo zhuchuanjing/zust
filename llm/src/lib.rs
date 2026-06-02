@@ -1,6 +1,8 @@
 use anyhow::{Result, anyhow};
 use dynamic::{Dynamic, FromJson, ToJson};
 
+pub mod oss;
+
 pub fn to_markdown(d: &Dynamic, buf: &mut String) {
     if d.is_vec() {
         //简单的 Vec<float> Vec<int> 按照 json

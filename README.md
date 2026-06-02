@@ -318,7 +318,7 @@ Functions:
 
 ### `http`
 
-`http` provides a small dynamic HTTP client:
+`http` provides a small dynamic HTTP client and a Zust-dispatched server.
 
 ```zust
 let page = http::get("https://example.com");
@@ -331,13 +331,53 @@ let response = http::request({
 });
 ```
 
-Functions:
+Client functions:
 
 - `http::get(url)`.
 - `http::post(url, body)`.
 - `http::request(options)`.
+- `http::upload(object_name, bytes)`: upload `Vec<u8>` bytes to OSS using `local/oss` config; returns `{ok, object_name, oss_url, url}`.
 
 Responses are maps with `status`, `ok`, `url`, `@headers`, and `body`. JSON bodies are decoded into `Dynamic`; text and bytes are returned as strings or bytes.
+
+Server startup:
+
+```zust
+root::add_fn("local/http/post/echo", "app::echo");
+
+pub fn echo(req) {
+    {
+        ok: true,
+        method: req["@method"],
+        path: req["@path"],
+        query: req["@query"],
+        body: req,
+    }
+}
+
+pub fn start() {
+    http::serve("0.0.0.0:8080", true)
+}
+```
+
+`http::serve(addr, ws)` listens on an address string such as `"0.0.0.0:8080"`. HTTP API requests are dispatched through ROOT: `/api/foo` becomes `local/http/{method}/foo`, where `method` is lowercase. The request payload includes `@method`, `@path`, `@header`, optional `@query`, and any decoded JSON body fields.
+
+Handler responses are returned as JSON by default. A response can set `@status`, `@content-type`, or `@body` to control HTTP status, content type, and raw response body.
+
+When `ws` is `true`, the server also listens on `/ws` by default. WebSocket connections are mounted under `local/ws`, and optional handlers are dispatched at `local/ws_handlers/auth`, `connect`, `message`, and `disconnect`. Binary WebSocket messages are decoded as MessagePack; text messages are decoded as JSON when possible, otherwise as strings.
+
+```zust
+root::add_fn("local/ws_handlers/message", "app::ws_message");
+
+pub fn ws_message(req) {
+    let idx = req.idx;
+    root::send_idx("local/ws", idx, {
+        idx: idx,
+        type: "echo",
+        message: req.message,
+    });
+}
+```
 
 ### `llm`
 
@@ -345,9 +385,56 @@ Responses are maps with `status`, `ok`, `url`, `@headers`, and `body`. JSON bodi
 
 - `llm::complete(model, value)`: input can be text, text plus image URLs, or text plus video URLs. Output is `Dynamic`.
 - `llm::image(model, value, notifier)`: input is text plus optional image URLs. The call returns a local task id; the completed result is `{url: "..."}` with a downloadable image URL, and is also sent through the notifier when provided.
-- `llm::audio(model, value)`: input audio is passed by URL or data URL. Output is text.
+- `llm::audio(model, value)`: input audio is passed by URL or bytes. Output is text.
 - `llm::tts(model, value)`: input is text or `{text/input: ...}`. Output is audio bytes or an audio URL.
 - `llm::deep(model, value, notifier)`: start an async completion task and notify progress through `root`.
+
+Examples:
+
+```zust
+let model = {
+    model: "deepseek-chat",
+    key: root::get("local/keys/deepseek"),
+};
+
+let answer = llm::complete(model, "Summarize Zust in one sentence.");
+
+let vision = llm::complete(model, {
+    text: "What is in this image?",
+    image: "https://example.com/image.png",
+});
+
+let task_id = llm::deep(model, {prompt: "Write a longer report"}, "local/llm/progress");
+```
+
+Large binary inputs should be uploaded to object storage first and passed to model APIs by URL when the provider supports URLs. This keeps large payloads out of LLM request bodies.
+
+### OSS Uploads
+
+`oss` exposes direct Aliyun OSS upload helpers for large images, audio, video, and other files used by LLM workflows.
+
+Configure credentials in ROOT:
+
+```zust
+root::add("local/oss", {
+    access_id: "...",
+    access_key: "...",
+    region: "cn-hangzhou",
+    bucket: "my-bucket",
+});
+```
+
+Upload `Vec<u8>` bytes directly:
+
+```zust
+let uploaded = oss::upload("llm/input/audio.wav", audio_bytes);
+
+let audio_text = llm::audio(model, {
+    url: uploaded.url,
+});
+```
+
+`http::upload(object_name, bytes)` is the same direct upload helper exposed from the HTTP module for server-side workflows that already use `http`.
 
 ### `db`
 

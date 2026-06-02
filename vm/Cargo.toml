@@ -1,6 +1,6 @@
 [package]
 name = "zust-vm"
-version = "0.9.44"
+version = "0.9.45"
 edition = "2024"
 rust-version = "1.85"
 description = "Cranelift JIT runtime for executing Zust modules."
@@ -25,7 +25,7 @@ dynamic = { package = "zust-dynamic", version = "0.9.8", path = "../dynamic" }
 parser = { package = "zust-parser", version = "0.9.7", path = "../parser" }
 compiler = { package = "zust-compiler", version = "0.9.20", path = "../compiler" }
 root = { package = "zust-root", version = "0.9.6", path = "../root" }
-llm = { package = "zust-llm", version = "0.9.7", path = "../llm" }
+llm = { package = "zust-llm", version = "0.9.8", path = "../llm" }
 vm-spirv = { package = "zust-vm-spirv", version = "0.9.5", path = "../vm-spirv" }
 vulkan = { package = "zust-vulkan", version = "0.9.4", path = "../vulkan", optional = true }
 
@@ -44,6 +44,9 @@ uuid = { version = "1.23.1", features = ["v4"]}
 rand = "0.10.1"
 reqwest = "0.13.3"
 base64 = "0.22.1"
+axum = { version = "0.8.9", features = ["ws"] }
+tower-http = { version = "0.6.10", features = ["cors", "fs"] }
+futures-util = "0.3.32"
 sqlx-core = { version = "0.8.6", default-features = false, features = ["_rt-tokio", "_tls-rustls-ring-webpki", "any"] }
 sqlx-mysql = { version = "0.8.6", default-features = false, features = ["any"] }
 sqlx-postgres = { version = "0.8.6", default-features = false, features = ["any"] }

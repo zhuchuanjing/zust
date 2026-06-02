@@ -1,8 +1,28 @@
 use crate::memory::alloc_dynamic;
 use anyhow::{Result, anyhow};
-use dynamic::{Dynamic, FromJson, ToJson, Type, map};
+use axum::{
+    Router,
+    body::{Body, Bytes, to_bytes},
+    extract::ws::{Message, WebSocket, WebSocketUpgrade},
+    http::{HeaderMap as AxumHeaderMap, HeaderName as AxumHeaderName, HeaderValue as AxumHeaderValue, Request, StatusCode},
+    response::{IntoResponse, Response},
+    routing::get,
+};
+use dynamic::{Dynamic, FromJson, MsgPack, MsgUnpack, ToJson, Type, map};
+use futures_util::{SinkExt, StreamExt};
 use reqwest::header::{CONTENT_TYPE, HeaderName, HeaderValue};
+use std::collections::BTreeMap;
+use std::sync::{LazyLock, Mutex};
 use std::time::Duration;
+use tokio::sync::mpsc;
+use tower_http::cors::CorsLayer;
+
+static WS_SENDERS: LazyLock<Mutex<BTreeMap<String, mpsc::UnboundedSender<WsCommand>>>> = LazyLock::new(|| Mutex::new(BTreeMap::new()));
+
+enum WsCommand {
+    Send(Dynamic),
+    Close,
+}
 
 extern "C" fn http_request(input: *const Dynamic) -> *const Dynamic {
     if input.is_null() {
@@ -30,6 +50,23 @@ extern "C" fn http_post(url: *const Dynamic, body: *const Dynamic) -> *const Dyn
     let body = unsafe { (&*body).clone() };
     let result = root::sync_await!(request(map!("method"=> "POST", "url"=> url, "body"=> body))).unwrap_or(Dynamic::Null);
     alloc_dynamic(result)
+}
+
+extern "C" fn http_serve(input: *const Dynamic, ws: bool) -> *const Dynamic {
+    if input.is_null() {
+        return alloc_dynamic(Dynamic::Null);
+    }
+    let input = unsafe { (&*input).clone() };
+    alloc_dynamic(start_server(input, ws))
+}
+
+extern "C" fn http_upload(object_name: *const Dynamic, bytes: *const Dynamic) -> *const Dynamic {
+    if object_name.is_null() || bytes.is_null() {
+        return alloc_dynamic(Dynamic::Null);
+    }
+    let object_name = unsafe { (&*object_name).clone() };
+    let bytes = unsafe { (&*bytes).clone() };
+    alloc_dynamic(upload_bytes(object_name, bytes))
 }
 
 async fn request(input: Dynamic) -> Result<Dynamic> {
@@ -241,8 +278,363 @@ fn dynamic_to_text(value: &Dynamic) -> String {
     if value.is_str() { value.as_str().to_string() } else { value.to_string() }
 }
 
-pub const HTTP_NATIVE: [(&str, &[Type], Type, *const u8); 3] =
-    [("request", &[Type::Any], Type::Any, http_request as *const u8), ("get", &[Type::Any], Type::Any, http_get as *const u8), ("post", &[Type::Any, Type::Any], Type::Any, http_post as *const u8)];
+fn upload_bytes(object_name: Dynamic, bytes: Dynamic) -> Dynamic {
+    match upload_bytes_result(object_name, bytes) {
+        Ok(result) => result,
+        Err(err) => map!("ok"=> false, "error"=> err.to_string()),
+    }
+}
+
+fn upload_bytes_result(object_name: Dynamic, bytes: Dynamic) -> Result<Dynamic> {
+    let object_name = object_name.as_str().to_string();
+    if object_name.trim().is_empty() {
+        return Err(anyhow!("http::upload object_name missing"));
+    }
+    let bytes = bytes.as_bytes().ok_or_else(|| anyhow!("http::upload expects bytes"))?.to_vec();
+    let upload_name = object_name.clone();
+    let oss_url = root::sync_await!(async move { llm::oss::upload(&upload_name, bytes).await })?;
+    let url = llm::oss::get_link(&oss_url)?;
+    Ok(map!("ok"=> true, "object_name"=> object_name, "oss_url"=> oss_url, "url"=> url))
+}
+
+fn start_server(input: Dynamic, ws_enabled: bool) -> Dynamic {
+    match server_options(input, ws_enabled).and_then(|options| {
+        let info = map!("host"=> options.host.clone(), "port"=> options.port as i64, "api_prefix"=> options.api_prefix.clone());
+        let task_options = options.clone();
+        let id = root::start_task(info, move || {
+            Box::pin(async move {
+                run_server(task_options).await?;
+                Ok(())
+            })
+        });
+        Ok(map!("ok"=> true, "id"=> id, "url"=> format!("http://{}:{}", options.host, options.port)))
+    }) {
+        Ok(result) => result,
+        Err(err) => map!("ok"=> false, "error"=> err.to_string()),
+    }
+}
+
+#[derive(Clone)]
+struct ServerOptions {
+    host: String,
+    port: u16,
+    api_prefix: String,
+    body_limit: usize,
+    ws_enabled: bool,
+}
+
+fn server_options(input: Dynamic, ws_enabled: bool) -> Result<ServerOptions> {
+    if !input.is_str() {
+        return Err(anyhow!("http::serve 第一个参数需要 host:port 字符串"));
+    }
+    let (host, port) = parse_addr(input.as_str())?;
+    Ok(ServerOptions { host, port, api_prefix: "api".into(), body_limit: 20 * 1024 * 1024, ws_enabled })
+}
+
+fn parse_addr(addr: &str) -> Result<(String, u16)> {
+    let (host, port) = addr.rsplit_once(':').ok_or_else(|| anyhow!("http::serve 地址需要 host:port"))?;
+    let port = port.parse::<u16>().map_err(|_| anyhow!("http::serve port 非法"))?;
+    let host = if host.is_empty() { "0.0.0.0" } else { host };
+    Ok((host.to_string(), port))
+}
+
+async fn run_server(options: ServerOptions) -> Result<()> {
+    let route = format!("/{}/{{*path}}", options.api_prefix.trim_matches('/'));
+    let mut app = Router::new().route("/health", get(http_health)).route(&route, get(api_dispatch).post(api_dispatch)).layer(CorsLayer::very_permissive()).with_state(options.clone());
+
+    if options.ws_enabled {
+        root::add_list("local/ws")?;
+        app = app.route("/ws", get(ws_upgrade));
+    }
+
+    let listener = tokio::net::TcpListener::bind((options.host.as_str(), options.port)).await?;
+    axum::serve(listener, app).await?;
+    Ok(())
+}
+
+async fn http_health() -> Response {
+    json_response(StatusCode::OK, map!("ok"=> true, "service"=> "zust-http"))
+}
+
+async fn api_dispatch(axum::extract::State(options): axum::extract::State<ServerOptions>, req: Request<Body>) -> Response {
+    let route = api_route(&options, &req);
+    match api_payload(req, options.body_limit).await.and_then(|payload| root::send_msg(&route, payload).map_err(|err| anyhow!("dispatch {route}: {err}"))) {
+        Ok(result) => to_response(result).unwrap_or_else(|err| json_error(StatusCode::INTERNAL_SERVER_ERROR, err.to_string())),
+        Err(err) => json_error(StatusCode::BAD_REQUEST, err.to_string()),
+    }
+}
+
+fn api_route(options: &ServerOptions, req: &Request<Body>) -> String {
+    let method = req.method().as_str().to_ascii_lowercase();
+    let prefix = format!("/{}/", options.api_prefix.trim_matches('/'));
+    let path = req.uri().path().strip_prefix(&prefix).unwrap_or("").trim_matches('/');
+    format!("local/http/{method}/{path}")
+}
+
+async fn api_payload(req: Request<Body>, body_limit: usize) -> Result<Dynamic> {
+    let (parts, body) = req.into_parts();
+    let method = parts.method.as_str().to_ascii_lowercase();
+    let path = parts.uri.path().trim_start_matches('/').to_string();
+    let payload = map!("@method"=> method, "@path"=> path, "@header"=> headers_to_dynamic(&parts.headers));
+    if let Some(query) = parts.uri.query() {
+        payload.insert("@query", query_to_dynamic(query));
+    }
+    let body = to_bytes(body, body_limit).await?;
+    if !body.is_empty() {
+        match Dynamic::from_json(&body) {
+            Ok((json, _)) => payload.append(json),
+            Err(err) => {
+                payload.insert("@body_error", err.to_string());
+                payload.insert("@body", body_to_dynamic(body));
+            }
+        }
+    }
+    Ok(payload)
+}
+
+async fn ws_upgrade(headers: AxumHeaderMap, ws: WebSocketUpgrade, axum::extract::Query(query): axum::extract::Query<BTreeMap<String, String>>) -> Response {
+    let token = bearer_token(&headers).or_else(|| query.get("token").cloned()).unwrap_or_default();
+    let query = map_from_string_map(query);
+    let auth_payload = map!("token"=> token.clone(), "@header"=> headers_to_dynamic(&headers), "@query"=> query.clone());
+    let session = match optional_dispatch("local/ws_handlers/auth", auth_payload) {
+        Ok(Some(auth)) => {
+            if auth.get_dynamic("ok").and_then(|value| value.as_bool()) == Some(false) {
+                let error = auth.get_dynamic("error").map(|value| value.as_str().to_string()).unwrap_or_else(|| "invalid websocket auth".into());
+                return json_error(StatusCode::UNAUTHORIZED, error);
+            }
+            auth.get_dynamic("data").unwrap_or(auth)
+        }
+        Ok(None) => Dynamic::Null,
+        Err(err) => return json_error(StatusCode::UNAUTHORIZED, err.to_string()),
+    };
+    ws.on_upgrade(move |socket| handle_socket(socket, token, session))
+}
+
+async fn handle_socket(socket: WebSocket, token: String, session: Dynamic) {
+    let idx = match register_ws_sender() {
+        Ok(idx) => idx,
+        Err(err) => {
+            log::warn!("websocket sender register failed: {err}");
+            return;
+        }
+    };
+    let idx_key = idx.to_string();
+    let (out_tx, mut out_rx) = mpsc::unbounded_channel::<WsCommand>();
+    {
+        let mut senders = WS_SENDERS.lock().expect("ws sender registry poisoned");
+        senders.insert(idx_key.clone(), out_tx);
+    }
+
+    let (mut sender, mut receiver) = socket.split();
+    let writer_idx = idx_key.clone();
+    let writer = tokio::spawn(async move {
+        while let Some(command) = out_rx.recv().await {
+            let close = matches!(command, WsCommand::Close);
+            let result = match command {
+                WsCommand::Send(payload) => sender.send(Message::Binary(dynamic_msgpack(payload).into())).await,
+                WsCommand::Close => sender.send(Message::Close(None)).await,
+            };
+            if let Err(err) = result {
+                log::warn!("websocket send failed idx={writer_idx}: {err}");
+                break;
+            }
+            if close {
+                break;
+            }
+        }
+    });
+
+    let _ = optional_dispatch("local/ws_handlers/connect", map!("idx"=> idx as i64, "token"=> token.clone(), "session"=> session.clone()));
+
+    while let Some(message) = receiver.next().await {
+        let payload = match message {
+            Ok(Message::Binary(bytes)) => ws_binary_payload(idx, &token, &session, &bytes),
+            Ok(Message::Text(text)) => ws_text_payload(idx, &token, &session, &text),
+            Ok(Message::Close(_)) => break,
+            Ok(Message::Ping(_)) | Ok(Message::Pong(_)) => continue,
+            Err(err) => {
+                log::warn!("websocket receive failed idx={idx}: {err}");
+                break;
+            }
+        };
+        if let Err(err) = payload.and_then(|payload| optional_dispatch("local/ws_handlers/message", payload).map(|_| ())) {
+            let error_message = map!("ok"=> false, "error"=> err.to_string(), "idx"=> idx as i64, "id"=> 500);
+            let _ = root::send_idx_msg("local/ws", idx, error_message);
+        }
+    }
+
+    let _ = optional_dispatch("local/ws_handlers/disconnect", map!("idx"=> idx as i64, "token"=> token, "session"=> session));
+    {
+        let mut senders = WS_SENDERS.lock().expect("ws sender registry poisoned");
+        senders.remove(&idx_key);
+    }
+    writer.abort();
+}
+
+fn register_ws_sender() -> Result<usize> {
+    root::add_list("local/ws")?;
+    let (mount, name) = root::get_mount("local/ws")?;
+    mount.push(name, root::Object::Native(ws_send_native))
+}
+
+fn ws_send_native(payload: Dynamic) -> Dynamic {
+    let Some(idx_value) = payload.get_dynamic("idx") else {
+        return map!("ok"=> false, "error"=> "missing ws idx");
+    };
+    let idx = idx_value.as_int().map(|value| value.to_string()).unwrap_or_else(|| idx_value.as_str().to_string());
+    let close = payload.get_dynamic("@close").and_then(|value| value.as_bool()).unwrap_or(false);
+    let sent = {
+        let senders = WS_SENDERS.lock().expect("ws sender registry poisoned");
+        senders
+            .get(&idx)
+            .map(|tx| {
+                if close {
+                    tx.send(WsCommand::Close).is_ok()
+                } else {
+                    tx.send(WsCommand::Send(payload.clone())).is_ok()
+                }
+            })
+            .unwrap_or(false)
+    };
+    if sent { map!("ok"=> true, "idx"=> idx) } else { map!("ok"=> false, "idx"=> idx, "error"=> "websocket sender missing") }
+}
+
+fn ws_binary_payload(idx: usize, token: &str, session: &Dynamic, bytes: &[u8]) -> Result<Dynamic> {
+    let (message, _) = Dynamic::decode(bytes).map_err(|err| anyhow!("invalid msgpack websocket payload: {err}"))?;
+    Ok(map!("idx"=> idx as i64, "token"=> token, "session"=> session.clone(), "message"=> message))
+}
+
+fn ws_text_payload(idx: usize, token: &str, session: &Dynamic, text: &str) -> Result<Dynamic> {
+    let message = if let Ok((json, _)) = Dynamic::from_json(text.as_bytes()) { json } else { Dynamic::from(text) };
+    Ok(map!("idx"=> idx as i64, "token"=> token, "session"=> session.clone(), "message"=> message))
+}
+
+fn optional_dispatch(route: &str, payload: Dynamic) -> Result<Option<Dynamic>> {
+    if root::contains(route) { root::send_msg(route, payload).map(Some) } else { Ok(None) }
+}
+
+fn bearer_token(headers: &AxumHeaderMap) -> Option<String> {
+    let auth = headers
+        .get("authorization")
+        .and_then(|value| value.to_str().ok())
+        .or_else(|| headers.get("sec-websocket-protocol").and_then(|value| value.to_str().ok()))?
+        .trim();
+    auth.strip_prefix("Bearer ")
+        .or_else(|| auth.strip_prefix("bearer "))
+        .or_else(|| auth.strip_prefix("Bearer."))
+        .or_else(|| auth.strip_prefix("bearer."))
+        .map(str::to_string)
+}
+
+fn dynamic_msgpack(obj: Dynamic) -> Vec<u8> {
+    let mut body = Vec::new();
+    obj.encode(&mut body);
+    body
+}
+
+fn to_response(obj: Dynamic) -> Result<Response> {
+    let status = obj.get_dynamic("@status").and_then(|value| value.as_int()).and_then(|code| StatusCode::from_u16(code as u16).ok()).unwrap_or(StatusCode::OK);
+    let mut builder = Response::builder().status(status);
+    let headers = builder.headers_mut().ok_or_else(|| anyhow!("response builder has no headers"))?;
+    if let Some(content_type) = obj.get_dynamic("@content-type") {
+        headers.insert(AxumHeaderName::from_static("content-type"), AxumHeaderValue::from_str(content_type.as_str())?);
+    } else {
+        headers.insert(AxumHeaderName::from_static("content-type"), AxumHeaderValue::from_static("application/json;charset=utf-8"));
+    }
+    if let Some(body) = obj.get_dynamic("@body") {
+        if let Some(bytes) = body.as_bytes() {
+            return Ok(builder.body(Body::from(bytes.to_vec()))?);
+        }
+        return Ok(builder.body(Body::from(body.as_str().to_string()))?);
+    }
+    Ok(builder.body(Body::from(dynamic_json(obj)))?)
+}
+
+fn json_error(status: StatusCode, message: impl Into<String>) -> Response {
+    json_response(status, map!("ok"=> false, "error"=> message.into()))
+}
+
+fn json_response(status: StatusCode, obj: Dynamic) -> Response {
+    (status, [(AxumHeaderName::from_static("content-type"), AxumHeaderValue::from_static("application/json;charset=utf-8"))], dynamic_json(obj)).into_response()
+}
+
+fn dynamic_json(obj: Dynamic) -> String {
+    let mut body = String::new();
+    obj.to_json(&mut body);
+    body
+}
+
+fn headers_to_dynamic(headers: &AxumHeaderMap) -> Dynamic {
+    let out = map!();
+    for (name, value) in headers {
+        if let Ok(value) = value.to_str() {
+            out.insert(name.as_str(), value);
+        }
+    }
+    out
+}
+
+fn query_to_dynamic(query: &str) -> Dynamic {
+    let out = map!();
+    for item in query.split('&').filter(|item| !item.is_empty()) {
+        let (key, value) = item.split_once('=').unwrap_or((item, ""));
+        out.insert(percent_decode(key), percent_decode(value));
+    }
+    out
+}
+
+fn map_from_string_map(source: BTreeMap<String, String>) -> Dynamic {
+    let out = map!();
+    for (key, value) in source {
+        out.insert(key, value);
+    }
+    out
+}
+
+fn percent_decode(value: &str) -> String {
+    let bytes = value.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut idx = 0;
+    while idx < bytes.len() {
+        if bytes[idx] == b'+' {
+            out.push(b' ');
+            idx += 1;
+        } else if bytes[idx] == b'%' && idx + 2 < bytes.len() {
+            if let (Some(hi), Some(lo)) = (hex_value(bytes[idx + 1]), hex_value(bytes[idx + 2])) {
+                out.push((hi << 4) | lo);
+                idx += 3;
+            } else {
+                out.push(bytes[idx]);
+                idx += 1;
+            }
+        } else {
+            out.push(bytes[idx]);
+            idx += 1;
+        }
+    }
+    String::from_utf8(out).unwrap_or_else(|_| value.to_string())
+}
+
+fn hex_value(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
+}
+
+fn body_to_dynamic(body: Bytes) -> Dynamic {
+    std::str::from_utf8(&body).map(Dynamic::from).unwrap_or_else(|_| Dynamic::Bytes(body.to_vec()))
+}
+
+pub const HTTP_NATIVE: [(&str, &[Type], Type, *const u8); 5] = [
+    ("request", &[Type::Any], Type::Any, http_request as *const u8),
+    ("get", &[Type::Any], Type::Any, http_get as *const u8),
+    ("post", &[Type::Any, Type::Any], Type::Any, http_post as *const u8),
+    ("upload", &[Type::Any, Type::Any], Type::Any, http_upload as *const u8),
+    ("serve", &[Type::Str, Type::Bool], Type::Any, http_serve as *const u8),
+];
 
 #[cfg(test)]
 mod tests {
@@ -310,5 +702,14 @@ mod tests {
 
         assert!(response.contains("@headers"));
         assert!(!response.contains("headers"));
+    }
+
+    #[test]
+    fn parses_server_address() -> anyhow::Result<()> {
+        let (host, port) = super::parse_addr("0.0.0.0:8080")?;
+
+        assert_eq!(host, "0.0.0.0");
+        assert_eq!(port, 8080);
+        Ok(())
     }
 }

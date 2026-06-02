@@ -20,6 +20,7 @@ mod gpu_layout;
 mod gpu_module;
 mod http_module;
 mod llm_module;
+mod oss_module;
 mod root_module;
 pub use gpu_layout::{GpuFieldLayout, GpuStructLayout};
 
@@ -229,6 +230,10 @@ impl JITRunTime {
         add_native_module_fns(self, "http", &http_module::HTTP_NATIVE)
     }
 
+    pub fn add_oss(&mut self) -> Result<()> {
+        add_native_module_fns(self, "oss", &oss_module::OSS_NATIVE)
+    }
+
     pub fn add_db(&mut self) -> Result<()> {
         add_native_module_fns(self, "db", &db_module::DB_NATIVE)
     }
@@ -244,6 +249,7 @@ impl JITRunTime {
         self.add_llm()?;
         self.add_root()?;
         self.add_http()?;
+        self.add_oss()?;
         self.add_db()?;
         self.add_gpu()?;
         Ok(())
@@ -334,6 +340,10 @@ impl Vm {
 
     pub fn add_http(&self) -> Result<()> {
         self.jit.lock().unwrap().add_http()
+    }
+
+    pub fn add_oss(&self) -> Result<()> {
+        self.jit.lock().unwrap().add_oss()
     }
 
     pub fn add_db(&self) -> Result<()> {

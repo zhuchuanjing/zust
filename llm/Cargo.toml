@@ -1,6 +1,6 @@
 [package]
 name = "zust-llm"
-version = "0.9.7"
+version = "0.9.8"
 edition = "2024"
 rust-version = "1.85"
 description = "LLM request helpers for Zust runtime integrations."
@@ -29,3 +29,6 @@ log = "0.4.29"
 base64 = "0.22.1"
 uuid = { version = "1.23.1", features = ["v4"]}
 regex = "1.12.3"
+hmac = "0.12.1"
+sha2 = "0.10.9"
+jiff = "0.2.24"

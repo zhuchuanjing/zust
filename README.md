@@ -364,15 +364,22 @@ pub fn echo(req) {
 }
 
 pub fn start() {
-    http::serve("0.0.0.0:8080", true, "/upload")
+    http::serve({
+        host: "0.0.0.0:8080",
+        ws: "/ws",
+        upload: "/upload",
+        static: "public",
+    })
 }
 ```
 
-`http::serve(addr, ws, upload_path)` listens on an address string such as `"0.0.0.0:8080"`. Use an empty upload path (`""`) when multipart upload is not needed. HTTP API requests are dispatched through ROOT: `/api/foo` becomes `local/http/{method}/foo`, where `method` is lowercase. The request payload includes `@method`, `@path`, `@header`, optional `@query`, and any decoded JSON body fields.
+`http::serve(config)` starts the server. `config.host` is the `"host:port"` address string. `config.ws` is a WebSocket path or a list of paths. `config.upload` is a multipart upload path or a list of paths; use `""` or omit it when uploads are not needed. `config.static` is one static directory or a list of static entries.
+
+HTTP API requests are dispatched through ROOT: `/api/foo` becomes `local/http/{method}/foo`, where `method` is lowercase. The request payload includes `@method`, `@path`, `@header`, optional `@query`, and any decoded JSON body fields.
 
 Handler responses are returned as JSON by default. A response can set `@status`, `@content-type`, or `@body` to control HTTP status, content type, and raw response body.
 
-When `upload_path` is not empty, the server accepts multipart `POST` requests at that path, parses the body by boundary without converting file contents to text, merges the parsed parts as `{name: bytes}`, and dispatches the payload to `local/http/upload`.
+When `config.upload` is set, the server accepts multipart `POST` requests at those paths, parses the body by boundary without converting file contents to text, merges the parsed parts as `{name: bytes}`, and dispatches the payload to `local/http/upload`.
 
 ```zust
 root::add_fn("local/http/upload", "app::upload");
@@ -386,7 +393,21 @@ pub fn upload(req) {
 }
 ```
 
-When `ws` is `true`, the server also listens on `/ws` by default. WebSocket connections are mounted under `local/ws`, and optional handlers are dispatched at `local/ws_handlers/auth`, `connect`, `message`, and `disconnect`. Binary WebSocket messages are decoded as MessagePack; text messages are decoded as JSON when possible, otherwise as strings.
+`static` can be a string directory mounted at `/`, a list of directories, or explicit entries:
+
+```zust
+http::serve({
+    host: "0.0.0.0:8080",
+    ws: ["/ws", "/socket"],
+    upload: ["/upload", "/file"],
+    static: [
+        "public",
+        {path: "/assets", dir: "assets"},
+    ],
+});
+```
+
+When `ws` is set, WebSocket connections are mounted under `local/ws`, and optional handlers are dispatched at `local/ws_handlers/auth`, `connect`, `message`, and `disconnect`. Binary WebSocket messages are decoded as MessagePack; text messages are decoded as JSON when possible, otherwise as strings.
 
 ```zust
 root::add_fn("local/ws_handlers/message", "app::ws_message");

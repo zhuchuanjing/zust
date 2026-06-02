@@ -377,15 +377,22 @@ pub fn echo(req) {
 }
 
 pub fn start() {
-    http::serve("0.0.0.0:8080", true, "/upload")
+    http::serve({
+        host: "0.0.0.0:8080",
+        ws: "/ws",
+        upload: "/upload",
+        static: "public",
+    })
 }
 ```
 
-`http::serve(addr, ws, upload_path)` 启动 HTTP server。`addr` 是 `"host:port"` 字符串，例如 `"0.0.0.0:8080"`；`ws` 是是否启用 WebSocket；`upload_path` 是 multipart 上传路径，不需要上传时传空字符串 `""`。HTTP API 按 ROOT 分发：`/api/foo` 会映射到 `local/http/{method}/foo`，其中 `method` 为小写。
+`http::serve(config)` 启动 HTTP server。`config.host` 是 `"host:port"` 地址字符串。`config.ws` 是 WebSocket 路径或路径 list。`config.upload` 是 multipart 上传路径或路径 list，不需要上传时传空字符串 `""` 或不传。`config.static` 是一个静态目录，或静态目录 list。
+
+HTTP API 按 ROOT 分发：`/api/foo` 会映射到 `local/http/{method}/foo`，其中 `method` 为小写。
 
 请求 payload 会包含 `@method`、`@path`、`@header`、可选 `@query`，以及成功解析的 JSON body 字段。handler 默认返回 JSON；可以用 `@status`、`@content-type` 和 `@body` 控制状态码、content type 和原始响应 body。
 
-当 `upload_path` 非空时，server 会在这个路径接收 multipart `POST`，按 boundary 纯字节扫描解析，不把文件内容转成字符串。解析结果直接按 `{name: bytes}` 合并到 payload，然后分发到 `local/http/upload`。
+当 `config.upload` 设置后，server 会在这些路径接收 multipart `POST`，按 boundary 纯字节扫描解析，不把文件内容转成字符串。解析结果直接按 `{name: bytes}` 合并到 payload，然后分发到 `local/http/upload`。
 
 ```zust
 root::add_fn("local/http/upload", "app::upload");
@@ -399,7 +406,21 @@ pub fn upload(req) {
 }
 ```
 
-当 `ws` 为 `true` 时，server 默认监听 `/ws`。连接会挂载到 `local/ws` 下；可选 handler 路径为 `local/ws_handlers/auth`、`connect`、`message` 和 `disconnect`。二进制 WebSocket 消息按 MessagePack 解码；文本消息优先按 JSON 解码，否则作为字符串。
+`static` 可以是挂载到 `/` 的目录字符串，也可以是目录 list，或显式配置挂载路径：
+
+```zust
+http::serve({
+    host: "0.0.0.0:8080",
+    ws: ["/ws", "/socket"],
+    upload: ["/upload", "/file"],
+    static: [
+        "public",
+        {path: "/assets", dir: "assets"},
+    ],
+});
+```
+
+当 `ws` 设置后，连接会挂载到 `local/ws` 下；可选 handler 路径为 `local/ws_handlers/auth`、`connect`、`message` 和 `disconnect`。二进制 WebSocket 消息按 MessagePack 解码；文本消息优先按 JSON 解码，否则作为字符串。
 
 ```zust
 root::add_fn("local/ws_handlers/message", "app::ws_message");

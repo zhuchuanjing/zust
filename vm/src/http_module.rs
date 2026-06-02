@@ -12,10 +12,11 @@ use dynamic::{Dynamic, FromJson, MsgPack, MsgUnpack, ToJson, Type, map};
 use futures_util::{SinkExt, StreamExt};
 use reqwest::header::{CONTENT_TYPE, HeaderName, HeaderValue};
 use std::collections::BTreeMap;
+use std::path::Path;
 use std::sync::{LazyLock, Mutex};
 use std::time::Duration;
 use tokio::sync::mpsc;
-use tower_http::cors::CorsLayer;
+use tower_http::{cors::CorsLayer, services::ServeDir};
 
 static WS_SENDERS: LazyLock<Mutex<BTreeMap<String, mpsc::UnboundedSender<WsCommand>>>> = LazyLock::new(|| Mutex::new(BTreeMap::new()));
 
@@ -52,13 +53,12 @@ extern "C" fn http_post(url: *const Dynamic, body: *const Dynamic) -> *const Dyn
     alloc_dynamic(result)
 }
 
-extern "C" fn http_serve(input: *const Dynamic, ws: bool, upload_path: *const Dynamic) -> *const Dynamic {
-    if input.is_null() || upload_path.is_null() {
+extern "C" fn http_serve(input: *const Dynamic) -> *const Dynamic {
+    if input.is_null() {
         return alloc_dynamic(Dynamic::Null);
     }
     let input = unsafe { (&*input).clone() };
-    let upload_path = unsafe { (&*upload_path).clone() };
-    alloc_dynamic(start_server(input, ws, upload_path))
+    alloc_dynamic(start_server(input))
 }
 
 extern "C" fn http_upload(object_name: *const Dynamic, bytes: *const Dynamic) -> *const Dynamic {
@@ -298,11 +298,14 @@ fn upload_bytes_result(object_name: Dynamic, bytes: Dynamic) -> Result<Dynamic> 
     Ok(map!("ok"=> true, "object_name"=> object_name, "oss_url"=> oss_url, "url"=> url))
 }
 
-fn start_server(input: Dynamic, ws_enabled: bool, upload_path: Dynamic) -> Dynamic {
-    match server_options(input, ws_enabled, upload_path).and_then(|options| {
+fn start_server(input: Dynamic) -> Dynamic {
+    match server_options(input).and_then(|options| {
         let info = map!("host"=> options.host.clone(), "port"=> options.port as i64, "api_prefix"=> options.api_prefix.clone());
-        if let Some(upload_path) = &options.upload_path {
-            info.insert("upload_path", upload_path.clone());
+        if !options.upload_paths.is_empty() {
+            info.insert("upload", Dynamic::list(options.upload_paths.iter().cloned().map(Dynamic::from).collect()));
+        }
+        if !options.ws_paths.is_empty() {
+            info.insert("ws", Dynamic::list(options.ws_paths.iter().cloned().map(Dynamic::from).collect()));
         }
         let task_options = options.clone();
         let id = root::start_task(info, move || {
@@ -324,18 +327,28 @@ struct ServerOptions {
     port: u16,
     api_prefix: String,
     body_limit: usize,
-    ws_enabled: bool,
-    upload_path: Option<String>,
+    ws_paths: Vec<String>,
+    upload_paths: Vec<String>,
+    static_dirs: Vec<StaticDir>,
 }
 
-fn server_options(input: Dynamic, ws_enabled: bool, upload_path: Dynamic) -> Result<ServerOptions> {
-    if !input.is_str() {
-        return Err(anyhow!("http::serve 第一个参数需要 host:port 字符串"));
+#[derive(Clone)]
+struct StaticDir {
+    path: String,
+    dir: String,
+}
+
+fn server_options(input: Dynamic) -> Result<ServerOptions> {
+    let config = if input.is_str() { map!("host"=> input) } else { input };
+    if !config.is_map() {
+        return Err(anyhow!("http::serve 需要配置 map"));
     }
-    let (host, port) = parse_addr(input.as_str())?;
-    let upload_path = upload_path.as_str().trim().trim_matches('/').to_string();
-    let upload_path = if upload_path.is_empty() { None } else { Some(format!("/{upload_path}")) };
-    Ok(ServerOptions { host, port, api_prefix: "api".into(), body_limit: 20 * 1024 * 1024, ws_enabled, upload_path })
+    let host_value = config.get_dynamic("host").or_else(|| config.get_dynamic("addr")).ok_or_else(|| anyhow!("http::serve 需要 host"))?;
+    let (host, port) = parse_addr(host_value.as_str())?;
+    let ws_paths = config.get_dynamic("ws").map(|value| path_options(&value, Some("/ws"))).transpose()?.unwrap_or_default();
+    let upload_paths = config.get_dynamic("upload").map(|value| path_options(&value, Some("/upload"))).transpose()?.unwrap_or_default();
+    let static_dirs = config.get_dynamic("static").map(|value| static_options(&value)).transpose()?.unwrap_or_default();
+    Ok(ServerOptions { host, port, api_prefix: "api".into(), body_limit: 20 * 1024 * 1024, ws_paths, upload_paths, static_dirs })
 }
 
 fn parse_addr(addr: &str) -> Result<(String, u16)> {
@@ -349,18 +362,98 @@ async fn run_server(options: ServerOptions) -> Result<()> {
     let route = format!("/{}/{{*path}}", options.api_prefix.trim_matches('/'));
     let mut app = Router::new().route("/health", get(http_health)).route(&route, get(api_dispatch).post(api_dispatch));
 
-    if options.ws_enabled {
+    if !options.ws_paths.is_empty() {
         root::add_list("local/ws")?;
-        app = app.route("/ws", get(ws_upgrade));
     }
-    if let Some(upload_path) = &options.upload_path {
+    for ws_path in &options.ws_paths {
+        app = app.route(ws_path, get(ws_upgrade));
+    }
+    for upload_path in &options.upload_paths {
         app = app.route(upload_path, post(upload_dispatch));
+    }
+    for static_dir in &options.static_dirs {
+        let service = ServeDir::new(&static_dir.dir).append_index_html_on_directories(true);
+        if static_dir.path == "/" {
+            app = app.fallback_service(service);
+        } else {
+            app = app.nest_service(&static_dir.path, service);
+        }
     }
     let app = app.layer(CorsLayer::very_permissive()).with_state(options.clone());
 
     let listener = tokio::net::TcpListener::bind((options.host.as_str(), options.port)).await?;
     axum::serve(listener, app).await?;
     Ok(())
+}
+
+fn path_options(value: &Dynamic, true_path: Option<&str>) -> Result<Vec<String>> {
+    if value.is_list() {
+        let mut paths = Vec::new();
+        for idx in 0..value.len() {
+            if let Some(item) = value.get_idx(idx) {
+                paths.extend(path_options(&item, true_path)?);
+            }
+        }
+        return Ok(paths);
+    }
+
+    Ok(path_option(value, true_path).into_iter().collect())
+}
+
+fn path_option(value: &Dynamic, true_path: Option<&str>) -> Option<String> {
+    if value.as_bool() == Some(true) {
+        return true_path.map(str::to_string);
+    }
+    let path = value.as_str().trim().trim_matches('/').to_string();
+    if path.is_empty() { None } else { Some(format!("/{path}")) }
+}
+
+fn static_options(value: &Dynamic) -> Result<Vec<StaticDir>> {
+    if value.is_str() {
+        let dir = value.as_str().trim();
+        if dir.is_empty() {
+            return Ok(Vec::new());
+        }
+        return Ok(vec![StaticDir { path: "/".into(), dir: dir.into() }]);
+    }
+
+    if value.is_list() {
+        let mut dirs = Vec::new();
+        for idx in 0..value.len() {
+            if let Some(item) = value.get_idx(idx) {
+                dirs.extend(static_options(&item)?);
+            }
+        }
+        return Ok(dirs);
+    }
+
+    if value.is_map() {
+        let dir = value
+            .get_dynamic("dir")
+            .or_else(|| value.get_dynamic("root"))
+            .or_else(|| value.get_dynamic("directory"))
+            .ok_or_else(|| anyhow!("http static 需要 dir"))?
+            .as_str()
+            .trim()
+            .to_string();
+        if dir.is_empty() {
+            return Ok(Vec::new());
+        }
+        let path = value.get_dynamic("path").or_else(|| value.get_dynamic("url")).map(|path| public_path(path.as_str())).unwrap_or_else(|| static_mount_path(&dir));
+        return Ok(vec![StaticDir { path, dir }]);
+    }
+
+    Err(anyhow!("http static 需要字符串、map 或 list"))
+}
+
+fn static_mount_path(dir: &str) -> String {
+    let name = Path::new(dir).file_name().and_then(|name| name.to_str()).filter(|name| !name.is_empty()).unwrap_or("static");
+    public_path(name)
+}
+
+fn public_path(path: &str) -> String {
+    let path = path.trim().trim_matches('/');
+    if path.is_empty() { "/".into() } else { format!("/{path}") }
 }
 
 async fn http_health() -> Response {
@@ -799,7 +892,7 @@ pub const HTTP_NATIVE: [(&str, &[Type], Type, *const u8); 5] = [
     ("get", &[Type::Any], Type::Any, http_get as *const u8),
     ("post", &[Type::Any, Type::Any], Type::Any, http_post as *const u8),
     ("upload", &[Type::Any, Type::Any], Type::Any, http_upload as *const u8),
-    ("serve", &[Type::Str, Type::Bool, Type::Str], Type::Any, http_serve as *const u8),
+    ("serve", &[Type::Any], Type::Any, http_serve as *const u8),
 ];
 
 pub fn add_root_handlers() -> Result<()> {
@@ -881,6 +974,23 @@ mod tests {
 
         assert_eq!(host, "0.0.0.0");
         assert_eq!(port, 8080);
+        Ok(())
+    }
+
+    #[test]
+    fn parses_server_dynamic_config() -> anyhow::Result<()> {
+        let options = super::server_options(map!(
+            "host"=> "0.0.0.0:8080",
+            "ws"=> Dynamic::list(vec!["/ws".into(), "/socket".into()]),
+            "upload"=> Dynamic::list(vec!["/upload".into(), "/file".into()]),
+            "static"=> Dynamic::list(vec![Dynamic::from("public"), map!("path"=> "/assets", "dir"=> "assets")])
+        ))?;
+
+        assert_eq!(options.ws_paths, vec!["/ws".to_string(), "/socket".to_string()]);
+        assert_eq!(options.upload_paths, vec!["/upload".to_string(), "/file".to_string()]);
+        assert_eq!(options.static_dirs.len(), 2);
+        assert_eq!(options.static_dirs[0].dir, "public");
+        assert_eq!(options.static_dirs[1].path, "/assets");
         Ok(())
     }
 

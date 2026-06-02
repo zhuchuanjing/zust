@@ -274,21 +274,29 @@ The standard functions are available without a module prefix:
 
 - `print(value)`: print a dynamic value.
 - `log(value)`: write a dynamic value to Rust logs using debug formatting.
-- `import(module, path)`: import another `.zs` file or a source object stored in `root`.
 - `uuid()`: return a UUID string.
 - `rand(start, stop)`: return a random integer or float between `start` and `stop`.
+- `import(module, path)`: import another `.zs` file or a source object stored in `root`.
 
 ### `Any`
 
 Dynamic values expose common methods:
 
-- Type and copy helpers: `is_map()`, `is_list()`, `is_string()`, `is_null()`, `clone()`, `len()`, `keys()`, `to_string()`.
+- Constructors and type helpers: `Any::null()`, `is_map()`, `is_list()`, `is_string()`, `is_null()`, `clone()`.
+- Size and conversion helpers: `len()`, `keys()`, `to_string()`, `Any::from_i64(value)`, `Any::to_i64(value)`, `Any::from_bool(value)`, `Any::to_bool(value)`, `Any::from_f64(value)`, `Any::to_f64(value)`.
 - List and string helpers: `push(value)`, `pop()`, `split(sep)`, `slice(start, stop, inclusive)`.
 - Map and index helpers: `get_idx(idx)`, `set_idx(idx, value)`, `get_key(key)`, `set_key(key, value)`, `del_key(key)`, `contains(value)`, `starts_with(prefix)`.
 - Iteration helpers: `iter()`, `next()`.
-- Conversion helpers: `Any::from_i64`, `Any::to_i64`, `Any::from_bool`, `Any::to_bool`, `Any::from_f64`, `Any::to_f64`.
+- Operator helpers used by the compiler for dynamic expressions: `Any::binary(left, op, right)` and `Any::logic(left, op, right)`.
 
 Most normal script syntax, such as `list[idx]`, `map.key`, `value.len()`, and dynamic arithmetic, is lowered through these helpers.
+
+### `Vec`
+
+`Vec` is a low-level VM vector helper used by compiled code and GPU-oriented data paths:
+
+- `Vec::swap(vec, i, j)`: swap two `i32` slots.
+- `Vec::get_idx(vec, idx)`: read an `i32` slot.
 
 ### `root`
 
@@ -356,13 +364,27 @@ pub fn echo(req) {
 }
 
 pub fn start() {
-    http::serve("0.0.0.0:8080", true)
+    http::serve("0.0.0.0:8080", true, "/upload")
 }
 ```
 
-`http::serve(addr, ws)` listens on an address string such as `"0.0.0.0:8080"`. HTTP API requests are dispatched through ROOT: `/api/foo` becomes `local/http/{method}/foo`, where `method` is lowercase. The request payload includes `@method`, `@path`, `@header`, optional `@query`, and any decoded JSON body fields.
+`http::serve(addr, ws, upload_path)` listens on an address string such as `"0.0.0.0:8080"`. Use an empty upload path (`""`) when multipart upload is not needed. HTTP API requests are dispatched through ROOT: `/api/foo` becomes `local/http/{method}/foo`, where `method` is lowercase. The request payload includes `@method`, `@path`, `@header`, optional `@query`, and any decoded JSON body fields.
 
 Handler responses are returned as JSON by default. A response can set `@status`, `@content-type`, or `@body` to control HTTP status, content type, and raw response body.
+
+When `upload_path` is not empty, the server accepts multipart `POST` requests at that path, parses the body by boundary without converting file contents to text, merges the parsed parts as `{name: bytes}`, and dispatches the payload to `local/http/upload`.
+
+```zust
+root::add_fn("local/http/upload", "app::upload");
+
+pub fn upload(req) {
+    let saved = http::upload("uploads/input.bin", req.file);
+    {
+        ok: saved.ok,
+        url: saved.url,
+    }
+}
+```
 
 When `ws` is `true`, the server also listens on `/ws` by default. WebSocket connections are mounted under `local/ws`, and optional handlers are dispatched at `local/ws_handlers/auth`, `connect`, `message`, and `disconnect`. Binary WebSocket messages are decoded as MessagePack; text messages are decoded as JSON when possible, otherwise as strings.
 
@@ -409,7 +431,7 @@ let task_id = llm::deep(model, {prompt: "Write a longer report"}, "local/llm/pro
 
 Large binary inputs should be uploaded to object storage first and passed to model APIs by URL when the provider supports URLs. This keeps large payloads out of LLM request bodies.
 
-### OSS Uploads
+### `oss`
 
 `oss` exposes direct Aliyun OSS upload helpers for large images, audio, video, and other files used by LLM workflows.
 
@@ -435,6 +457,18 @@ let audio_text = llm::audio(model, {
 ```
 
 `http::upload(object_name, bytes)` is the same direct upload helper exposed from the HTTP module for server-side workflows that already use `http`.
+
+`oss::signed_url(input)` returns a temporary HTTP URL for an existing `oss:://...` object URL. Pass the object URL directly, or pass `{oss_url, expires}` when a custom expiration is needed.
+
+```zust
+let url = oss::signed_url(uploaded.oss_url);
+let longer = oss::signed_url({oss_url: uploaded.oss_url, expires: 3600});
+```
+
+Functions:
+
+- `oss::upload(object_name, bytes)`: upload `Vec<u8>` bytes using `local/oss` config; returns `{ok, object_name, oss_url, url}`.
+- `oss::signed_url(input)`: convert an `oss:://...` object URL to a temporary HTTP URL. The default expiration is 600 seconds.
 
 ### `db`
 

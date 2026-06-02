@@ -6,7 +6,7 @@ use axum::{
     extract::ws::{Message, WebSocket, WebSocketUpgrade},
     http::{HeaderMap as AxumHeaderMap, HeaderName as AxumHeaderName, HeaderValue as AxumHeaderValue, Request, StatusCode},
     response::{IntoResponse, Response},
-    routing::get,
+    routing::{get, post},
 };
 use dynamic::{Dynamic, FromJson, MsgPack, MsgUnpack, ToJson, Type, map};
 use futures_util::{SinkExt, StreamExt};
@@ -52,12 +52,13 @@ extern "C" fn http_post(url: *const Dynamic, body: *const Dynamic) -> *const Dyn
     alloc_dynamic(result)
 }
 
-extern "C" fn http_serve(input: *const Dynamic, ws: bool) -> *const Dynamic {
-    if input.is_null() {
+extern "C" fn http_serve(input: *const Dynamic, ws: bool, upload_path: *const Dynamic) -> *const Dynamic {
+    if input.is_null() || upload_path.is_null() {
         return alloc_dynamic(Dynamic::Null);
     }
     let input = unsafe { (&*input).clone() };
-    alloc_dynamic(start_server(input, ws))
+    let upload_path = unsafe { (&*upload_path).clone() };
+    alloc_dynamic(start_server(input, ws, upload_path))
 }
 
 extern "C" fn http_upload(object_name: *const Dynamic, bytes: *const Dynamic) -> *const Dynamic {
@@ -297,9 +298,12 @@ fn upload_bytes_result(object_name: Dynamic, bytes: Dynamic) -> Result<Dynamic> 
     Ok(map!("ok"=> true, "object_name"=> object_name, "oss_url"=> oss_url, "url"=> url))
 }
 
-fn start_server(input: Dynamic, ws_enabled: bool) -> Dynamic {
-    match server_options(input, ws_enabled).and_then(|options| {
+fn start_server(input: Dynamic, ws_enabled: bool, upload_path: Dynamic) -> Dynamic {
+    match server_options(input, ws_enabled, upload_path).and_then(|options| {
         let info = map!("host"=> options.host.clone(), "port"=> options.port as i64, "api_prefix"=> options.api_prefix.clone());
+        if let Some(upload_path) = &options.upload_path {
+            info.insert("upload_path", upload_path.clone());
+        }
         let task_options = options.clone();
         let id = root::start_task(info, move || {
             Box::pin(async move {
@@ -321,14 +325,17 @@ struct ServerOptions {
     api_prefix: String,
     body_limit: usize,
     ws_enabled: bool,
+    upload_path: Option<String>,
 }
 
-fn server_options(input: Dynamic, ws_enabled: bool) -> Result<ServerOptions> {
+fn server_options(input: Dynamic, ws_enabled: bool, upload_path: Dynamic) -> Result<ServerOptions> {
     if !input.is_str() {
         return Err(anyhow!("http::serve 第一个参数需要 host:port 字符串"));
     }
     let (host, port) = parse_addr(input.as_str())?;
-    Ok(ServerOptions { host, port, api_prefix: "api".into(), body_limit: 20 * 1024 * 1024, ws_enabled })
+    let upload_path = upload_path.as_str().trim().trim_matches('/').to_string();
+    let upload_path = if upload_path.is_empty() { None } else { Some(format!("/{upload_path}")) };
+    Ok(ServerOptions { host, port, api_prefix: "api".into(), body_limit: 20 * 1024 * 1024, ws_enabled, upload_path })
 }
 
 fn parse_addr(addr: &str) -> Result<(String, u16)> {
@@ -340,12 +347,16 @@ fn parse_addr(addr: &str) -> Result<(String, u16)> {
 
 async fn run_server(options: ServerOptions) -> Result<()> {
     let route = format!("/{}/{{*path}}", options.api_prefix.trim_matches('/'));
-    let mut app = Router::new().route("/health", get(http_health)).route(&route, get(api_dispatch).post(api_dispatch)).layer(CorsLayer::very_permissive()).with_state(options.clone());
+    let mut app = Router::new().route("/health", get(http_health)).route(&route, get(api_dispatch).post(api_dispatch));
 
     if options.ws_enabled {
         root::add_list("local/ws")?;
         app = app.route("/ws", get(ws_upgrade));
     }
+    if let Some(upload_path) = &options.upload_path {
+        app = app.route(upload_path, post(upload_dispatch));
+    }
+    let app = app.layer(CorsLayer::very_permissive()).with_state(options.clone());
 
     let listener = tokio::net::TcpListener::bind((options.host.as_str(), options.port)).await?;
     axum::serve(listener, app).await?;
@@ -359,6 +370,19 @@ async fn http_health() -> Response {
 async fn api_dispatch(axum::extract::State(options): axum::extract::State<ServerOptions>, req: Request<Body>) -> Response {
     let route = api_route(&options, &req);
     match api_payload(req, options.body_limit).await.and_then(|payload| root::send_msg(&route, payload).map_err(|err| anyhow!("dispatch {route}: {err}"))) {
+        Ok(result) => to_response(result).unwrap_or_else(|err| json_error(StatusCode::INTERNAL_SERVER_ERROR, err.to_string())),
+        Err(err) => json_error(StatusCode::BAD_REQUEST, err.to_string()),
+    }
+}
+
+async fn upload_dispatch(axum::extract::State(options): axum::extract::State<ServerOptions>, req: Request<Body>) -> Response {
+    match raw_payload(req, options.body_limit)
+        .await
+        .and_then(|payload| {
+            let parsed = parse_multipart_result(&payload)?;
+            payload.append(parsed);
+            root::send_msg("local/http/upload", payload).map_err(|err| anyhow!("dispatch local/http/upload: {err}"))
+        }) {
         Ok(result) => to_response(result).unwrap_or_else(|err| json_error(StatusCode::INTERNAL_SERVER_ERROR, err.to_string())),
         Err(err) => json_error(StatusCode::BAD_REQUEST, err.to_string()),
     }
@@ -390,6 +414,148 @@ async fn api_payload(req: Request<Body>, body_limit: usize) -> Result<Dynamic> {
         }
     }
     Ok(payload)
+}
+
+async fn raw_payload(req: Request<Body>, body_limit: usize) -> Result<Dynamic> {
+    let (parts, body) = req.into_parts();
+    let method = parts.method.as_str().to_ascii_lowercase();
+    let path = parts.uri.path().trim_start_matches('/').to_string();
+    let payload = map!("@method"=> method, "@path"=> path, "@header"=> headers_to_dynamic(&parts.headers));
+    if let Some(query) = parts.uri.query() {
+        payload.insert("@query", query_to_dynamic(query));
+    }
+    let body = to_bytes(body, body_limit).await?;
+    payload.insert("@body", Dynamic::Bytes(body.to_vec()));
+    Ok(payload)
+}
+
+fn parse_multipart_dynamic(input: Dynamic) -> Dynamic {
+    match parse_multipart_result(&input) {
+        Ok(result) => result,
+        Err(err) => map!("ok"=> false, "error"=> err.to_string()),
+    }
+}
+
+fn parse_multipart_result(input: &Dynamic) -> Result<Dynamic> {
+    let headers = input.get_dynamic("@header").or_else(|| input.get_dynamic("@headers")).ok_or_else(|| anyhow!("multipart headers missing"))?;
+    let content_type = header_value(&headers, "content-type").ok_or_else(|| anyhow!("multipart content-type missing"))?;
+    let boundary = multipart_boundary(&content_type).ok_or_else(|| anyhow!("multipart boundary missing"))?;
+    let body = input.get_dynamic("@body").ok_or_else(|| anyhow!("multipart body missing"))?;
+    let body = if let Some(bytes) = body.as_bytes() { bytes.to_vec() } else { body.as_str().as_bytes().to_vec() };
+    parse_multipart_bytes(&body, &boundary)
+}
+
+fn header_value(headers: &Dynamic, key: &str) -> Option<String> {
+    if !headers.is_map() {
+        return None;
+    }
+    for name in headers.keys() {
+        if name.eq_ignore_ascii_case(key) {
+            return headers.get_dynamic(name.as_str()).map(|value| value.as_str().to_string());
+        }
+    }
+    None
+}
+
+fn multipart_boundary(content_type: &str) -> Option<String> {
+    content_type.split(';').map(str::trim).find_map(|part| {
+        let value = part.strip_prefix("boundary=")?;
+        Some(value.trim_matches('"').to_string())
+    })
+}
+
+fn parse_multipart_bytes(body: &[u8], boundary: &str) -> Result<Dynamic> {
+    let marker = format!("--{boundary}").into_bytes();
+    let mut pos = find_bytes(body, &marker).ok_or_else(|| anyhow!("multipart boundary not found"))? + marker.len();
+    let data = map!();
+
+    loop {
+        if body.get(pos..pos + 2) == Some(b"--") {
+            break;
+        }
+        if body.get(pos..pos + 2) == Some(b"\r\n") {
+            pos += 2;
+        } else if body.get(pos..pos + 1) == Some(b"\n") {
+            pos += 1;
+        }
+
+        let (headers_end, sep_len) = find_header_end(&body[pos..]).ok_or_else(|| anyhow!("multipart part headers missing"))?;
+        let header_bytes = &body[pos..pos + headers_end];
+        let data_start = pos + headers_end + sep_len;
+        let (data_end, next_pos) = find_next_part(body, data_start, &marker).ok_or_else(|| anyhow!("multipart next boundary missing"))?;
+        let part_body = &body[data_start..data_end];
+        let headers = parse_part_headers(header_bytes);
+        let disposition = header_value(&headers, "content-disposition").unwrap_or_default();
+        let name = disposition_param(&disposition, "name").unwrap_or_default();
+
+        if !name.is_empty() {
+            insert_multi(&data, &name, Dynamic::Bytes(part_body.to_vec()));
+        }
+        pos = next_pos;
+    }
+
+    Ok(data)
+}
+
+fn find_header_end(bytes: &[u8]) -> Option<(usize, usize)> {
+    find_bytes(bytes, b"\r\n\r\n").map(|idx| (idx, 4)).or_else(|| find_bytes(bytes, b"\n\n").map(|idx| (idx, 2)))
+}
+
+fn find_next_part(body: &[u8], start: usize, marker: &[u8]) -> Option<(usize, usize)> {
+    if let Some(idx) = find_bytes(&body[start..], &[b"\r\n", marker].concat()) {
+        let boundary_start = start + idx;
+        return Some((boundary_start, boundary_start + 2 + marker.len()));
+    }
+    if let Some(idx) = find_bytes(&body[start..], &[b"\n", marker].concat()) {
+        let boundary_start = start + idx;
+        return Some((boundary_start, boundary_start + 1 + marker.len()));
+    }
+    None
+}
+
+fn find_bytes(bytes: &[u8], needle: &[u8]) -> Option<usize> {
+    if needle.is_empty() || needle.len() > bytes.len() {
+        return None;
+    }
+    bytes.windows(needle.len()).position(|window| window == needle)
+}
+
+fn parse_part_headers(bytes: &[u8]) -> Dynamic {
+    let headers = map!();
+    let text = String::from_utf8_lossy(bytes);
+    for line in text.lines() {
+        if let Some((key, value)) = line.split_once(':') {
+            headers.insert(key.trim().to_ascii_lowercase(), value.trim().to_string());
+        }
+    }
+    headers
+}
+
+fn disposition_param(disposition: &str, key: &str) -> Option<String> {
+    for part in disposition.split(';').map(str::trim) {
+        if let Some((name, value)) = part.split_once('=')
+            && name == key
+        {
+            return Some(value.trim_matches('"').to_string());
+        }
+    }
+    None
+}
+
+fn insert_multi(target: &Dynamic, key: &str, value: Dynamic) {
+    if key.is_empty() {
+        return;
+    }
+    if let Some(existing) = target.get_dynamic(key) {
+        if existing.is_list() {
+            let mut existing = existing;
+            existing.push(value);
+        } else {
+            target.insert(key, Dynamic::list(vec![existing, value]));
+        }
+    } else {
+        target.insert(key, value);
+    }
 }
 
 async fn ws_upgrade(headers: AxumHeaderMap, ws: WebSocketUpgrade, axum::extract::Query(query): axum::extract::Query<BTreeMap<String, String>>) -> Response {
@@ -633,8 +799,13 @@ pub const HTTP_NATIVE: [(&str, &[Type], Type, *const u8); 5] = [
     ("get", &[Type::Any], Type::Any, http_get as *const u8),
     ("post", &[Type::Any, Type::Any], Type::Any, http_post as *const u8),
     ("upload", &[Type::Any, Type::Any], Type::Any, http_upload as *const u8),
-    ("serve", &[Type::Str, Type::Bool], Type::Any, http_serve as *const u8),
+    ("serve", &[Type::Str, Type::Bool, Type::Str], Type::Any, http_serve as *const u8),
 ];
+
+pub fn add_root_handlers() -> Result<()> {
+    root::add("local/http/parse-multipart", root::Object::Native(parse_multipart_dynamic))?;
+    Ok(())
+}
 
 #[cfg(test)]
 mod tests {
@@ -710,6 +881,16 @@ mod tests {
 
         assert_eq!(host, "0.0.0.0");
         assert_eq!(port, 8080);
+        Ok(())
+    }
+
+    #[test]
+    fn parses_multipart_into_name_bytes() -> anyhow::Result<()> {
+        let body = b"--z\r\nContent-Disposition: form-data; name=\"title\"\r\n\r\nhello\r\n--z\r\nContent-Disposition: form-data; name=\"file\"; filename=\"a.bin\"\r\nContent-Type: application/octet-stream\r\n\r\n\x00\xffbin\r\n--z--\r\n";
+        let parsed = super::parse_multipart_bytes(body, "z")?;
+
+        assert_eq!(parsed.get_dynamic("title").unwrap().as_bytes().unwrap(), b"hello");
+        assert_eq!(parsed.get_dynamic("file").unwrap().as_bytes().unwrap(), b"\x00\xffbin");
         Ok(())
     }
 }

@@ -257,33 +257,89 @@ pub struct BigFloat<N> {
 
 可以参考 [zusts/bigfloat.zs](zusts/bigfloat.zs) 以及 [zusts/gpu](zusts/gpu) 下的 Mandelbrot 示例。
 
-## 标准函数
+## 运行时 Native 模块
 
-`Vm::with_all()` 会注册标准运行时模块。常用标准函数可以不带模块前缀直接调用：
+`Vm::with_all()` 会注册下面这些 native 模块和辅助类型。它们以 `Dynamic` 作为主要边界，因此 Zust 脚本可以直接传 map、list、字符串、数字和 bytes。
+
+### 标准函数
+
+标准函数不需要模块前缀：
 
 - `print(value)`：打印动态值。
 - `log(value)`：用 Rust log 以 debug 格式记录动态值。
-- `import(module, path)`：导入另一个 `.zs` 文件，或导入存放在 `root` 中的源码对象。
 - `uuid()`：返回 UUID 字符串。
 - `rand(start, stop)`：返回 `start` 到 `stop` 之间的随机整数或浮点数。
+- `import(module, path)`：导入另一个 `.zs` 文件，或导入存放在 `root` 中的源码对象。
 
-## 动态值方法
+```zust
+print({ok: true});
+let id = uuid();
+let n = rand(1, 100);
+import("world", "scripts/world.zs");
+```
 
-动态值暴露常用成员方法：
+### Any 动态值方法
 
-- 类型和复制辅助：`is_map()`、`is_list()`、`is_string()`、`is_null()`、`clone()`、`len()`、`keys()`、`to_string()`。
+动态值暴露这些成员方法和静态转换函数：
+
+- 构造和类型辅助：`Any::null()`、`is_map()`、`is_list()`、`is_string()`、`is_null()`、`clone()`。
+- 长度和转换辅助：`len()`、`keys()`、`to_string()`、`Any::from_i64(value)`、`Any::to_i64(value)`、`Any::from_bool(value)`、`Any::to_bool(value)`、`Any::from_f64(value)`、`Any::to_f64(value)`。
 - List 和字符串辅助：`push(value)`、`pop()`、`split(sep)`、`slice(start, stop, inclusive)`。
 - Map 和索引辅助：`get_idx(idx)`、`set_idx(idx, value)`、`get_key(key)`、`set_key(key, value)`、`del_key(key)`、`contains(value)`、`starts_with(prefix)`。
 - 迭代辅助：`iter()`、`next()`。
-- 转换辅助：`Any::from_i64`、`Any::to_i64`、`Any::from_bool`、`Any::to_bool`、`Any::from_f64`、`Any::to_f64`。
+- 动态表达式辅助：`Any::binary(left, op, right)`、`Any::logic(left, op, right)`，主要由编译器生成调用。
 
 普通脚本语法，例如 `list[idx]`、`map.key`、`value.len()` 和动态算术，都会降到这些辅助方法上。
 
-## HTTP、LLM 和 OSS 模块
+```zust
+let data = {name: "zust", tags: ["vm"]};
 
-`Vm::with_all()` 会注册 `http`、`llm` 和 `oss` 模块。它们都以 `Dynamic` 作为边界，因此 Zust 脚本可以直接传 map、list、字符串、数字和 bytes。
+if data.is_map() && data.contains("name") {
+    print(data.get_key("name"));
+}
 
-### HTTP 客户端
+data.tags.push("native");
+let count = data.tags.len();
+```
+
+### Vec 辅助类型
+
+`Vec` 是 VM 底层向量辅助类型，主要用于编译后的代码和 GPU 数据路径：
+
+- `Vec::swap(vec, i, j)`：交换两个 `i32` 槽位。
+- `Vec::get_idx(vec, idx)`：读取一个 `i32` 槽位。
+
+### root
+
+`root` 是运行期对象树。默认 `local` mount 是内存；也支持 Redis mount 和本地 Fjall-backed `fjall` mount。
+
+```zust
+root::add("local/user/1", {name: "Zust", points: 10});
+let user = root::get("local/user/1");
+
+root::add_list("local/events");
+root::push("local/events", {kind: "login"});
+
+root::add_map("local/users");
+root::insert("local/users", "alice", {age: 20});
+```
+
+函数：
+
+- `root::mount(name, url)`：挂载 Redis-backed root path。
+- `root::mount_fjall(data_dir)`：挂载本地 Fjall 存储，路径名为 `fjall`。
+- `root::add(path, value)`、`root::get(path)`、`root::remove(path)`、`root::contains(path)`。
+- `root::dir(path)`、`root::len(path)`。
+- `root::add_list(path)`、`root::push(path, value)`、`root::get_idx(path, idx)`、`root::remove_idx(path, idx)`。
+- `root::add_map(path)`、`root::insert(path, key, value)`、`root::get_key(path, key)`、`root::remove_key(path, key)`。
+- `root::send(path, value)`、`root::send_idx(path, idx, value)`：向 native handler 或 Zust handler 发送消息。
+- `root::add_fn(path, fn_name)`：把已编译的 Zust 函数注册成 ROOT handler。
+
+### http
+
+`http` 提供动态 HTTP client、Zust 分发的 HTTP server，以及直接 OSS 上传入口。
+
+#### HTTP 客户端
 
 ```zust
 let page = http::get("https://example.com");
@@ -305,7 +361,7 @@ let response = http::request({
 
 响应是 map，包含 `status`、`ok`、`url`、`@headers` 和 `body`。JSON 响应会解码成 `Dynamic`，文本和二进制分别返回字符串或 bytes。
 
-### HTTP Server 和 WebSocket
+#### HTTP Server 和 WebSocket
 
 ```zust
 root::add_fn("local/http/post/echo", "app::echo");
@@ -321,13 +377,27 @@ pub fn echo(req) {
 }
 
 pub fn start() {
-    http::serve("0.0.0.0:8080", true)
+    http::serve("0.0.0.0:8080", true, "/upload")
 }
 ```
 
-`http::serve(addr, ws)` 启动 HTTP server。`addr` 是 `"host:port"` 字符串，例如 `"0.0.0.0:8080"`；`ws` 是是否启用 WebSocket。HTTP API 按 ROOT 分发：`/api/foo` 会映射到 `local/http/{method}/foo`，其中 `method` 为小写。
+`http::serve(addr, ws, upload_path)` 启动 HTTP server。`addr` 是 `"host:port"` 字符串，例如 `"0.0.0.0:8080"`；`ws` 是是否启用 WebSocket；`upload_path` 是 multipart 上传路径，不需要上传时传空字符串 `""`。HTTP API 按 ROOT 分发：`/api/foo` 会映射到 `local/http/{method}/foo`，其中 `method` 为小写。
 
 请求 payload 会包含 `@method`、`@path`、`@header`、可选 `@query`，以及成功解析的 JSON body 字段。handler 默认返回 JSON；可以用 `@status`、`@content-type` 和 `@body` 控制状态码、content type 和原始响应 body。
+
+当 `upload_path` 非空时，server 会在这个路径接收 multipart `POST`，按 boundary 纯字节扫描解析，不把文件内容转成字符串。解析结果直接按 `{name: bytes}` 合并到 payload，然后分发到 `local/http/upload`。
+
+```zust
+root::add_fn("local/http/upload", "app::upload");
+
+pub fn upload(req) {
+    let saved = http::upload("uploads/input.bin", req.file);
+    {
+        ok: saved.ok,
+        url: saved.url,
+    }
+}
+```
 
 当 `ws` 为 `true` 时，server 默认监听 `/ws`。连接会挂载到 `local/ws` 下；可选 handler 路径为 `local/ws_handlers/auth`、`connect`、`message` 和 `disconnect`。二进制 WebSocket 消息按 MessagePack 解码；文本消息优先按 JSON 解码，否则作为字符串。
 
@@ -344,7 +414,7 @@ pub fn ws_message(req) {
 }
 ```
 
-### LLM
+### llm
 
 `llm` 封装文本、图片、语音识别和 TTS 请求。第一个参数是模型配置，通常包含 `url`、`model`、`key` 和可选请求默认值。如果缺少 `url`，会按 `model` 推断 GLM、Doubao、DeepSeek、Qwen 兼容地址。
 
@@ -374,7 +444,7 @@ let task_id = llm::deep(model, {prompt: "写一份长报告"}, "local/llm/progre
 
 大体积二进制输入应优先上传到对象存储，再把 URL 传给支持 URL 输入的模型，避免把大 payload 塞进 LLM 请求体。
 
-### OSS 上传
+### oss
 
 `oss` 模块提供直接的 Aliyun OSS 上传入口，适合 LLM 工作流里的图片、音频、视频和其他大文件。
 
@@ -400,6 +470,112 @@ let audio_text = llm::audio(model, {
 ```
 
 `http::upload(object_name, bytes)` 是 HTTP 模块里暴露的同一个直接上传入口，适合已经在服务端 HTTP 流程里使用时调用。
+
+`oss::signed_url(input)` 为已有 `oss:://...` 对象 URL 生成临时 HTTP 访问 URL。可以直接传对象 URL，也可以传 `{oss_url, expires}` 设置过期时间。
+
+```zust
+let url = oss::signed_url(uploaded.oss_url);
+let longer = oss::signed_url({oss_url: uploaded.oss_url, expires: 3600});
+```
+
+函数：
+
+- `oss::upload(object_name, bytes)`：使用 `local/oss` 配置上传 `Vec<u8>` bytes，返回 `{ok, object_name, oss_url, url}`。
+- `oss::signed_url(input)`：把 `oss:://...` 转成临时 HTTP URL，默认 600 秒。
+
+### db
+
+`db` 使用 `sqlx::AnyPool`，当前支持 PostgreSQL 和 MySQL。连接 URL 存在 `root` 中，通常放在 `local/db`。
+
+```zust
+root::add("local/db", {
+    url: "mysql://user:pass@127.0.0.1:3306/app",
+    max_connections: 10,
+});
+```
+
+解析数据库路径时，`db` 会先检查完整路径。如果完整路径存的是连接 URL，这个路径就是连接名；否则它会向上查找连接配置，剩下的路径后缀作为表名。例如 `local/db/user` 使用 `local/db` 的连接，表名是 `user`。
+
+函数：
+
+- `db::create(path, fields)`：创建表，`path` 通常是表路径，例如 `local/db/user`。
+- `db::drop(path)`：删除表。
+- `db::select(path, sql, data)`：查询 SQL，返回 `List<Map>`。
+- `db::exec(path, sql, data)`：执行写入 SQL，返回影响行数，失败返回 `-1`。
+- `db::transaction(path, steps)`：在一个事务里执行多条 SQL，返回总影响行数，失败回滚并返回 `-1`。
+
+创建和删除表：
+
+```zust
+db::create("local/db/user", {
+    id: "BIGINT PRIMARY KEY",
+    name: "VARCHAR(64)",
+    email: "VARCHAR(128)",
+
+    "@indexes": [
+        ["name"],
+        {name: "uniq_user_email", columns: ["email"], unique: true}
+    ]
+});
+
+db::drop("local/db/user");
+```
+
+查询和写入：
+
+```zust
+let rows = db::select(
+    "local/db",
+    "select id, name from user where id = :id",
+    {id: 1}
+);
+
+let changed = db::exec(
+    "local/db",
+    "update user set name = ? where id = ?",
+    ["new-name", 1]
+);
+```
+
+绑定规则：
+
+- `data` 是 map 时绑定 `:id` 这样的命名参数。
+- `data` 是 list 时绑定顺序 `?` 参数。
+- PostgreSQL 占位符会重写为 `$1`、`$2`。
+- MySQL 使用 `?` 占位符。
+
+事务使用 `[sql, data]` step 列表，每个 step 的绑定规则和 `db::exec` 一样：
+
+```zust
+let changed = db::transaction("local/db", [
+    ["insert into user (id, name) values (:id, :name)", {id: 1, name: "zhu"}],
+    ["update user set name = ? where id = ?", ["zust", 1]]
+]);
+```
+
+### gpu
+
+`gpu` 是 `Vm::with_all()` 注册的 GPU-facing 模块。它把后端入口拆成编译、检查和运行：
+
+- `gpu::spirv_compile(options)`：把 Zust shader 编译成 SPIR-V，返回 words、bytes、disassembly 等信息。
+- `gpu::spirv_check(options)`：只检查 SPIR-V 编译，不返回完整模块。
+- `gpu::metal_compile(options)`：在 macOS 上把 Zust shader 编译成 Metal source。
+- `gpu::metal_check(options)`：只检查 Metal 编译。
+- `gpu::vulkan_run(options)`：加载 SPIR-V、绑定 buffer、dispatch Vulkan，并返回 readback。
+- `gpu::metal_run(options)`：加载 Metal source 或从 Zust 编译后 dispatch Metal，并返回 readback。
+
+编译 shader 不需要 VM 的执行后端。只有调用 `gpu::vulkan_run` 时才需要打开 `zust-vm` 的 `vulkan` feature；只有调用 `gpu::metal_run` 时才需要打开 `metal` feature。
+
+`options` 是普通动态 map，常用字段包括 `source` 或 `path`、`module`、`fn`、`workgroup_size`、`groups` 和 `args`。运行参数支持标量输入、typed vector buffer，以及用于结构体 ABI 参数的原始 `bytes` buffer。
+
+```zust
+let checked = gpu::spirv_check({
+    path: "zusts/gpu/mandelbrot.zs",
+    module: "mandelbrot",
+    fn: "main",
+    workgroup_size: [8, 8, 1],
+});
+```
 
 ## 最小 VM 示例
 

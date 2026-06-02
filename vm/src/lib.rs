@@ -227,7 +227,8 @@ impl JITRunTime {
     }
 
     pub fn add_http(&mut self) -> Result<()> {
-        add_native_module_fns(self, "http", &http_module::HTTP_NATIVE)
+        add_native_module_fns(self, "http", &http_module::HTTP_NATIVE)?;
+        http_module::add_root_handlers()
     }
 
     pub fn add_oss(&mut self) -> Result<()> {

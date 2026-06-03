@@ -344,7 +344,7 @@ Client functions:
 - `http::get(url)`.
 - `http::post(url, body)`.
 - `http::request(options)`.
-- `http::upload(object_name, bytes)`: upload `Vec<u8>` bytes to OSS using `local/oss` config; returns `{ok, object_name, oss_url, url}`.
+- `http::upload(config, object_name, bytes)`: upload `Vec<u8>` bytes to OSS using the explicit OSS config map; returns `{ok, object_name, oss_url, url}`.
 
 Responses are maps with `status`, `ok`, `url`, `@headers`, and `body`. JSON bodies are decoded into `Dynamic`; text and bytes are returned as strings or bytes.
 
@@ -385,7 +385,8 @@ When `config.upload` is set, the server accepts multipart `POST` requests at tho
 root::add_fn("local/http/upload", "app::upload");
 
 pub fn upload(req) {
-    let saved = http::upload("uploads/input.bin", req.file);
+    let oss = root::get("local/oss");
+    let saved = http::upload(oss, "uploads/input.bin", req.file);
     {
         ok: saved.ok,
         url: saved.url,
@@ -456,7 +457,7 @@ Large binary inputs should be uploaded to object storage first and passed to mod
 
 `oss` exposes direct Aliyun OSS upload helpers for large images, audio, video, and other files used by LLM workflows.
 
-Configure credentials in ROOT:
+Store credentials in ROOT, then pass the config value explicitly at each OSS call site:
 
 ```zust
 root::add("local/oss", {
@@ -470,26 +471,27 @@ root::add("local/oss", {
 Upload `Vec<u8>` bytes directly:
 
 ```zust
-let uploaded = oss::upload("llm/input/audio.wav", audio_bytes);
+let oss = root::get("local/oss");
+let uploaded = oss::upload(oss, "llm/input/audio.wav", audio_bytes);
 
 let audio_text = llm::audio(model, {
     url: uploaded.url,
 });
 ```
 
-`http::upload(object_name, bytes)` is the same direct upload helper exposed from the HTTP module for server-side workflows that already use `http`.
+`http::upload(config, object_name, bytes)` is the same direct upload helper exposed from the HTTP module for server-side workflows that already use `http`.
 
-`oss::signed_url(input)` returns a temporary HTTP URL for an existing `oss:://...` object URL. Pass the object URL directly, or pass `{oss_url, expires}` when a custom expiration is needed.
+`oss::signed_url(config, input)` returns a temporary HTTP URL for an existing `oss:://...` object URL. Pass the object URL directly, or pass `{oss_url, expires}` when a custom expiration is needed.
 
 ```zust
-let url = oss::signed_url(uploaded.oss_url);
-let longer = oss::signed_url({oss_url: uploaded.oss_url, expires: 3600});
+let url = oss::signed_url(oss, uploaded.oss_url);
+let longer = oss::signed_url(oss, {oss_url: uploaded.oss_url, expires: 3600});
 ```
 
 Functions:
 
-- `oss::upload(object_name, bytes)`: upload `Vec<u8>` bytes using `local/oss` config; returns `{ok, object_name, oss_url, url}`.
-- `oss::signed_url(input)`: convert an `oss:://...` object URL to a temporary HTTP URL. The default expiration is 600 seconds.
+- `oss::upload(config, object_name, bytes)`: upload `Vec<u8>` bytes using the explicit OSS config map; returns `{ok, object_name, oss_url, url}`.
+- `oss::signed_url(config, input)`: convert an `oss:://...` object URL to a temporary HTTP URL. The default expiration is 600 seconds.
 
 ### `db`
 

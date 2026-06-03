@@ -2180,6 +2180,33 @@ mod tests {
     }
 
     #[test]
+    fn oss_helpers_accept_explicit_config() -> anyhow::Result<()> {
+        let vm = Vm::with_all()?;
+        vm.import_code(
+            "vm_oss_explicit_config",
+            br#"
+            pub fn upload(oss, bytes) {
+                oss::upload(oss, "llm/input/audio.wav", bytes)
+            }
+
+            pub fn http_upload(oss, bytes) {
+                http::upload(oss, "uploads/input.bin", bytes)
+            }
+
+            pub fn link(oss, uploaded) {
+                oss::signed_url(oss, {oss_url: uploaded, expires: 3600})
+            }
+            "#
+            .to_vec(),
+        )?;
+
+        assert_eq!(vm.get_fn("vm_oss_explicit_config::upload", &[Type::Any, Type::Any])?.ret_ty(), &Type::Any);
+        assert_eq!(vm.get_fn("vm_oss_explicit_config::http_upload", &[Type::Any, Type::Any])?.ret_ty(), &Type::Any);
+        assert_eq!(vm.get_fn("vm_oss_explicit_config::link", &[Type::Any, Type::Any])?.ret_ty(), &Type::Any);
+        Ok(())
+    }
+
+    #[test]
     fn load_script_accepts_http_serve_inline_config() -> anyhow::Result<()> {
         let vm = Vm::with_all()?;
         let (_fn_ptr, ty) = vm.load(

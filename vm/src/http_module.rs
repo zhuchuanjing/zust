@@ -61,13 +61,14 @@ extern "C" fn http_serve(input: *const Dynamic) -> *const Dynamic {
     alloc_dynamic(start_server(input))
 }
 
-extern "C" fn http_upload(object_name: *const Dynamic, bytes: *const Dynamic) -> *const Dynamic {
-    if object_name.is_null() || bytes.is_null() {
+extern "C" fn http_upload(config: *const Dynamic, object_name: *const Dynamic, bytes: *const Dynamic) -> *const Dynamic {
+    if config.is_null() || object_name.is_null() || bytes.is_null() {
         return alloc_dynamic(Dynamic::Null);
     }
+    let config = unsafe { (&*config).clone() };
     let object_name = unsafe { (&*object_name).clone() };
     let bytes = unsafe { (&*bytes).clone() };
-    alloc_dynamic(upload_bytes(object_name, bytes))
+    alloc_dynamic(upload_bytes(config, object_name, bytes))
 }
 
 async fn request(input: Dynamic) -> Result<Dynamic> {
@@ -279,22 +280,23 @@ fn dynamic_to_text(value: &Dynamic) -> String {
     if value.is_str() { value.as_str().to_string() } else { value.to_string() }
 }
 
-fn upload_bytes(object_name: Dynamic, bytes: Dynamic) -> Dynamic {
-    match upload_bytes_result(object_name, bytes) {
+fn upload_bytes(config: Dynamic, object_name: Dynamic, bytes: Dynamic) -> Dynamic {
+    match upload_bytes_result(config, object_name, bytes) {
         Ok(result) => result,
         Err(err) => map!("ok"=> false, "error"=> err.to_string()),
     }
 }
 
-fn upload_bytes_result(object_name: Dynamic, bytes: Dynamic) -> Result<Dynamic> {
+fn upload_bytes_result(config: Dynamic, object_name: Dynamic, bytes: Dynamic) -> Result<Dynamic> {
     let object_name = object_name.as_str().to_string();
     if object_name.trim().is_empty() {
         return Err(anyhow!("http::upload object_name missing"));
     }
     let bytes = bytes.as_bytes().ok_or_else(|| anyhow!("http::upload expects bytes"))?.to_vec();
     let upload_name = object_name.clone();
-    let oss_url = root::sync_await!(async move { llm::oss::upload(&upload_name, bytes).await })?;
-    let url = llm::oss::get_link(&oss_url)?;
+    let link_config = config.deep_clone();
+    let oss_url = root::sync_await!(async move { llm::oss::upload(config, &upload_name, bytes).await })?;
+    let url = llm::oss::get_link(link_config, &oss_url, 600)?;
     Ok(map!("ok"=> true, "object_name"=> object_name, "oss_url"=> oss_url, "url"=> url))
 }
 
@@ -903,7 +905,7 @@ pub const HTTP_NATIVE: [(&str, &[Type], Type, *const u8); 5] = [
     ("request", &[Type::Any], Type::Any, http_request as *const u8),
     ("get", &[Type::Any], Type::Any, http_get as *const u8),
     ("post", &[Type::Any, Type::Any], Type::Any, http_post as *const u8),
-    ("upload", &[Type::Any, Type::Any], Type::Any, http_upload as *const u8),
+    ("upload", &[Type::Any, Type::Any, Type::Any], Type::Any, http_upload as *const u8),
     ("serve", &[Type::Any], Type::Any, http_serve as *const u8),
 ];
 

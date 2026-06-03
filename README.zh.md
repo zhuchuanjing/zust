@@ -357,7 +357,7 @@ let response = http::request({
 - `http::get(url)`。
 - `http::post(url, body)`。
 - `http::request(options)`。
-- `http::upload(object_name, bytes)`：用 `local/oss` 配置把 `Vec<u8>` bytes 上传到 OSS，返回 `{ok, object_name, oss_url, url}`。
+- `http::upload(config, object_name, bytes)`：用显式传入的 OSS 配置 map 把 `Vec<u8>` bytes 上传到 OSS，返回 `{ok, object_name, oss_url, url}`。
 
 响应是 map，包含 `status`、`ok`、`url`、`@headers` 和 `body`。JSON 响应会解码成 `Dynamic`，文本和二进制分别返回字符串或 bytes。
 
@@ -398,7 +398,8 @@ HTTP API 按 ROOT 分发：`/api/foo` 会映射到 `local/http/{method}/foo`，�
 root::add_fn("local/http/upload", "app::upload");
 
 pub fn upload(req) {
-    let saved = http::upload("uploads/input.bin", req.file);
+    let oss = root::get("local/oss");
+    let saved = http::upload(oss, "uploads/input.bin", req.file);
     {
         ok: saved.ok,
         url: saved.url,
@@ -469,7 +470,7 @@ let task_id = llm::deep(model, {prompt: "写一份长报告"}, "local/llm/progre
 
 `oss` 模块提供直接的 Aliyun OSS 上传入口，适合 LLM 工作流里的图片、音频、视频和其他大文件。
 
-先把配置写入 ROOT：
+先把配置写入 ROOT，然后在调用 OSS 函数时显式传入配置值：
 
 ```zust
 root::add("local/oss", {
@@ -483,26 +484,27 @@ root::add("local/oss", {
 直接上传 `Vec<u8>` bytes：
 
 ```zust
-let uploaded = oss::upload("llm/input/audio.wav", audio_bytes);
+let oss = root::get("local/oss");
+let uploaded = oss::upload(oss, "llm/input/audio.wav", audio_bytes);
 
 let audio_text = llm::audio(model, {
     url: uploaded.url,
 });
 ```
 
-`http::upload(object_name, bytes)` 是 HTTP 模块里暴露的同一个直接上传入口，适合已经在服务端 HTTP 流程里使用时调用。
+`http::upload(config, object_name, bytes)` 是 HTTP 模块里暴露的同一个直接上传入口，适合已经在服务端 HTTP 流程里使用时调用。
 
-`oss::signed_url(input)` 为已有 `oss:://...` 对象 URL 生成临时 HTTP 访问 URL。可以直接传对象 URL，也可以传 `{oss_url, expires}` 设置过期时间。
+`oss::signed_url(config, input)` 为已有 `oss:://...` 对象 URL 生成临时 HTTP 访问 URL。可以直接传对象 URL，也可以传 `{oss_url, expires}` 设置过期时间。
 
 ```zust
-let url = oss::signed_url(uploaded.oss_url);
-let longer = oss::signed_url({oss_url: uploaded.oss_url, expires: 3600});
+let url = oss::signed_url(oss, uploaded.oss_url);
+let longer = oss::signed_url(oss, {oss_url: uploaded.oss_url, expires: 3600});
 ```
 
 函数：
 
-- `oss::upload(object_name, bytes)`：使用 `local/oss` 配置上传 `Vec<u8>` bytes，返回 `{ok, object_name, oss_url, url}`。
-- `oss::signed_url(input)`：把 `oss:://...` 转成临时 HTTP URL，默认 600 秒。
+- `oss::upload(config, object_name, bytes)`：使用显式传入的 OSS 配置 map 上传 `Vec<u8>` bytes，返回 `{ok, object_name, oss_url, url}`。
+- `oss::signed_url(config, input)`：把 `oss:://...` 转成临时 HTTP URL，默认 600 秒。
 
 ### db
 

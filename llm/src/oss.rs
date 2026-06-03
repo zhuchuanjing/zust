@@ -17,12 +17,10 @@ struct OssConfig {
 }
 
 impl OssConfig {
-    fn from_root(path: &str) -> Result<Self> {
-        let config_path = format!("{path}/config");
-        let config = match root::get(&config_path) {
-            Ok(config) if config.is_map() => config,
-            _ => root::get(path)?,
-        };
+    fn from_dynamic(config: Dynamic) -> Result<Self> {
+        if !config.is_map() {
+            return Err(anyhow!("oss config must be map"));
+        }
         let access_id = required_string(&config, "access_id")?;
         let access_key = required_string(&config, "access_key")?;
         let region = required_string(&config, "region")?;
@@ -117,44 +115,35 @@ UNSIGNED-PAYLOAD"#,
     }
 }
 
-pub async fn upload(object_name: &str, data: Vec<u8>) -> Result<String> {
-    upload_with_root("local/oss", object_name, data).await
-}
-
-pub async fn upload_with_root(config_path: &str, object_name: &str, data: Vec<u8>) -> Result<String> {
-    let mut config = OssConfig::from_root(config_path)?;
+pub async fn upload(config: Dynamic, object_name: &str, data: Vec<u8>) -> Result<String> {
+    let mut config = OssConfig::from_dynamic(config)?;
     config.upload(object_name, data).await?;
     Ok(format!("{OSS_PREFIX}{object_name}"))
 }
 
-pub fn get_link(oss_url: &str) -> Result<String> {
-    get_link_with_root("local/oss", oss_url, 600)
-}
-
-pub fn get_link_with_root(config_path: &str, oss_url: &str, expires_seconds: u32) -> Result<String> {
+pub fn get_link(config: Dynamic, oss_url: &str, expires_seconds: u32) -> Result<String> {
     let object_name = oss_url.strip_prefix(OSS_PREFIX).ok_or_else(|| anyhow!("invalid oss url"))?;
-    let mut config = OssConfig::from_root(config_path)?;
+    let mut config = OssConfig::from_dynamic(config)?;
     Ok(config.get_link(object_name, expires_seconds))
 }
 
-pub fn signed_url_request(req: Dynamic) -> Dynamic {
-    match signed_url_request_result(req) {
+pub fn signed_url_request(config: Dynamic, req: Dynamic) -> Dynamic {
+    match signed_url_request_result(config, req) {
         Ok(result) => result,
         Err(err) => map!("ok"=> false, "error"=> err.to_string()),
     }
 }
 
-fn signed_url_request_result(req: Dynamic) -> Result<Dynamic> {
-    let (config_path, expires_seconds, oss_url) = if req.is_map() {
-        let config_path = req.get_dynamic("config").or_else(|| req.get_dynamic("config_path")).map(|value| value.as_str().to_string()).unwrap_or_else(|| "local/oss".into());
+fn signed_url_request_result(config: Dynamic, req: Dynamic) -> Result<Dynamic> {
+    let (expires_seconds, oss_url) = if req.is_map() {
         let expires_seconds = req.get_dynamic("expires").or_else(|| req.get_dynamic("expires_seconds")).and_then(|value| value.as_int()).unwrap_or(600).max(1) as u32;
         let oss_url = req.get_dynamic("oss_url").or_else(|| req.get_dynamic("ossUrl")).or_else(|| req.get_dynamic("url")).map(|value| value.as_str().to_string());
-        (config_path, expires_seconds, oss_url)
+        (expires_seconds, oss_url)
     } else {
-        ("local/oss".into(), 600, Some(req.as_str().to_string()))
+        (600, Some(req.as_str().to_string()))
     };
     let oss_url = oss_url.filter(|value| value.starts_with(OSS_PREFIX)).ok_or_else(|| anyhow!("oss_url missing or invalid"))?;
-    let url = get_link_with_root(&config_path, &oss_url, expires_seconds)?;
+    let url = get_link(config, &oss_url, expires_seconds)?;
     Ok(map!("ok"=> true, "oss_url"=> oss_url, "url"=> url))
 }
 

@@ -298,6 +298,6 @@ impl JITRunTime {
             };
             return Ok(FnInfo::Call { fn_id, arg_tys: arg_tys.to_vec(), caps: cap.vars.clone(), ret: ret_ty, context: None });
         }
-        Err(anyhow!("生成函数 {} 失败", id))
+        Err(anyhow!("生成函数 {}({}) 失败: symbol 不是函数: {:?}", id, name, s))
     }
 }

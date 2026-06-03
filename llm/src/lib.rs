@@ -44,8 +44,12 @@ pub fn to_markdown(d: &Dynamic, buf: &mut String) {
 
 use dynamic::{list, map};
 use futures_util::stream::StreamExt;
+use hmac::{Hmac, Mac};
+use sha2::Sha256;
 use tokio::io::BufReader;
 use tokio_util::io::StreamReader; // 关键转换工具
+
+type HmacSha256 = Hmac<Sha256>;
 
 fn model_name(options: &Dynamic) -> String {
     options
@@ -348,8 +352,8 @@ fn uses_kling_image_expand(options: &Dynamic) -> bool {
         return true;
     }
 
-    let url = options.get_dynamic("url").map(|v| v.as_str().to_string()).unwrap_or_default();
-    url.contains("api-beijing.klingai.com") && url.contains("images/editing/expand")
+    let url = options.get_dynamic("url").map(|v| v.as_str().to_ascii_lowercase()).unwrap_or_default();
+    url.contains("klingai.com") && url.contains("images/editing/expand")
 }
 
 fn uses_kling_image_generation(options: &Dynamic) -> bool {
@@ -358,8 +362,60 @@ fn uses_kling_image_generation(options: &Dynamic) -> bool {
         return true;
     }
 
-    let url = options.get_dynamic("url").map(|v| v.as_str().to_string()).unwrap_or_default();
-    url.contains("api-beijing.klingai.com") && url.contains("images/generations")
+    let url = options.get_dynamic("url").map(|v| v.as_str().to_ascii_lowercase()).unwrap_or_default();
+    url.contains("klingai.com") && url.contains("images/generations")
+}
+
+fn uses_kling(options: &Dynamic) -> bool {
+    let kind = options.get_dynamic("kind").map(|v| v.as_str().to_ascii_lowercase()).unwrap_or_default();
+    if kind.starts_with("kling") {
+        return true;
+    }
+
+    let provider = options.get_dynamic("provider").or_else(|| options.get_dynamic("brand")).or_else(|| options.get_dynamic("name")).map(|v| v.as_str().to_ascii_lowercase()).unwrap_or_default();
+    if provider.contains("kling") {
+        return true;
+    }
+
+    options.get_dynamic("url").map(|v| v.as_str().to_ascii_lowercase()).is_some_and(|url| url.contains("klingai.com"))
+}
+
+fn auth_value(options: &Dynamic, keys: &[&str]) -> Option<String> {
+    keys.iter().find_map(|key| options.get_dynamic(key).map(|v| v.as_str().to_string()).filter(|v| !v.is_empty()))
+}
+
+fn bearer_token(options: &Dynamic) -> Result<Option<String>> {
+    if let Some(key) = auth_value(options, &["key", "api_key", "apiKey", "token"]) {
+        return Ok(Some(key));
+    }
+
+    if !uses_kling(options) {
+        return Ok(None);
+    }
+
+    let Some(access_key) = auth_value(options, &["access_key", "accessKey", "access_id", "accessId", "ak"]) else {
+        return Ok(None);
+    };
+    let secret_key = auth_value(options, &["secret_key", "secretKey", "access_secret", "accessSecret", "sk"]).ok_or_else(|| anyhow!("Kling 配置缺少 secret_key"))?;
+    Ok(Some(kling_jwt_token(&access_key, &secret_key)?))
+}
+
+fn kling_jwt_token(access_key: &str, secret_key: &str) -> Result<String> {
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_secs() as i64;
+    let header = map!("alg"=> "HS256", "typ"=> "JWT");
+    let payload = map!("iss"=> access_key, "exp"=> now + 1800, "nbf"=> now - 5);
+    let mut header_json = String::new();
+    let mut payload_json = String::new();
+    header.to_json(&mut header_json);
+    payload.to_json(&mut payload_json);
+
+    let header_part = general_purpose::URL_SAFE_NO_PAD.encode(header_json.as_bytes());
+    let payload_part = general_purpose::URL_SAFE_NO_PAD.encode(payload_json.as_bytes());
+    let signing_input = format!("{header_part}.{payload_part}");
+    let mut mac = HmacSha256::new_from_slice(secret_key.as_bytes())?;
+    mac.update(signing_input.as_bytes());
+    let signature = general_purpose::URL_SAFE_NO_PAD.encode(mac.finalize().into_bytes());
+    Ok(format!("{signing_input}.{signature}"))
 }
 
 fn kling_image_generation_body(msg: Dynamic) -> Dynamic {
@@ -503,7 +559,6 @@ async fn image_url_result(options: &Dynamic, result: Dynamic) -> Result<Dynamic>
 
 async fn poll_image_task(options: &Dynamic, task_id: &str) -> Result<Dynamic> {
     let url = options.get_dynamic("url").ok_or(anyhow!("没有 url"))?;
-    let key = options.get_dynamic("key");
     let task_url = if uses_kling_image_expand(options) {
         kling_image_expand_task_url(url.as_str(), task_id)
     } else if uses_kling_image_generation(options) {
@@ -517,8 +572,8 @@ async fn poll_image_task(options: &Dynamic, task_id: &str) -> Result<Dynamic> {
 
     for _ in 0..max_polls {
         let mut req = client.get(&task_url);
-        if let Some(key) = key.clone() {
-            req = req.header("authorization", format!("Bearer {}", key.as_str()));
+        if let Some(token) = bearer_token(options)? {
+            req = req.header("authorization", format!("Bearer {}", token));
         }
         let resp = req.send().await?;
         let status = resp.status();
@@ -778,6 +833,19 @@ fn copy_request_options_except(options: &Dynamic, msg: &Dynamic, skipped_keys: &
     for key in options.keys() {
         if key != "url"
             && key != "key"
+            && key != "api_key"
+            && key != "apiKey"
+            && key != "token"
+            && key != "access_key"
+            && key != "accessKey"
+            && key != "access_id"
+            && key != "accessId"
+            && key != "ak"
+            && key != "secret_key"
+            && key != "secretKey"
+            && key != "access_secret"
+            && key != "accessSecret"
+            && key != "sk"
             && key != "api"
             && key != "endpoint"
             && key != "method"
@@ -800,7 +868,7 @@ fn copy_request_options_except(options: &Dynamic, msg: &Dynamic, skipped_keys: &
 
 pub async fn post_binary(method: &str, openai: Dynamic, msg: Dynamic) -> Result<Dynamic> {
     let url = openai.get_dynamic("url").ok_or(anyhow!("没有 url"))?;
-    let key = openai.get_dynamic("key");
+    let token = bearer_token(&openai)?;
 
     copy_request_options_except(&openai, &msg, &["stream"]);
 
@@ -809,8 +877,8 @@ pub async fn post_binary(method: &str, openai: Dynamic, msg: Dynamic) -> Result<
     msg.to_json(&mut body_str);
     log::info!("{}", body_str);
 
-    let resp = if let Some(key) = key {
-        client.post(&format!("{}/{}", url.as_str(), method)).header("Content-Type", "application/json").header("authorization", format!("Bearer {}", key.as_str())).body(body_str).send().await?
+    let resp = if let Some(token) = token {
+        client.post(&format!("{}/{}", url.as_str(), method)).header("Content-Type", "application/json").header("authorization", format!("Bearer {}", token)).body(body_str).send().await?
     } else {
         client.post(&format!("{}/{}", url.as_str(), method)).header("Content-Type", "application/json").body(body_str).send().await?
     };
@@ -870,7 +938,7 @@ fn decode_tts_json_response(body: Dynamic) -> Result<Dynamic> {
 pub async fn post(method: &str, openai: Dynamic, msg: Dynamic, tx: Option<Dynamic>) -> Result<Dynamic> {
     //不能把 dynamic 作为耗材使用
     let url = openai.get_dynamic("url").ok_or(anyhow!("没有 url"))?;
-    let key = openai.get_dynamic("key");
+    let token = bearer_token(&openai)?;
 
     let is_stream = if tx.is_none() {
         openai.insert("stream", false);
@@ -888,8 +956,8 @@ pub async fn post(method: &str, openai: Dynamic, msg: Dynamic, tx: Option<Dynami
     msg.to_json(&mut body_str);
     log::info!("{}", body_str);
 
-    let resp = if let Some(key) = key {
-        client.post(&format!("{}/{}", url.as_str(), method)).header("Content-Type", "application/json").header("authorization", format!("Bearer {}", key.as_str())).body(body_str).send().await?
+    let resp = if let Some(token) = token {
+        client.post(&format!("{}/{}", url.as_str(), method)).header("Content-Type", "application/json").header("authorization", format!("Bearer {}", token)).body(body_str).send().await?
     } else {
         client.post(&format!("{}/{}", url.as_str(), method)).header("Content-Type", "application/json").body(body_str).send().await?
     };
@@ -1073,8 +1141,12 @@ fn decode_text_content(content: Dynamic, _raw_text: &str) -> Result<Dynamic> {
 
 #[cfg(test)]
 mod test {
+    use base64::{Engine as _, engine::general_purpose};
     use dynamic::{Dynamic, FromJson};
     use dynamic::{list, map};
+    use hmac::Mac;
+
+    use super::HmacSha256;
 
     #[test]
     fn normalize_tool_adds_required_type() {
@@ -1308,6 +1380,59 @@ mod test {
         assert_eq!(body.get_dynamic("resolution").unwrap().as_str(), "2k");
         assert_eq!(body.get_dynamic("n").unwrap().as_int().unwrap(), 1);
         assert!(body.get_dynamic("model").is_none());
+    }
+
+    #[test]
+    fn kling_provider_accepts_singapore_domain() {
+        let options = map!("url"=> "https://api-singapore.klingai.com/v1/images/generations");
+
+        assert!(super::uses_kling_image_generation(&options));
+    }
+
+    #[test]
+    fn kling_bearer_token_uses_ak_sk_jwt() -> anyhow::Result<()> {
+        let options = map!(
+            "kind"=> "kling_image_generation",
+            "access_key"=> "ak-test",
+            "secret_key"=> "sk-test"
+        );
+        let token = super::bearer_token(&options)?.expect("token");
+        let parts: Vec<&str> = token.split('.').collect();
+        assert_eq!(parts.len(), 3);
+
+        let header = general_purpose::URL_SAFE_NO_PAD.decode(parts[0])?;
+        let payload = general_purpose::URL_SAFE_NO_PAD.decode(parts[1])?;
+        let (header, _) = Dynamic::from_json(&header)?;
+        let (payload, _) = Dynamic::from_json(&payload)?;
+
+        assert_eq!(header.get_dynamic("alg").unwrap().as_str(), "HS256");
+        assert_eq!(header.get_dynamic("typ").unwrap().as_str(), "JWT");
+        assert_eq!(payload.get_dynamic("iss").unwrap().as_str(), "ak-test");
+        assert!(payload.get_dynamic("exp").unwrap().as_int().unwrap() > payload.get_dynamic("nbf").unwrap().as_int().unwrap());
+
+        let signing_input = format!("{}.{}", parts[0], parts[1]);
+        let mut mac = HmacSha256::new_from_slice(b"sk-test")?;
+        mac.update(signing_input.as_bytes());
+        let expected = general_purpose::URL_SAFE_NO_PAD.encode(mac.finalize().into_bytes());
+        assert_eq!(parts[2], expected);
+        Ok(())
+    }
+
+    #[test]
+    fn copy_request_options_does_not_copy_auth_secrets() {
+        let options = map!(
+            "url"=> "https://api-singapore.klingai.com",
+            "access_key"=> "ak-test",
+            "secret_key"=> "sk-test",
+            "model"=> "kling-v2-1"
+        );
+        let body = map!("prompt"=> "village");
+
+        super::copy_request_options(&options, &body);
+
+        assert!(body.get_dynamic("access_key").is_none());
+        assert!(body.get_dynamic("secret_key").is_none());
+        assert_eq!(body.get_dynamic("model").unwrap().as_str(), "kling-v2-1");
     }
 
     #[test]

@@ -451,6 +451,22 @@ let vision = llm::complete(model, {
 let task_id = llm::deep(model, {prompt: "Write a longer report"}, "local/llm/progress");
 ```
 
+Kling official API credentials are Access Key and Secret Key. Pass them as `access_key` and `secret_key`; `zust-llm` generates the required HS256 JWT Bearer token for create and poll requests.
+
+```zust
+let kling = {
+    kind: "kling_image_generation",
+    url: "https://api-singapore.klingai.com",
+    access_key: root::get("local/keys/kling/access_key"),
+    secret_key: root::get("local/keys/kling/secret_key"),
+};
+
+let image = llm::image(kling, {
+    prompt: "A quiet mountain village at sunrise",
+    model_name: "kling-v2-1",
+}, "");
+```
+
 Large binary inputs should be uploaded to object storage first and passed to model APIs by URL when the provider supports URLs. This keeps large payloads out of LLM request bodies.
 
 ### `oss`

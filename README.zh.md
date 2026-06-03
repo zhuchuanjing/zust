@@ -456,6 +456,22 @@ let vision = llm::complete(model, {
 let task_id = llm::deep(model, {prompt: "写一份长报告"}, "local/llm/progress");
 ```
 
+可灵官方 API 的凭证是 Access Key 和 Secret Key。配置里传 `access_key` 和 `secret_key`，`zust-llm` 会为创建任务和轮询任务生成可灵要求的 HS256 JWT Bearer token。
+
+```zust
+let kling = {
+    kind: "kling_image_generation",
+    url: "https://api-singapore.klingai.com",
+    access_key: root::get("local/keys/kling/access_key"),
+    secret_key: root::get("local/keys/kling/secret_key"),
+};
+
+let image = llm::image(kling, {
+    prompt: "清晨的安静山村",
+    model_name: "kling-v2-1",
+}, "");
+```
+
 常用函数：
 
 - `llm::complete(model, value)`：文本、图片 URL、视频 URL 等多模态输入，返回 `Dynamic`。

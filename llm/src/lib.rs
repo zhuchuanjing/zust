@@ -278,7 +278,11 @@ fn response_content_item(item: Dynamic) -> Dynamic {
 
 pub async fn image(openai: Dynamic, msg: Dynamic, tx: Option<Dynamic>) -> Result<Dynamic> {
     let openai = with_kind_model(openai, "image")?;
-    let result = if uses_dashscope_multimodal_image(&openai) {
+    let result = if uses_kling_image_expand(&openai) {
+        post("v1/images/editing/expand", openai.clone(), kling_image_expand_body(msg), tx).await?
+    } else if uses_kling_image_generation(&openai) {
+        post("v1/images/generations", openai.clone(), kling_image_generation_body(msg), tx).await?
+    } else if uses_dashscope_multimodal_image(&openai) {
         post("services/aigc/multimodal-generation/generation", openai.clone(), dashscope_image_body(msg), tx).await?
     } else {
         post("images/generations", openai.clone(), image_body(msg), tx).await?
@@ -336,6 +340,89 @@ fn uses_dashscope_multimodal_image(options: &Dynamic) -> bool {
     let url = options.get_dynamic("url").map(|v| v.as_str().to_string()).unwrap_or_default();
     let model = options.get_dynamic("model").map(|v| v.as_str().to_ascii_lowercase()).unwrap_or_default();
     url.contains("dashscope.aliyuncs.com/api/v1") && (model.starts_with("qwen-image") || model.starts_with("wan"))
+}
+
+fn uses_kling_image_expand(options: &Dynamic) -> bool {
+    let kind = options.get_dynamic("kind").map(|v| v.as_str().to_string()).unwrap_or_default();
+    if kind == "kling_image_expand" {
+        return true;
+    }
+
+    let url = options.get_dynamic("url").map(|v| v.as_str().to_string()).unwrap_or_default();
+    url.contains("api-beijing.klingai.com") && url.contains("images/editing/expand")
+}
+
+fn uses_kling_image_generation(options: &Dynamic) -> bool {
+    let kind = options.get_dynamic("kind").map(|v| v.as_str().to_string()).unwrap_or_default();
+    if kind == "kling_image_generation" {
+        return true;
+    }
+
+    let url = options.get_dynamic("url").map(|v| v.as_str().to_string()).unwrap_or_default();
+    url.contains("api-beijing.klingai.com") && url.contains("images/generations")
+}
+
+fn kling_image_generation_body(msg: Dynamic) -> Dynamic {
+    if msg.is_map() {
+        let body = msg.deep_clone();
+        if !body.contains("prompt")
+            && let Some(input) = body.remove_dynamic("input").or_else(|| body.remove_dynamic("text"))
+        {
+            body.insert("prompt", input);
+        }
+        if !body.contains("model_name")
+            && let Some(model) = body.remove_dynamic("model")
+        {
+            body.insert("model_name", model);
+        }
+        if !body.contains("n") {
+            body.insert("n", 1);
+        }
+        return body;
+    }
+
+    map!("prompt"=> msg, "n"=> 1)
+}
+
+fn kling_image_expand_body(msg: Dynamic) -> Dynamic {
+    if msg.is_map() {
+        let body = msg.deep_clone();
+        if !body.contains("image") {
+            if let Some(image) = body.get_dynamic("image_url").or_else(|| body.get_dynamic("url")) {
+                body.insert("image", image);
+            }
+        }
+        if !body.contains("prompt")
+            && let Some(input) = body.remove_dynamic("input").or_else(|| body.remove_dynamic("text"))
+        {
+            body.insert("prompt", input);
+        }
+        if !body.contains("n") {
+            body.insert("n", 1);
+        }
+        if !body.contains("up_expansion_ratio") {
+            body.insert("up_expansion_ratio", 0);
+        }
+        if !body.contains("down_expansion_ratio") {
+            body.insert("down_expansion_ratio", 0);
+        }
+        if !body.contains("left_expansion_ratio") {
+            body.insert("left_expansion_ratio", 0);
+        }
+        if !body.contains("right_expansion_ratio") {
+            body.insert("right_expansion_ratio", 0);
+        }
+        return body;
+    }
+
+    map!(
+        "prompt"=> msg,
+        "n"=> 1,
+        "up_expansion_ratio"=> 0,
+        "down_expansion_ratio"=> 0,
+        "left_expansion_ratio"=> 0,
+        "right_expansion_ratio"=> 0
+    )
 }
 
 fn dashscope_image_body(msg: Dynamic) -> Dynamic {
@@ -417,7 +504,13 @@ async fn image_url_result(options: &Dynamic, result: Dynamic) -> Result<Dynamic>
 async fn poll_image_task(options: &Dynamic, task_id: &str) -> Result<Dynamic> {
     let url = options.get_dynamic("url").ok_or(anyhow!("没有 url"))?;
     let key = options.get_dynamic("key");
-    let task_url = dashscope_task_url(url.as_str(), task_id);
+    let task_url = if uses_kling_image_expand(options) {
+        kling_image_expand_task_url(url.as_str(), task_id)
+    } else if uses_kling_image_generation(options) {
+        kling_image_generation_task_url(url.as_str(), task_id)
+    } else {
+        dashscope_task_url(url.as_str(), task_id)
+    };
     let interval_ms = options.get_dynamic("task_poll_interval_ms").and_then(|v| v.as_int()).unwrap_or(2000).max(200) as u64;
     let max_polls = options.get_dynamic("task_poll_max").and_then(|v| v.as_int()).unwrap_or(180).max(1);
     let client = reqwest::Client::new();
@@ -442,8 +535,8 @@ async fn poll_image_task(options: &Dynamic, task_id: &str) -> Result<Dynamic> {
         let output = body.get_dynamic("output").unwrap_or(body);
         if let Some(status) = output.get_dynamic("task_status") {
             let status = status.as_str();
-            if matches!(status, "FAILED" | "CANCELED" | "UNKNOWN") {
-                let message = output.get_dynamic("message").map(|v| v.as_str().to_string()).unwrap_or_else(|| status.to_string());
+            if matches!(status, "FAILED" | "CANCELED" | "UNKNOWN" | "failed") {
+                let message = output.get_dynamic("task_status_msg").or_else(|| output.get_dynamic("message")).map(|v| v.as_str().to_string()).unwrap_or_else(|| status.to_string());
                 return Err(anyhow!("图片任务失败: {}", message));
             }
         }
@@ -464,6 +557,16 @@ fn dashscope_task_url(url: &str, task_id: &str) -> String {
         base
     };
     format!("{}/tasks/{}", base.trim_end_matches('/'), task_id)
+}
+
+fn kling_image_expand_task_url(url: &str, task_id: &str) -> String {
+    let base = url.trim_end_matches('/');
+    if base.ends_with("/v1/images/editing/expand") { format!("{}/{}", base, task_id) } else { format!("{}/v1/images/editing/expand/{}", base, task_id) }
+}
+
+fn kling_image_generation_task_url(url: &str, task_id: &str) -> String {
+    let base = url.trim_end_matches('/');
+    if base.ends_with("/v1/images/generations") { format!("{}/{}", base, task_id) } else { format!("{}/v1/images/generations/{}", base, task_id) }
 }
 
 fn find_download_url(value: &Dynamic) -> Option<Dynamic> {
@@ -498,7 +601,7 @@ fn find_download_url(value: &Dynamic) -> Option<Dynamic> {
         }
     }
 
-    for key in ["output", "results", "choices", "message", "content", "data"] {
+    for key in ["output", "results", "choices", "message", "content", "data", "task_result", "images"] {
         if let Some(item) = value.get_dynamic(key)
             && let Some(url) = find_download_url(&item)
         {
@@ -836,8 +939,15 @@ pub async fn post(method: &str, openai: Dynamic, msg: Dynamic, tx: Option<Dynami
 }
 
 fn decode_llm_response(t: Dynamic, raw_text: &str) -> Result<Dynamic> {
-    if let Some(data) = t.remove_dynamic("data").and_then(|c| c.into_vec::<Dynamic>()).and_then(|v| v.into_iter().next()) {
-        return Ok(data);
+    if let Some(data) = t.get_dynamic("data") {
+        if data.is_list()
+            && let Some(item) = data.get_idx(0)
+        {
+            return Ok(item);
+        }
+        if data.is_map() && ["task_id", "url", "image_url", "image", "output_url", "b64_json", "base64", "audio_url", "task_result"].iter().any(|key| data.contains(*key)) {
+            return Ok(data);
+        }
     }
     if let Some(output) = t.get_dynamic("output")
         && let Some(decoded) = decode_output(output)
@@ -1166,6 +1276,72 @@ mod test {
         assert_eq!(content.get_idx(0).unwrap().get_dynamic("image").unwrap().as_str(), "https://example.test/base.jpg");
         assert_eq!(content.get_idx(1).unwrap().get_dynamic("image").unwrap().as_str(), "https://example.test/ref.png");
         assert_eq!(content.get_idx(2).unwrap().get_dynamic("text").unwrap().as_str(), "extend");
+    }
+
+    #[test]
+    fn kling_image_expand_body_uses_expansion_shape() {
+        let body = super::kling_image_expand_body(map!(
+            "text"=> "extend right",
+            "image_url"=> "https://example.test/base.jpg",
+            "right_expansion_ratio"=> 0.5
+        ));
+
+        assert_eq!(body.get_dynamic("image").unwrap().as_str(), "https://example.test/base.jpg");
+        assert_eq!(body.get_dynamic("prompt").unwrap().as_str(), "extend right");
+        assert_eq!(body.get_dynamic("n").unwrap().as_int().unwrap(), 1);
+        assert_eq!(body.get_dynamic("right_expansion_ratio").unwrap().as_float().unwrap(), 0.5);
+        assert_eq!(body.get_dynamic("left_expansion_ratio").unwrap().as_int().unwrap(), 0);
+    }
+
+    #[test]
+    fn kling_image_generation_body_uses_generation_shape() {
+        let body = super::kling_image_generation_body(map!(
+            "text"=> "new village",
+            "model"=> "kling-v2-1",
+            "aspect_ratio"=> "9:16",
+            "resolution"=> "2k"
+        ));
+
+        assert_eq!(body.get_dynamic("prompt").unwrap().as_str(), "new village");
+        assert_eq!(body.get_dynamic("model_name").unwrap().as_str(), "kling-v2-1");
+        assert_eq!(body.get_dynamic("aspect_ratio").unwrap().as_str(), "9:16");
+        assert_eq!(body.get_dynamic("resolution").unwrap().as_str(), "2k");
+        assert_eq!(body.get_dynamic("n").unwrap().as_int().unwrap(), 1);
+        assert!(body.get_dynamic("model").is_none());
+    }
+
+    #[test]
+    fn decode_kling_async_task_id() -> anyhow::Result<()> {
+        let raw = r#"{"code":0,"message":"","data":{"task_id":"task-123","task_status":"submitted"}}"#;
+        let (body, _) = Dynamic::from_json(raw.as_bytes())?;
+        let decoded = super::decode_llm_response(body, raw)?;
+
+        assert_eq!(decoded.get_dynamic("task_id").unwrap().as_str(), "task-123");
+        Ok(())
+    }
+
+    #[test]
+    fn find_download_url_extracts_kling_task_result() -> anyhow::Result<()> {
+        let raw = r#"{"data":{"task_status":"succeed","task_result":{"images":[{"index":0,"url":"https://example.test/kling.png"}]}}}"#;
+        let (body, _) = Dynamic::from_json(raw.as_bytes())?;
+        let url = super::find_download_url(&body).expect("url");
+
+        assert_eq!(url.as_str(), "https://example.test/kling.png");
+        Ok(())
+    }
+
+    #[test]
+    fn kling_expand_task_url_uses_expand_endpoint() {
+        let url = super::kling_image_expand_task_url("https://api-beijing.klingai.com", "task-123");
+
+        assert_eq!(url, "https://api-beijing.klingai.com/v1/images/editing/expand/task-123");
+    }
+
+    #[test]
+    fn kling_generation_task_url_uses_generation_endpoint() {
+        let url = super::kling_image_generation_task_url("https://api-beijing.klingai.com", "task-123");
+
+        assert_eq!(url, "https://api-beijing.klingai.com/v1/images/generations/task-123");
     }
 
     #[test]

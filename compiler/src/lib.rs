@@ -638,7 +638,7 @@ impl Compiler {
         self.compile(name.into(), stmts).map_err(|err| Self::format_compile_error(&code, err))
     }
 
-    fn resolve_imports(&mut self, stmts: &[Stmt], base_dir: Option<&Path>) -> Result<()> {
+    pub fn resolve_imports(&mut self, stmts: &[Stmt], base_dir: Option<&Path>) -> Result<()> {
         for stmt in stmts {
             let Some((module, path)) = import_decl(stmt) else {
                 continue;

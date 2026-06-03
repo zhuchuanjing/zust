@@ -2232,6 +2232,28 @@ mod tests {
     }
 
     #[test]
+    fn load_script_resolves_import_before_compile() -> anyhow::Result<()> {
+        let module_path = std::env::temp_dir().join(format!("zust_vm_load_import_{}.zs", std::process::id()));
+        std::fs::write(&module_path, "pub fn init() { return {ok: true}; }")?;
+        let module_path = module_path.to_string_lossy().replace('\\', "\\\\").replace('"', "\\\"");
+
+        let vm = Vm::with_all()?;
+        let (_fn_ptr, ty) = vm.load(
+            format!(
+                r#"
+                import("create_scene", "{module_path}");
+                create_scene::init();
+                "#
+            )
+            .into_bytes(),
+            "req".into(),
+        )?;
+
+        assert_eq!(ty, Type::Void);
+        Ok(())
+    }
+
+    #[test]
     fn gpu_struct_layout_packs_and_unpacks_dynamic_maps() -> anyhow::Result<()> {
         let vm = Vm::with_all()?;
         vm.import_code(

@@ -57,6 +57,7 @@ impl JITRunTime {
 
     pub fn load(&mut self, code: Vec<u8>, arg_name: SmolStr) -> Result<(i64, Type)> {
         let stmts = Compiler::parse_code(code)?;
+        self.compiler.resolve_imports(&stmts, None)?;
         self.compiler.clear();
         self.compiler.symbols.add_module("__console".into());
         let mut cap = Capture::default();

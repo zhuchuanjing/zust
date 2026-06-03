@@ -1,6 +1,6 @@
 ﻿[package]
 name = "zust-compiler"
-version = "0.9.21"
+version = "0.9.22"
 edition = "2024"
 rust-version = "1.85"
 description = "Compiler front-end and semantic lowering for the Zust scripting language."
@@ -14,7 +14,7 @@ categories = ["compilers"]
 name = "compiler"
 
 [dependencies]
-dynamic = { package = "zust-dynamic", version = "0.9.8", path = "../dynamic" }
+dynamic = { package = "zust-dynamic", version = "0.9.9", path = "../dynamic" }
 parser = { package = "zust-parser", version = "0.9.7", path = "../parser" }
 
 log = "0.4.29"

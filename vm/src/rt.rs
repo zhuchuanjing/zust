@@ -732,6 +732,13 @@ impl JITRunTime {
         }
     }
 
+    fn assignment_target_ty(&mut self, ctx: &mut BuildContext, left: &Expr) -> Option<Type> {
+        if let ExprKind::Var(idx) = &left.kind {
+            return ctx.get_var_ty(*idx).filter(|ty| !ty.is_any());
+        }
+        None
+    }
+
     fn closure_value(&self, ctx: &mut BuildContext, id: u32) -> Result<LocalVar> {
         let captures = match self.compiler.symbols.get_symbol(id)?.1 {
             Symbol::Fn { cap, .. } => cap.vars.iter().map(|idx| ctx.get_var(*idx as u32)?.get(ctx).ok_or_else(|| anyhow!("捕获变量 {} 没有值", idx))).collect::<Result<Vec<_>>>()?,
@@ -794,6 +801,10 @@ impl JITRunTime {
     }
 
     pub(crate) fn eval(&mut self, ctx: &mut BuildContext, expr: &Expr) -> Result<LocalVar> {
+        self.eval_with_expected(ctx, expr, None)
+    }
+
+    fn eval_with_expected(&mut self, ctx: &mut BuildContext, expr: &Expr, expected: Option<&Type>) -> Result<LocalVar> {
         match &expr.kind {
             ExprKind::Value(v) => Ok(ctx.get_const(v)?.into()),
             ExprKind::Var(idx) => {
@@ -814,7 +825,8 @@ impl JITRunTime {
             }
             ExprKind::Binary { left, op, right } => {
                 if op == &BinaryOp::Assign {
-                    match self.eval(ctx, right) {
+                    let expected = self.assignment_target_ty(ctx, left);
+                    match self.eval_with_expected(ctx, right, expected.as_ref()) {
                         Ok(value) => self.assign(ctx, left, value).map(|v| v.into()),
                         Err(e) => {
                             log::error!("assign error {:?}", e);
@@ -823,6 +835,7 @@ impl JITRunTime {
                     }
                 } else {
                     let assign_expr = if op.is_assign() { Some(left.clone()) } else { None };
+                    let assign_expected = if op.is_assign() { self.assignment_target_ty(ctx, left) } else { None };
                     let left = match self.eval(ctx, left)?.get(ctx) {
                         Some(left) => left,
                         None => return Err(anyhow!("binary left has no value: {:?}", left)),
@@ -879,7 +892,7 @@ impl JITRunTime {
                             }
                         }
                     } else {
-                        let result = self.binary(ctx, left, op.clone(), right)?.into();
+                        let result = self.binary_with_expected(ctx, left, op.clone(), right, assign_expected.as_ref().or(expected))?.into();
                         if let Some(expr) = assign_expr { self.assign(ctx, &expr, result).map(|r| r.into()) } else { Ok(result.into()) }
                     }
                 }

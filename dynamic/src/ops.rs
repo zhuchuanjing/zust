@@ -47,15 +47,27 @@ impl Add for Dynamic {
             rhs.clone().append(self);
             return rhs;
         }
-        if self.is_str() || rhs.is_str() {
-            return Self::String(format!("{}{}", self.to_string(), rhs.to_string()).into());
+        if let (Self::String(left), Self::String(right)) = (&self, &rhs) {
+            let mut out = String::with_capacity(left.len() + right.len());
+            out.push_str(left.as_str());
+            out.push_str(right.as_str());
+            return Self::String(out.into());
+        } else if let Self::String(left) = &self {
+            let right = rhs.to_string();
+            let mut out = String::with_capacity(left.len() + right.len());
+            out.push_str(left.as_str());
+            out.push_str(&right);
+            return Self::String(out.into());
+        } else if let Self::String(right) = &rhs {
+            let left = self.to_string();
+            let mut out = String::with_capacity(left.len() + right.len());
+            out.push_str(&left);
+            out.push_str(right.as_str());
+            return Self::String(out.into());
         } else if self.is_f64() || rhs.is_f64() {
             return Dynamic::F64(self.as_float().unwrap_or(0.0) + rhs.as_float().unwrap_or(0.0));
         } else if self.is_f32() || rhs.is_f32() {
             return Dynamic::F32(self.as_float().unwrap_or(0.0) as f32 + rhs.as_float().unwrap_or(0.0) as f32);
-        }
-        if self.is_str() || rhs.is_str() {
-            return Self::String(format!("{}{}", self.to_string(), rhs.to_string()).into());
         }
         if self.is_int() || rhs.is_int() {
             return Self::I64(self.as_int().unwrap() + rhs.as_int().unwrap());

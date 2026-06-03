@@ -176,7 +176,7 @@ impl JITRunTime {
         }
     }
 
-    pub(crate) fn binary(&mut self, ctx: &mut BuildContext, left: (Value, Type), op: BinaryOp, right: &Expr) -> Result<(Value, Type)> {
+    pub(crate) fn binary_with_expected(&mut self, ctx: &mut BuildContext, left: (Value, Type), op: BinaryOp, right: &Expr, expected: Option<&Type>) -> Result<(Value, Type)> {
         //处理可以计算的简单情形
         if matches!(op, BinaryOp::And | BinaryOp::Or) {
             return self.short_circuit_logic(ctx, left, op, right);
@@ -203,8 +203,13 @@ impl JITRunTime {
             self.eval(ctx, right)?.get(ctx).ok_or_else(|| anyhow!("没有返回值: {:?}", right))?
         };
         let right_ty = right_ty_hint.as_ref().unwrap_or(&right.1);
+        let numeric_expected = expected.filter(|ty| (ty.is_int() || ty.is_uint() || ty.is_float()) && (left.1.is_any() || right.1.is_any()));
         let ty = if (op.is_add() || op.is_logic()) && (left.1.is_str() || right.1.is_str() || right_ty.is_str()) {
             Type::Str
+        } else if !op.is_logic()
+            && let Some(expected) = numeric_expected
+        {
+            expected.clone()
         } else if (op.is_add() || op.is_logic()) && (left.1.is_any() || right.1.is_any()) {
             Type::Any
         } else {

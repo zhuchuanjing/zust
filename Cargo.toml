@@ -11,5 +11,6 @@
         "root",
         "llm",
         "zust-lsp",
+        "benches",
     ]
     resolver = "2"

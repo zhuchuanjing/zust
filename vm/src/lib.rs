@@ -2024,6 +2024,29 @@ mod tests {
     }
 
     #[test]
+    fn dynamic_string_add_uses_any_binary_fast_path() -> anyhow::Result<()> {
+        let vm = Vm::with_all()?;
+        vm.import_code(
+            "vm_dynamic_string_add",
+            br#"
+            pub fn concat(left, right) {
+                left + right
+            }
+            "#
+            .to_vec(),
+        )?;
+
+        let compiled = vm.get_fn("vm_dynamic_string_add::concat", &[Type::Any, Type::Any])?;
+        assert_eq!(compiled.ret_ty(), &Type::Any);
+        let concat: extern "C" fn(*const Dynamic, *const Dynamic) -> *const Dynamic = unsafe { std::mem::transmute(compiled.ptr()) };
+        let left = Dynamic::from("hello");
+        let right = Dynamic::from(" world");
+        let result = unsafe { &*concat(&left, &right) };
+        assert_eq!(result.as_str(), "hello world");
+        Ok(())
+    }
+
+    #[test]
     fn large_dynamic_object_accepts_inline_call_fields() -> anyhow::Result<()> {
         let vm = Vm::with_all()?;
         let model_count = 180;
@@ -2691,6 +2714,61 @@ mod tests {
         );
         let result = unsafe { &*caller(&candidate) };
         assert_eq!(result.as_int(), Some(4));
+        Ok(())
+    }
+
+    #[test]
+    fn recursive_factorial_keeps_static_return_type() -> anyhow::Result<()> {
+        let vm = Vm::with_all()?;
+        vm.import_code(
+            "vm_recursive_factorial",
+            br#"
+            fn factorial(n: i64) {
+                if n <= 1 {
+                    return 1;
+                }
+                n * factorial(n - 1)
+            }
+
+            pub fn run(n: i64) {
+                factorial(n)
+            }
+            "#
+            .to_vec(),
+        )?;
+
+        let compiled = vm.get_fn("vm_recursive_factorial::run", &[Type::I64])?;
+        assert_eq!(compiled.ret_ty(), &Type::I64);
+        let run: extern "C" fn(i64) -> i64 = unsafe { std::mem::transmute(compiled.ptr()) };
+        assert_eq!(run(5), 120);
+        Ok(())
+    }
+
+    #[test]
+    fn dynamic_list_index_sum_uses_static_accumulator_type() -> anyhow::Result<()> {
+        let vm = Vm::with_all()?;
+        vm.import_code(
+            "vm_dynamic_index_sum",
+            br#"
+            pub fn sum_list(n: i64) {
+                let l = [];
+                for i in 0..n {
+                    l.push(i);
+                }
+                let sum = 0i64;
+                for i in 0..n {
+                    sum = sum + l.get_idx(i);
+                }
+                sum
+            }
+            "#
+            .to_vec(),
+        )?;
+
+        let compiled = vm.get_fn("vm_dynamic_index_sum::sum_list", &[Type::I64])?;
+        assert_eq!(compiled.ret_ty(), &Type::I64);
+        let sum_list: extern "C" fn(i64) -> i64 = unsafe { std::mem::transmute(compiled.ptr()) };
+        assert_eq!(sum_list(1000), 499500);
         Ok(())
     }
 

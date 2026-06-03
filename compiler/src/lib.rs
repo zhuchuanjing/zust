@@ -11,7 +11,7 @@ pub use symbol::{Symbol, SymbolTable, eval_const_int_type, substitute_type};
 
 #[derive(Clone)]
 enum FnInferRet {
-    Pending,
+    Pending(Option<Type>),
     Done(Type),
 }
 
@@ -23,6 +23,7 @@ pub struct Compiler {
     pub consts: Vec<Dynamic>,
     names: Vec<SmolStr>,
     fns: BTreeMap<u32, Vec<(Vec<Type>, Vec<Type>, FnInferRet)>>,
+    infer_stack: Vec<(u32, Vec<Type>, Vec<Type>)>,
     importing_paths: BTreeSet<PathBuf>,
 }
 
@@ -225,6 +226,63 @@ mod tests {
 
         let bool_value = compiler.symbols.get_id("compiler_pending_any::bool_value")?;
         assert_eq!(compiler.infer_fn(bool_value, &[])?, Type::Bool);
+        Ok(())
+    }
+
+    #[test]
+    fn recursive_function_uses_inferred_return_seed() -> anyhow::Result<()> {
+        let mut compiler = Compiler::new();
+        compiler.import_code(
+            "compiler_recursive_return",
+            br#"
+            pub fn factorial(n: i64) {
+                if n <= 1 {
+                    return 1;
+                }
+                n * factorial(n - 1)
+            }
+
+            pub fn factorial_reversed(n: i64) {
+                if n > 1 {
+                    return n * factorial_reversed(n - 1);
+                }
+                1
+            }
+            "#
+            .to_vec(),
+        )?;
+
+        let factorial = compiler.symbols.get_id("compiler_recursive_return::factorial")?;
+        assert_eq!(compiler.infer_fn(factorial, &[Type::I64])?, Type::I64);
+
+        let factorial_reversed = compiler.symbols.get_id("compiler_recursive_return::factorial_reversed")?;
+        assert_eq!(compiler.infer_fn(factorial_reversed, &[Type::I64])?, Type::I64);
+        Ok(())
+    }
+
+    #[test]
+    fn assignment_target_type_keeps_dynamic_index_sum_static() -> anyhow::Result<()> {
+        let mut compiler = Compiler::new();
+        compiler.import_code(
+            "compiler_dynamic_index_sum",
+            br#"
+            pub fn sum_list(n: i64) {
+                let l = [];
+                for i in 0..n {
+                    l.push(i);
+                }
+                let sum = 0i64;
+                for i in 0..n {
+                    sum = sum + l.get_idx(i);
+                }
+                sum
+            }
+            "#
+            .to_vec(),
+        )?;
+
+        let sum_list = compiler.symbols.get_id("compiler_dynamic_index_sum::sum_list")?;
+        assert_eq!(compiler.infer_fn(sum_list, &[Type::I64])?, Type::I64);
         Ok(())
     }
 
@@ -550,7 +608,7 @@ impl Compiler {
 
     pub fn new() -> Self {
         let symbols = SymbolTable::default();
-        Self { symbols, tys: Vec::new(), names: Vec::new(), consts: Vec::with_capacity(10240), frames: Vec::new(), fns: BTreeMap::new(), importing_paths: BTreeSet::new() }
+        Self { symbols, tys: Vec::new(), names: Vec::new(), consts: Vec::with_capacity(10240), frames: Vec::new(), fns: BTreeMap::new(), infer_stack: Vec::new(), importing_paths: BTreeSet::new() }
     }
 
     fn byte_to_line_col(src: &[u8], pos: usize) -> (usize, usize) {

@@ -287,6 +287,12 @@ extern "C" fn any_binary(left: *const Dynamic, op: i32, right: *const Dynamic) -
         return alloc_dynamic(unsafe { (&*left).clone() });
     }
     let op = BinaryOp::try_from(op).unwrap();
+    if op == BinaryOp::Add {
+        let (left_value, right_value) = unsafe { (&*left, &*right) };
+        if left_value.is_str() || right_value.is_str() {
+            return alloc_dynamic(left_value.clone() + right_value.clone());
+        }
+    }
     unsafe {
         let expr = Expr::new(
             ExprKind::Binary { left: Box::new(Expr::new(ExprKind::Value((&*left).clone()), Span::default())), op, right: Box::new(Expr::new(ExprKind::Value((&*right).clone()), Span::default())) },

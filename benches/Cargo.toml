@@ -1,0 +1,22 @@
+[package]
+name = "zust-bench"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[[bin]]
+name = "bench"
+path = "src/main.rs"
+
+[[bin]]
+name = "bug-demo"
+path = "src/bug_demo.rs"
+
+[[bin]]
+name = "debug-sieve"
+path = "src/debug_sieve.rs"
+
+[dependencies]
+dynamic = { package = "zust-dynamic", version = "0.9.5", path = "../dynamic" }
+vm = { package = "zust-vm", version = "0.9.11", path = "../vm" }
+anyhow = "1.0.102"

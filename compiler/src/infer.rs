@@ -10,6 +10,43 @@ struct ReturnInfo {
 }
 
 impl Compiler {
+    fn current_infer_key(&self) -> Option<(u32, Vec<Type>, Vec<Type>)> {
+        self.infer_stack.last().cloned()
+    }
+
+    fn pending_return_seed(&self, id: u32, generic_args: &[Type], fn_tys: &[Type]) -> Option<Type> {
+        self.fns.get(&id).and_then(|fns| {
+            fns.iter().find_map(|item| {
+                if item.0 == generic_args
+                    && item.1 == fn_tys
+                    && let FnInferRet::Pending(seed) = &item.2
+                {
+                    seed.clone()
+                } else {
+                    None
+                }
+            })
+        })
+    }
+
+    fn update_pending_return_seed(&mut self, ty: &Type) {
+        if ty.is_any() {
+            return;
+        }
+        let Some((id, generic_args, fn_tys)) = self.current_infer_key() else {
+            return;
+        };
+        let Some(fns) = self.fns.get_mut(&id) else {
+            return;
+        };
+        if let Some(item) = fns.iter_mut().find(|item| item.0 == generic_args && item.1 == fn_tys)
+            && let FnInferRet::Pending(seed) = &mut item.2
+        {
+            let next = seed.take().map(|prev| prev + ty.clone()).unwrap_or_else(|| ty.clone());
+            *seed = Some(next);
+        }
+    }
+
     fn add_pattern_bindings_for_infer(&mut self, pat: &Pattern, expr_ty: Type) -> Result<()> {
         match &pat.kind {
             PatternKind::Ident { name, ty } => {
@@ -134,7 +171,11 @@ impl Compiler {
                 for (idx, stmt) in stmts.iter().enumerate() {
                     let (info, always_returns) = self.infer_returns(stmt, tail && idx == stmts.len().saturating_sub(1))?;
                     if let Some(info) = info {
+                        self.update_pending_return_seed(&info.ty);
                         ret = Some(Self::merge_return_info(stmt.span, ret, info)?);
+                        if let Some(ret) = &ret {
+                            self.update_pending_return_seed(&ret.ty);
+                        }
                     }
                     if always_returns {
                         return Ok((ret, true));
@@ -148,10 +189,17 @@ impl Compiler {
                     return Err(Self::semantic_error(cond.span, format!("条件表达式必须是布尔类型，实际是 {:?}", cond_ty)));
                 }
                 let (mut ret, then_returns) = self.infer_returns(then_body, tail)?;
+                if let Some(ret) = &ret {
+                    self.update_pending_return_seed(&ret.ty);
+                }
                 let else_returns = if let Some(body) = else_body {
                     let (else_ty, else_returns) = self.infer_returns(body, tail)?;
                     if let Some(info) = else_ty {
+                        self.update_pending_return_seed(&info.ty);
                         ret = Some(Self::merge_return_info(body.span, ret, info)?);
+                        if let Some(ret) = &ret {
+                            self.update_pending_return_seed(&ret.ty);
+                        }
                     }
                     else_returns
                 } else {
@@ -274,8 +322,15 @@ impl Compiler {
                         Type::Any
                     }
                 } else {
+                    let left_ty = self.infer_expr(left)?;
                     let right_ty = self.infer_expr(right)?;
-                    if op == &BinaryOp::Assign { right_ty } else { self.infer_expr(left)? + right_ty }
+                    if op == &BinaryOp::Assign {
+                        if !left_ty.is_any() && right_ty.is_any() { left_ty } else { right_ty }
+                    } else if op.is_assign() && !left_ty.is_any() && right_ty.is_any() {
+                        left_ty
+                    } else {
+                        left_ty + right_ty
+                    }
                 };
                 assign_idx.map(|idx| self.set_ty(idx, ty.clone()));
                 Ok(ty)
@@ -437,49 +492,66 @@ impl Compiler {
                         if f.0 == generic_args && f.1 == fn_tys {
                             return match &f.2 {
                                 FnInferRet::Done(ret_ty) => self.symbols.get_type(ret_ty),
-                                FnInferRet::Pending => Ok(Type::Any),
+                                FnInferRet::Pending(seed) => seed.as_ref().map(|ty| self.symbols.get_type(ty)).unwrap_or(Ok(Type::Any)),
                             };
                         }
                     }
-                    fns.push((generic_args.to_vec(), fn_tys.clone(), FnInferRet::Pending));
+                    fns.push((generic_args.to_vec(), fn_tys.clone(), FnInferRet::Pending(None)));
                 } else {
-                    self.fns.insert(id, vec![(generic_args.to_vec(), fn_tys.clone(), FnInferRet::Pending)]);
+                    self.fns.insert(id, vec![(generic_args.to_vec(), fn_tys.clone(), FnInferRet::Pending(None))]);
                 }
-                let saved_state = self.take_local_state();
-                self.frames.push(0);
-                for (arg, ty) in args.iter().zip(fn_tys.iter()) {
-                    self.add_name(arg.clone());
-                    self.add_ty(ty.clone());
-                }
-                for c in cap.vars.iter() {
-                    if let Some((name, ty)) = cap.names.get(*c) {
-                        self.add_name(name.clone());
+                let mut ret_ty = None;
+                for _ in 0..4 {
+                    let before_seed = self.pending_return_seed(id, generic_args, &fn_tys);
+                    let saved_state = self.take_local_state();
+                    self.frames.push(0);
+                    for (arg, ty) in args.iter().zip(fn_tys.iter()) {
+                        self.add_name(arg.clone());
                         self.add_ty(ty.clone());
-                    } else {
-                        self.add_name("".into());
-                        self.add_ty(Type::Any);
+                    }
+                    for c in cap.vars.iter() {
+                        if let Some((name, ty)) = cap.names.get(*c) {
+                            self.add_name(name.clone());
+                            self.add_ty(ty.clone());
+                        } else {
+                            self.add_name("".into());
+                            self.add_ty(Type::Any);
+                        }
+                    }
+                    self.infer_stack.push((id, generic_args.to_vec(), fn_tys.clone()));
+                    let pass_ret_ty = self.infer_return_type(&body).map(|ty| ty.unwrap_or(Type::Void));
+                    self.infer_stack.pop();
+                    self.restore_local_state(saved_state);
+                    let pass_ret_ty = match pass_ret_ty {
+                        Ok(pass_ret_ty) => self.symbols.get_type(&pass_ret_ty).unwrap_or(pass_ret_ty),
+                        Err(err) => {
+                            log::error!("infer_fn {} failed: {:?}", name, err);
+                            let should_remove = self
+                                .fns
+                                .get_mut(&id)
+                                .map(|fns| {
+                                    fns.retain(|item| item.0 != generic_args || item.1 != fn_tys || !matches!(item.2, FnInferRet::Pending(_)));
+                                    fns.is_empty()
+                                })
+                                .unwrap_or(false);
+                            if should_remove {
+                                self.fns.remove(&id);
+                            }
+                            return Err(err);
+                        }
+                    };
+                    if !pass_ret_ty.is_any() {
+                        self.update_pending_return_seed(&pass_ret_ty);
+                        ret_ty = Some(pass_ret_ty.clone());
+                    } else if ret_ty.is_none() {
+                        ret_ty = Some(pass_ret_ty);
+                    }
+                    let after_seed = self.pending_return_seed(id, generic_args, &fn_tys);
+                    if before_seed == after_seed {
+                        break;
                     }
                 }
-                let ret_ty = self.infer_return_type(&body).map(|ty| ty.unwrap_or(Type::Void));
-                self.restore_local_state(saved_state);
-                let ret_ty = match ret_ty {
-                    Ok(ret_ty) => self.symbols.get_type(&ret_ty).unwrap_or(ret_ty),
-                    Err(err) => {
-                        log::error!("infer_fn {} failed: {:?}", name, err);
-                        let should_remove = self
-                            .fns
-                            .get_mut(&id)
-                            .map(|fns| {
-                                fns.retain(|item| item.0 != generic_args || item.1 != fn_tys || !matches!(item.2, FnInferRet::Pending));
-                                fns.is_empty()
-                            })
-                            .unwrap_or(false);
-                        if should_remove {
-                            self.fns.remove(&id);
-                        }
-                        return Err(err);
-                    }
-                };
+                let ret_ty = ret_ty.unwrap_or(Type::Any);
                 self.fns.get_mut(&id).map(|f| {
                     f.iter_mut().find(|item| item.0 == generic_args && item.1 == fn_tys).map(|item| item.2 = FnInferRet::Done(ret_ty.clone()));
                 });

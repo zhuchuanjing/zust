@@ -1366,6 +1366,16 @@ mod tests {
         assert_eq!(value.get_dynamic("nested").unwrap().get_dynamic("score").and_then(|v| v.as_int()), Some(1));
         assert_eq!(value.get_dynamic("items").unwrap().get_idx(0).unwrap().get_dynamic("score").and_then(|v| v.as_int()), Some(1));
     }
+
+    #[test]
+    fn string_add_keeps_concat_semantics() {
+        let left = Dynamic::from("hello");
+        let right = Dynamic::from(" world");
+        assert_eq!((left + right).as_str(), "hello world");
+
+        assert_eq!((Dynamic::from("level ") + Dynamic::I64(7)).as_str(), "level 7");
+        assert_eq!((Dynamic::I64(7) + Dynamic::from(" days")).as_str(), "7 days");
+    }
 }
 
 #[macro_export]

@@ -517,6 +517,7 @@ fn bind_value<'q>(query: Query<'q, Any, AnyArguments<'q>>, value: Dynamic) -> Re
         Dynamic::F32(value) => Ok(query.bind(value)),
         Dynamic::F64(value) => Ok(query.bind(value)),
         Dynamic::String(value) => Ok(query.bind(value.to_string())),
+        Dynamic::StringBuf(value) => Ok(query.bind(value)),
         Dynamic::Bytes(value) => Ok(query.bind(value)),
         value => Err(anyhow!("不支持的 SQL 绑定值: {value:?}")),
     }

@@ -27,8 +27,12 @@ fn main() -> Result<()> {
 
 fn count_primes(n: i64) -> i64 {
     let mut is_prime = vec![true; (n + 1) as usize];
-    if n >= 0 { is_prime[0] = false; }
-    if n >= 1 { is_prime[1] = false; }
+    if n >= 0 {
+        is_prime[0] = false;
+    }
+    if n >= 1 {
+        is_prime[1] = false;
+    }
     let mut count = 0;
     for p in 2..=n as usize {
         if is_prime[p] {

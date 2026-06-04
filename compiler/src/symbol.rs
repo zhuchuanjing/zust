@@ -86,6 +86,7 @@ pub fn substitute_type(ty: &Type, params: &[Type], args: &[Type]) -> Type {
             params: struct_params.iter().map(|param| substitute_type(param, params, args)).collect(),
             fields: fields.iter().map(|(name, field_ty)| (name.clone(), substitute_type(field_ty, params, args))).collect(),
         },
+        Type::List(elem) => Type::List(Rc::new(substitute_type(elem, params, args))),
         Type::Vec(elem, len) => Type::Vec(Rc::new(substitute_type(elem, params, args)), *len),
         Type::Array(elem, len) => Type::Array(Rc::new(substitute_type(elem, params, args)), *len),
         Type::ArrayParam(elem, len) => Type::ArrayParam(Rc::new(substitute_type(elem, params, args)), Rc::new(substitute_type(len, params, args))),
@@ -165,6 +166,13 @@ impl SymbolTable {
                 };
                 return Ok((usize::MAX, Type::Symbol { id: self.get_id(&any_method)?, params: Vec::new() }));
             }
+            Type::List(_) | Type::Array(_, _) => {
+                let any_method = match name {
+                    "len" | "push" | "pop" | "get_idx" | "set_idx" | "slice" | "is_list" | "is_null" => format!("Any::{}", name),
+                    _ => return Err(anyhow!("未发现 symbol {:?} {}", ty, name)),
+                };
+                return Ok((usize::MAX, Type::Symbol { id: self.get_id(&any_method)?, params: Vec::new() }));
+            }
             Type::Symbol { id, params: _ } => *id,
             Type::Vec(_, _) => self.get_id("Vec")?,
             Type::Fn { tys: _, ret } => {
@@ -191,6 +199,9 @@ impl SymbolTable {
                 let params = params.iter().map(|param| self.get_type(param)).collect::<Result<Vec<_>>>()?;
                 if name.as_str() == "Vec" && params.len() == 1 {
                     return Ok(Type::Vec(Rc::new(params[0].clone()), 0));
+                }
+                if name.as_str() == "List" {
+                    return Ok(if params.is_empty() { Type::list_any() } else { Type::List(Rc::new(params[0].clone())) });
                 }
                 let id = self.get_id(&name)?;
                 if let (_, Symbol::Struct(ty, _)) = self.get_symbol(id)? {
@@ -227,6 +238,9 @@ impl SymbolTable {
             }
             Type::Vec(elem, len) => {
                 return Ok(Type::Vec(Rc::new(self.get_type(elem)?), *len));
+            }
+            Type::List(elem) => {
+                return Ok(Type::List(Rc::new(self.get_type(elem)?)));
             }
             Type::Array(elem, len) => {
                 return Ok(Type::Array(Rc::new(self.get_type(elem)?), *len));
@@ -272,6 +286,14 @@ impl SymbolTable {
         self.modules.insert(name, BTreeMap::new());
     }
 
+    pub fn push_module_scope(&mut self, name: SmolStr) {
+        self.roots.push(name);
+    }
+
+    pub fn pop_module_scope(&mut self) {
+        self.roots.pop();
+    }
+
     pub fn pop_module(&mut self) {
         //如果不想模块成为全局的 add_module 之后调用 pop_module
         if let Some(last) = self.roots.pop() {
@@ -294,6 +316,11 @@ impl SymbolTable {
         }
         if let Some(id) = self.roots.iter().rev().find_map(|r| self.modules.get(r).and_then(|m| m.get(name))) {
             return Ok(*id);
+        }
+        for root in self.roots.iter().rev() {
+            if let Some(idx) = self.symbols.get_index_of(format!("{root}::{name}").as_str()) {
+                return Ok(idx as u32);
+            }
         }
         if let Some(id) = self.modules.values().find_map(|m| m.get(name)) {
             return Ok(*id);

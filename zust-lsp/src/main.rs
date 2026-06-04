@@ -484,7 +484,7 @@ fn type_label(ty: &Type) -> String {
         Type::Bool => "bool".to_string(),
         Type::Str => "string".to_string(),
         Type::Map => "Map".to_string(),
-        Type::List => "List".to_string(),
+        Type::List(elem) => format!("List<{}>", type_label(elem)),
         Type::Iter => "Iter".to_string(),
         Type::I8 => "i8".to_string(),
         Type::I16 => "i16".to_string(),
@@ -559,7 +559,7 @@ fn collect_expr_symbols(text: &str, expr: &Expr, symbols: &mut Vec<SymbolInfo>) 
             collect_stmt_symbols(text, body, symbols);
         }
         ExprKind::Typed { value, .. } | ExprKind::Unary { value, .. } | ExprKind::Repeat { value, .. } => collect_expr_symbols(text, value, symbols),
-        ExprKind::TypedMethod { obj, .. } => collect_expr_symbols(text, obj, symbols),
+        ExprKind::TypedMethod { obj, .. } | ExprKind::Generic { obj, .. } => collect_expr_symbols(text, obj, symbols),
         ExprKind::Binary { left, right, .. } => {
             collect_expr_symbols(text, left, symbols);
             collect_expr_symbols(text, right, symbols);

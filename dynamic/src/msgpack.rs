@@ -110,6 +110,7 @@ impl MsgPack for Dynamic {
                 buf.write_u64::<BigEndian>(int_value).unwrap();
             }
             Dynamic::String(s) => s.as_str().encode(buf),
+            Dynamic::StringBuf(s) => s.as_str().encode(buf),
             Dynamic::Bytes(raw) => {
                 encode_bytes(raw.as_slice(), buf);
             }

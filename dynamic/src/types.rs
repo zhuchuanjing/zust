@@ -33,7 +33,7 @@ pub enum Type {
     F64,
     Str,
     Map,
-    List,
+    List(Rc<Type>),
     Iter,
     Ident {
         name: SmolStr,
@@ -119,8 +119,8 @@ impl PartialEq for Type {
             | (Type::F32, Type::F32)
             | (Type::F64, Type::F64)
             | (Type::Str, Type::Str)
-            | (Type::Map, Type::Map)
-            | (Type::List, Type::List) => true,
+            | (Type::Map, Type::Map) => true,
+            (Type::List(left), Type::List(right)) => left == right,
             (Type::Ident { name: name1, params: params1 }, Type::Ident { name: name2, params: params2 }) => name1 == name2 && params1 == params2,
             (Type::ConstInt(left), Type::ConstInt(right)) => left == right,
             (Type::ConstBinary { op: op1, left: left1, right: right1 }, Type::ConstBinary { op: op2, left: left2, right: right2 }) => op1 == op2 && left1 == left2 && right1 == right2,
@@ -147,6 +147,10 @@ impl PartialEq for Type {
 }
 
 impl Type {
+    pub fn list_any() -> Self {
+        Self::List(Rc::new(Self::Any))
+    }
+
     fn align_up(value: u32, align: u32) -> u32 {
         if align <= 1 { value } else { (value + align - 1) & !(align - 1) }
     }
@@ -393,7 +397,7 @@ impl Dynamic {
             Self::VecU64(_) => Type::Vec(Rc::new(Type::U64), len),
             Self::VecF32(_) => Type::Vec(Rc::new(Type::F32), len),
             Self::VecF64(_) => Type::Vec(Rc::new(Type::F64), len),
-            Self::String(_) => Type::Str,
+            Self::String(_) | Self::StringBuf(_) => Type::Str,
             Self::Map(_) => Type::Map,
             Self::Struct { ty, .. } => ty.clone(),
             Self::Custom(_) => Type::Any,
@@ -405,7 +409,7 @@ impl Dynamic {
                         return Type::Array(Rc::new(first.clone()), len);
                     }
                 }
-                Type::List
+                Type::list_any()
             }
             Self::Iter { idx: _, keys: _, value: _ } => Type::Iter,
         }

@@ -16,13 +16,22 @@ enum FnInferRet {
 }
 
 #[derive(Clone)]
+pub enum ListElemState {
+    Unknown,
+    Known(Type),
+    Mixed,
+}
+
+#[derive(Clone)]
 pub struct Compiler {
     pub symbols: SymbolTable,
     pub frames: Vec<usize>,
     pub tys: Vec<Type>,
     pub consts: Vec<Dynamic>,
     names: Vec<SmolStr>,
+    list_elem_states: Vec<Option<ListElemState>>,
     fns: BTreeMap<u32, Vec<(Vec<Type>, Vec<Type>, FnInferRet)>>,
+    local_type_hints: BTreeMap<u32, Vec<(Vec<Type>, Vec<Type>, Vec<Option<Type>>)>>,
     infer_stack: Vec<(u32, Vec<Type>, Vec<Type>)>,
     importing_paths: BTreeSet<PathBuf>,
 }
@@ -261,6 +270,80 @@ mod tests {
     }
 
     #[test]
+    fn generic_function_infers_type_param_from_arg() -> anyhow::Result<()> {
+        let mut compiler = Compiler::new();
+        compiler.import_code(
+            "compiler_generic_identity",
+            br#"
+            pub fn identity<T>(value: T) {
+                value
+            }
+            "#
+            .to_vec(),
+        )?;
+
+        let identity = compiler.symbols.get_id("compiler_generic_identity::identity")?;
+        assert_eq!(compiler.infer_fn(identity, &[Type::I64])?, Type::I64);
+        assert_eq!(compiler.infer_fn(identity, &[Type::Bool])?, Type::Bool);
+        Ok(())
+    }
+
+    #[test]
+    fn generic_function_uses_explicit_const_param() -> anyhow::Result<()> {
+        let mut compiler = Compiler::new();
+        compiler.import_code(
+            "compiler_generic_const",
+            br#"
+            pub fn value<N>() {
+                N
+            }
+            "#
+            .to_vec(),
+        )?;
+
+        let value = compiler.symbols.get_id("compiler_generic_const::value")?;
+        assert_eq!(compiler.infer_fn_with_params(value, &[], &[Type::ConstInt(7)])?, Type::I32);
+        Ok(())
+    }
+
+    #[test]
+    fn generic_function_infers_const_param_from_array_len() -> anyhow::Result<()> {
+        let mut compiler = Compiler::new();
+        compiler.import_code(
+            "compiler_generic_array_len",
+            br#"
+            pub fn len<N>(items: [i32; N]) {
+                N
+            }
+            "#
+            .to_vec(),
+        )?;
+
+        let len = compiler.symbols.get_id("compiler_generic_array_len::len")?;
+        assert_eq!(compiler.infer_fn(len, &[Type::Array(std::rc::Rc::new(Type::I32), 3)])?, Type::I32);
+        Ok(())
+    }
+
+    #[test]
+    fn generic_function_reports_uninferred_param() -> anyhow::Result<()> {
+        let mut compiler = Compiler::new();
+        compiler.import_code(
+            "compiler_generic_uninferred",
+            br#"
+            pub fn value<T>() {
+                1i32
+            }
+            "#
+            .to_vec(),
+        )?;
+
+        let value = compiler.symbols.get_id("compiler_generic_uninferred::value")?;
+        let err = compiler.infer_fn(value, &[]).expect_err("generic parameter should not be inferred");
+        assert!(format!("{err:#}").contains("无法从实参类型推断函数范型参数"));
+        Ok(())
+    }
+
+    #[test]
     fn assignment_target_type_keeps_dynamic_index_sum_static() -> anyhow::Result<()> {
         let mut compiler = Compiler::new();
         compiler.import_code(
@@ -283,6 +366,49 @@ mod tests {
 
         let sum_list = compiler.symbols.get_id("compiler_dynamic_index_sum::sum_list")?;
         assert_eq!(compiler.infer_fn(sum_list, &[Type::I64])?, Type::I64);
+        Ok(())
+    }
+
+    #[test]
+    fn list_literal_infers_element_type() -> anyhow::Result<()> {
+        let mut compiler = Compiler::new();
+        compiler.import_code(
+            "compiler_list_elem_type",
+            br#"
+            pub fn pushed_empty() {
+                let items = [];
+                items.push(1i64);
+                items.get_idx(0)
+            }
+
+            pub fn ints() {
+                [1i64, 2i64]
+            }
+
+            pub fn mixed_then_int() {
+                let items = [];
+                items.push(1i64);
+                items.push("aaa");
+                items.push(2i64);
+                items.get_idx(0)
+            }
+
+            "#
+            .to_vec(),
+        )?;
+
+        let pushed_empty = compiler.symbols.get_id("compiler_list_elem_type::pushed_empty")?;
+        assert_eq!(compiler.infer_fn(pushed_empty, &[])?, Type::I64);
+        let hints = compiler.inferred_local_type_hints(pushed_empty, &[], &[]);
+        assert_eq!(hints.first().cloned().flatten(), Some(Type::List(std::rc::Rc::new(Type::I64))));
+
+        let ints = compiler.symbols.get_id("compiler_list_elem_type::ints")?;
+        assert_eq!(compiler.infer_fn(ints, &[])?, Type::Any);
+
+        let mixed_then_int = compiler.symbols.get_id("compiler_list_elem_type::mixed_then_int")?;
+        assert_eq!(compiler.infer_fn(mixed_then_int, &[])?, Type::Any);
+        let hints = compiler.inferred_local_type_hints(mixed_then_int, &[], &[]);
+        assert_eq!(hints.first().cloned().flatten(), None);
         Ok(())
     }
 
@@ -325,7 +451,7 @@ fn has_unresolved_generic_param(ty: &Type) -> bool {
         }
         Type::Struct { params, fields } => params.iter().any(has_unresolved_generic_param) || fields.iter().any(|(_, ty)| has_unresolved_generic_param(ty)),
         Type::Tuple(items) => items.iter().any(has_unresolved_generic_param),
-        Type::Vec(elem, _) | Type::Array(elem, _) => has_unresolved_generic_param(elem),
+        Type::List(elem) | Type::Vec(elem, _) | Type::Array(elem, _) => has_unresolved_generic_param(elem),
         Type::ArrayParam(elem, len) => has_unresolved_generic_param(elem) || has_unresolved_generic_param(len),
         Type::Fn { tys, ret } => tys.iter().any(has_unresolved_generic_param) || has_unresolved_generic_param(ret),
         Type::Symbol { params, .. } => params.iter().any(has_unresolved_generic_param),
@@ -399,6 +525,32 @@ pub fn infer_generic_args_from_types(generic_params: &[Type], decl_tys: &[Type],
     Vec::new()
 }
 
+pub fn resolve_generic_args_from_types(generic_params: &[Type], decl_tys: &[Type], arg_tys: &[Type], explicit_args: &[Type]) -> Result<Vec<Type>> {
+    if generic_params.is_empty() {
+        if explicit_args.is_empty() {
+            return Ok(Vec::new());
+        }
+        return Err(anyhow!("函数不接受范型参数，但传入了 {}", explicit_args.len()));
+    }
+    if !explicit_args.is_empty() {
+        if explicit_args.len() == generic_params.len() {
+            return Ok(explicit_args.to_vec());
+        }
+        return Err(anyhow!("函数范型参数数量不匹配，期望 {} 个，实际 {} 个", generic_params.len(), explicit_args.len()));
+    }
+
+    let inferred = infer_generic_args_from_types(generic_params, decl_tys, arg_tys);
+    if inferred.len() == generic_params.len() {
+        Ok(inferred)
+    } else if generic_params.len() == 1
+        && let Some(Type::List(elem) | Type::Vec(elem, _) | Type::Array(elem, _)) = arg_tys.first()
+    {
+        Ok(vec![elem.as_ref().clone()])
+    } else {
+        Err(anyhow!("无法从实参类型推断函数范型参数 {:?}", generic_params))
+    }
+}
+
 fn infer_generic_arg_from_type(generic_params: &[Type], decl: &Type, actual: &Type, inferred: &mut [Option<Type>]) {
     if let Some(idx) = generic_params.iter().position(|param| param == decl) {
         inferred[idx] = Some(actual.clone());
@@ -406,6 +558,9 @@ fn infer_generic_arg_from_type(generic_params: &[Type], decl: &Type, actual: &Ty
     }
 
     match (decl, actual) {
+        (Type::List(decl_elem), Type::List(actual_elem)) => {
+            infer_generic_arg_from_type(generic_params, decl_elem, actual_elem, inferred);
+        }
         (Type::Vec(decl_elem, decl_len), Type::Vec(actual_elem, actual_len)) | (Type::Array(decl_elem, decl_len), Type::Array(actual_elem, actual_len)) => {
             infer_generic_arg_from_type(generic_params, decl_elem, actual_elem, inferred);
             infer_generic_arg_from_type(generic_params, &Type::ConstInt(*decl_len as i64), &Type::ConstInt(*actual_len as i64), inferred);
@@ -448,6 +603,7 @@ fn substitute_expr(expr: &Expr, params: &[Type], args: &[Type]) -> Expr {
         ExprKind::Typed { value, ty } => ExprKind::Typed { value: Box::new(substitute_expr(value, params, args)), ty: substitute_type(ty, params, args) },
         ExprKind::Unary { op, value } => ExprKind::Unary { op: op.clone(), value: Box::new(substitute_expr(value, params, args)) },
         ExprKind::Binary { left, op, right } => ExprKind::Binary { left: Box::new(substitute_expr(left, params, args)), op: op.clone(), right: Box::new(substitute_expr(right, params, args)) },
+        ExprKind::Generic { obj, params: nested } => ExprKind::Generic { obj: Box::new(substitute_expr(obj, params, args)), params: nested.iter().map(|param| substitute_type(param, params, args)).collect() },
         ExprKind::Assoc { ty, name } => ExprKind::Assoc { ty: substitute_type(ty, params, args), name: name.clone() },
         ExprKind::TypedMethod { obj, ty, name } => ExprKind::TypedMethod { obj: Box::new(substitute_expr(obj, params, args)), ty: substitute_type(ty, params, args), name: name.clone() },
         ExprKind::AssocId { id, params: nested } => ExprKind::AssocId { id: *id, params: nested.iter().map(|param| substitute_type(param, params, args)).collect() },
@@ -549,16 +705,18 @@ impl Compiler {
         self.frames.clear();
         self.names.clear();
         self.tys.clear();
+        self.list_elem_states.clear();
     }
 
-    pub fn take_local_state(&mut self) -> (Vec<usize>, Vec<SmolStr>, Vec<Type>) {
-        (std::mem::take(&mut self.frames), std::mem::take(&mut self.names), std::mem::take(&mut self.tys))
+    pub fn take_local_state(&mut self) -> (Vec<usize>, Vec<SmolStr>, Vec<Type>, Vec<Option<ListElemState>>) {
+        (std::mem::take(&mut self.frames), std::mem::take(&mut self.names), std::mem::take(&mut self.tys), std::mem::take(&mut self.list_elem_states))
     }
 
-    pub fn restore_local_state(&mut self, state: (Vec<usize>, Vec<SmolStr>, Vec<Type>)) {
+    pub fn restore_local_state(&mut self, state: (Vec<usize>, Vec<SmolStr>, Vec<Type>, Vec<Option<ListElemState>>)) {
         self.frames = state.0;
         self.names = state.1;
         self.tys = state.2;
+        self.list_elem_states = state.3;
     }
 
     pub fn get_value(&self, expr: &Expr) -> Option<Dynamic> {
@@ -576,6 +734,24 @@ impl Compiler {
         })
     }
 
+    fn normalize_self_assign(left: Expr, op: BinaryOp, right: Expr, span: Span) -> Expr {
+        if op == BinaryOp::Assign
+            && let Some(idx) = left.var()
+            && let ExprKind::Binary { left: rhs_left, op: rhs_op, right: rhs_right } = &right.kind
+            && rhs_left.var() == Some(idx)
+        {
+            let op = match rhs_op {
+                BinaryOp::Add => Some(BinaryOp::AddAssign),
+                BinaryOp::Sub => Some(BinaryOp::SubAssign),
+                _ => None,
+            };
+            if let Some(op) = op {
+                return Expr::new(ExprKind::Binary { left: Box::new(left), op, right: Box::new((**rhs_right).clone()) }, span);
+            }
+        }
+        Expr::new(ExprKind::Binary { left: Box::new(left), op, right: Box::new(right) }, span)
+    }
+
     pub fn top(&self) -> usize {
         self.frames.last().copied().unwrap_or(0)
     }
@@ -585,13 +761,38 @@ impl Compiler {
         (self.names.len() - self.top() - 1) as u32
     }
 
+    fn list_elem_state_for_ty(ty: &Type) -> Option<ListElemState> {
+        match ty {
+            Type::List(elem) if elem.is_any() => Some(ListElemState::Unknown),
+            Type::List(elem) => Some(ListElemState::Known(elem.as_ref().clone())),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn list_elem_state(&self, idx: u32) -> Option<ListElemState> {
+        self.list_elem_states.get(self.top() + idx as usize).cloned().flatten()
+    }
+
+    pub(crate) fn set_list_elem_state(&mut self, idx: u32, state: Option<ListElemState>) {
+        let pos = idx as usize + self.top();
+        if self.list_elem_states.len() <= pos {
+            self.list_elem_states.resize(pos + 1, None);
+        }
+        self.list_elem_states[pos] = state;
+    }
+
     fn add_ty(&mut self, ty: Type) -> u32 {
+        self.list_elem_states.push(Self::list_elem_state_for_ty(&ty));
         self.tys.push(ty);
         (self.tys.len() - self.top() - 1) as u32
     }
 
     fn set_ty(&mut self, idx: u32, ty: Type) {
         let pos = idx as usize + self.top();
+        if self.list_elem_states.len() <= pos {
+            self.list_elem_states.resize(pos + 1, None);
+        }
+        self.list_elem_states[pos] = Self::list_elem_state_for_ty(&ty);
         if pos < self.tys.len() {
             self.tys[pos] = ty;
         } else if pos == self.tys.len() {
@@ -608,7 +809,18 @@ impl Compiler {
 
     pub fn new() -> Self {
         let symbols = SymbolTable::default();
-        Self { symbols, tys: Vec::new(), names: Vec::new(), consts: Vec::with_capacity(10240), frames: Vec::new(), fns: BTreeMap::new(), infer_stack: Vec::new(), importing_paths: BTreeSet::new() }
+        Self {
+            symbols,
+            tys: Vec::new(),
+            names: Vec::new(),
+            consts: Vec::with_capacity(10240),
+            frames: Vec::new(),
+            list_elem_states: Vec::new(),
+            fns: BTreeMap::new(),
+            local_type_hints: BTreeMap::new(),
+            infer_stack: Vec::new(),
+            importing_paths: BTreeSet::new(),
+        }
     }
 
     fn byte_to_line_col(src: &[u8], pos: usize) -> (usize, usize) {
@@ -843,7 +1055,7 @@ impl Compiler {
                 self.add_ty(ty.clone());
             }
             if cap.names.is_empty() && tys.iter().all(|ty| !ty.is_any()) {
-                let saved_state = (self.frames.clone(), self.names.clone(), self.tys.clone());
+                let saved_state = (self.frames.clone(), self.names.clone(), self.tys.clone(), self.list_elem_states.clone());
                 let result = self.check_return_type(&body);
                 self.restore_local_state(saved_state);
                 result?;
@@ -858,6 +1070,7 @@ impl Compiler {
         if let Some(top) = self.frames.pop() {
             self.tys.truncate(top);
             self.names.truncate(top);
+            self.list_elem_states.truncate(top);
         }
         result
     }
@@ -936,14 +1149,7 @@ impl Compiler {
                         for s in compiled.iter() {
                             log::info!("{}", s);
                         }
-                        self.symbols.symbols[id as usize] = Symbol::Fn {
-                            ty: Type::Fn { tys, ret },
-                            args,
-                            generic_params,
-                            cap,
-                            body: Arc::new(Stmt::new(StmtKind::Block(compiled), Span::default())),
-                            is_pub,
-                        };
+                        self.symbols.symbols[id as usize] = Symbol::Fn { ty: Type::Fn { tys, ret }, args, generic_params, cap, body: Arc::new(Stmt::new(StmtKind::Block(compiled), Span::default())), is_pub };
                         fn_ids.push(id);
                     }
                 }
@@ -975,6 +1181,9 @@ impl Compiler {
                 if expr_ty.is_any() {
                     let elems: Vec<Pattern> = elems.into_iter().filter_map(|p| self.pat_to_var(p, Type::Any).ok()).collect();
                     Ok(Pattern { kind: PatternKind::List { elems, has_rest }, span: pat.span })
+                } else if let Type::List(elem_ty) | Type::Array(elem_ty, _) | Type::Vec(elem_ty, _) = &expr_ty {
+                    let elems: Vec<Pattern> = elems.into_iter().filter_map(|p| self.pat_to_var(p, elem_ty.as_ref().clone()).ok()).collect();
+                    Ok(Pattern { kind: PatternKind::List { elems, has_rest }, span: pat.span })
                 } else {
                     Err(Self::semantic_error(pat.span, format!("列表模式 {:?} 与类型 {:?} 不匹配", elems, expr_ty)))
                 }
@@ -996,7 +1205,7 @@ impl Compiler {
             } else if stop_ty.is_any() {
                 start_ty
             } else {
-                stop_ty
+                start_ty + stop_ty
             }
         } else {
             range.get_type()
@@ -1173,6 +1382,14 @@ impl Compiler {
                     }
                 }
             },
+            ExprKind::Generic { obj, params } => {
+                let obj = self.eval(obj, stmts, cap)?;
+                let params = params.iter().map(|param| self.symbols.get_type(param).unwrap_or_else(|_| param.clone())).collect();
+                match obj.kind {
+                    ExprKind::Id(id, None) | ExprKind::AssocId { id, .. } => Ok(Expr::new(ExprKind::AssocId { id, params }, expr.span)),
+                    _ => Err(Self::semantic_error(expr.span, format!("范型参数只能用于函数或关联函数调用: {:?}", obj))),
+                }
+            }
             ExprKind::Assoc { ty, name } => {
                 let base_name = match ty {
                     Type::Ident { name, .. } => name.clone(),
@@ -1225,8 +1442,8 @@ impl Compiler {
                         }
                     }
                 }
-                let right = Box::new(self.eval(right, stmts, cap)?);
-                let value = Expr::new(ExprKind::Binary { left: Box::new(left), op: op.clone(), right }, expr.span);
+                let right = self.eval(right, stmts, cap)?;
+                let value = Self::normalize_self_assign(left, op.clone(), right, expr.span);
                 if let Some(v) = value.compact() { Ok(Expr::new(ExprKind::Value(v), expr.span)) } else { Ok(value) }
             }
             ExprKind::Call { obj, params } => {
@@ -1339,6 +1556,7 @@ impl Compiler {
                 } else {
                     None
                 };
+                let pattern_expr_ty = if matches!(pat.kind, PatternKind::List { .. } | PatternKind::Tuple(_)) { if let StmtKind::Expr(expr, _) = &value.kind { Some(self.infer_expr(expr)?) } else { None } } else { None };
                 if let Some(ty) = annotated_ty {
                     if let StmtKind::Expr(expr, close) = value.kind {
                         let span = expr.span;
@@ -1350,7 +1568,13 @@ impl Compiler {
                 } else {
                     self.compile_stmt(value, compiled, cap)?;
                 }
-                let expr_ty = if let Some(stmt) = compiled.last() { if let StmtKind::Expr(expr, _) = &stmt.kind { self.infer_expr(expr)? } else { self.infer_stmt(stmt)? } } else { Type::Any };
+                let expr_ty = if let Some(ty) = pattern_expr_ty {
+                    ty
+                } else if let Some(stmt) = compiled.last() {
+                    if let StmtKind::Expr(expr, _) = &stmt.kind { self.infer_expr(expr)? } else { self.infer_stmt(stmt)? }
+                } else {
+                    Type::Any
+                };
                 let pat = self.pat_to_var(pat, expr_ty)?;
                 compiled.last_mut().ok_or_else(|| Self::semantic_error(stmt_span, "没有生成可绑定模式的编译语句")).and_then(|stmt| stmt.bind_pattern(pat))?;
             }

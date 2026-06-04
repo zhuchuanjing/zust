@@ -214,6 +214,7 @@ impl ToJson for Dynamic {
             Self::U64(i) => buf.push_str(&i.to_string()),
             Self::Null => buf.push_str("null"),
             Self::String(s) => s.as_str().to_json(buf),
+            Self::StringBuf(s) => s.as_str().to_json(buf),
             Self::Bytes(vec) => vec_to_json!(buf, vec, U8),
             Self::VecI8(vec) => vec_to_json!(buf, vec, I8),
             Self::VecU16(vec) => vec_to_json!(buf, vec, U16),

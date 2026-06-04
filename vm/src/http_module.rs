@@ -435,14 +435,7 @@ fn static_options(value: &Dynamic) -> Result<Vec<StaticDir>> {
     }
 
     if value.is_map() {
-        let dir = value
-            .get_dynamic("dir")
-            .or_else(|| value.get_dynamic("root"))
-            .or_else(|| value.get_dynamic("directory"))
-            .ok_or_else(|| anyhow!("http static 需要 dir"))?
-            .as_str()
-            .trim()
-            .to_string();
+        let dir = value.get_dynamic("dir").or_else(|| value.get_dynamic("root")).or_else(|| value.get_dynamic("directory")).ok_or_else(|| anyhow!("http static 需要 dir"))?.as_str().trim().to_string();
         if dir.is_empty() {
             return Ok(Vec::new());
         }
@@ -476,13 +469,11 @@ async fn api_dispatch(axum::extract::State(options): axum::extract::State<Server
 }
 
 async fn upload_dispatch(axum::extract::State(options): axum::extract::State<ServerOptions>, req: Request<Body>) -> Response {
-    match raw_payload(req, options.body_limit)
-        .await
-        .and_then(|payload| {
-            let parsed = parse_multipart_result(&payload)?;
-            payload.append(parsed);
-            root::send_msg("local/http/upload", payload).map_err(|err| anyhow!("dispatch local/http/upload: {err}"))
-        }) {
+    match raw_payload(req, options.body_limit).await.and_then(|payload| {
+        let parsed = parse_multipart_result(&payload)?;
+        payload.append(parsed);
+        root::send_msg("local/http/upload", payload).map_err(|err| anyhow!("dispatch local/http/upload: {err}"))
+    }) {
         Ok(result) => to_response(result).unwrap_or_else(|err| json_error(StatusCode::INTERNAL_SERVER_ERROR, err.to_string())),
         Err(err) => json_error(StatusCode::BAD_REQUEST, err.to_string()),
     }
@@ -758,16 +749,7 @@ fn ws_send_native(payload: Dynamic) -> Dynamic {
     let close = payload.get_dynamic("@close").and_then(|value| value.as_bool()).unwrap_or(false);
     let sent = {
         let senders = WS_SENDERS.lock().expect("ws sender registry poisoned");
-        senders
-            .get(&idx)
-            .map(|tx| {
-                if close {
-                    tx.send(WsCommand::Close).is_ok()
-                } else {
-                    tx.send(WsCommand::Send(payload.clone())).is_ok()
-                }
-            })
-            .unwrap_or(false)
+        senders.get(&idx).map(|tx| if close { tx.send(WsCommand::Close).is_ok() } else { tx.send(WsCommand::Send(payload.clone())).is_ok() }).unwrap_or(false)
     };
     if sent { map!("ok"=> true, "idx"=> idx) } else { map!("ok"=> false, "idx"=> idx, "error"=> "websocket sender missing") }
 }
@@ -787,16 +769,8 @@ fn optional_dispatch(route: &str, payload: Dynamic) -> Result<Option<Dynamic>> {
 }
 
 fn bearer_token(headers: &AxumHeaderMap) -> Option<String> {
-    let auth = headers
-        .get("authorization")
-        .and_then(|value| value.to_str().ok())
-        .or_else(|| headers.get("sec-websocket-protocol").and_then(|value| value.to_str().ok()))?
-        .trim();
-    auth.strip_prefix("Bearer ")
-        .or_else(|| auth.strip_prefix("bearer "))
-        .or_else(|| auth.strip_prefix("Bearer."))
-        .or_else(|| auth.strip_prefix("bearer."))
-        .map(str::to_string)
+    let auth = headers.get("authorization").and_then(|value| value.to_str().ok()).or_else(|| headers.get("sec-websocket-protocol").and_then(|value| value.to_str().ok()))?.trim();
+    auth.strip_prefix("Bearer ").or_else(|| auth.strip_prefix("bearer ")).or_else(|| auth.strip_prefix("Bearer.")).or_else(|| auth.strip_prefix("bearer.")).map(str::to_string)
 }
 
 fn dynamic_msgpack(obj: Dynamic) -> Vec<u8> {

@@ -1,15 +1,22 @@
 use crate::{JITRunTime, context::BuildContext, rt::PendingFn};
 use anyhow::{Context, Result, anyhow};
-use compiler::{Symbol, infer_generic_args_from_types, substitute_stmt, substitute_type};
+use compiler::{Symbol, resolve_generic_args_from_types, substitute_stmt, substitute_type};
 use cranelift::{codegen::ir::FuncRef, prelude::*};
 use cranelift_module::{FuncId, Module};
 use dynamic::Type;
 
 #[derive(Debug)]
+pub struct CompiledVariant {
+    generic_args: Vec<Type>,
+    ty: Type,
+    fn_id: FuncId,
+}
+
+#[derive(Debug)]
 pub enum FnVariant {
     Native { ty: Type, fn_id: FuncId, context: Option<usize> },                                                        //没有变体 直接调用的原生函数
     Inline { fn_ptr: fn(Option<&mut BuildContext>, Vec<Value>) -> Result<(Option<Value>, Type)>, arg_tys: Vec<Type> }, //inline 函数 直接生成代码
-    Compiled(Vec<(Type, FuncId)>),
+    Compiled(Vec<CompiledVariant>),
 }
 
 impl FnVariant {
@@ -105,8 +112,11 @@ impl JITRunTime {
         if let Some(fn_info) = self.fns.get(&id) {
             match fn_info {
                 FnVariant::Compiled(fns) => {
-                    for (ty, fn_id) in fns.iter() {
-                        if let Type::Fn { tys, ret } = ty.clone() {
+                    for variant in fns.iter() {
+                        if !variant.generic_args.is_empty() {
+                            continue;
+                        }
+                        if let Type::Fn { tys, ret } = variant.ty.clone() {
                             if tys.len() != want_tys.len() {
                                 continue;
                             }
@@ -125,7 +135,7 @@ impl JITRunTime {
                                 }
                             }
                             if real_types.len() == want_tys.len() {
-                                return Ok(FnInfo::Call { fn_id: *fn_id, arg_tys: real_types, caps: Vec::new(), ret: ret.as_ref().clone(), context: None });
+                                return Ok(FnInfo::Call { fn_id: variant.fn_id, arg_tys: real_types, caps: Vec::new(), ret: ret.as_ref().clone(), context: None });
                             }
                         }
                     }
@@ -158,12 +168,17 @@ impl JITRunTime {
         Ok(sig)
     }
 
-    fn declare_compiled_fn(&mut self, name_id: Option<&(SmolStr, u32)>, arg_tys: &[Type], ret_ty: Type) -> Result<FuncId> {
+    fn declare_compiled_fn(&mut self, name_id: Option<&(SmolStr, u32)>, generic_args: &[Type], arg_tys: &[Type], ret_ty: Type) -> Result<FuncId> {
         let sig = self.get_sig(arg_tys, ret_ty.clone())?;
         log::info!("{:?} {:?}", name_id, sig);
         if let Some((name, id)) = name_id {
-            let fn_id = self.module.declare_function(&name, Linkage::Local, &sig)?;
-            let variant = (Type::Fn { tys: arg_tys.to_vec(), ret: std::rc::Rc::new(ret_ty.clone()) }, fn_id);
+            let variant_idx = match self.fns.get(id) {
+                Some(FnVariant::Compiled(fns)) => fns.len(),
+                _ => 0,
+            };
+            let jit_name = if variant_idx == 0 && generic_args.is_empty() { name.to_string() } else { format!("{name}#{variant_idx}") };
+            let fn_id = self.module.declare_function(&jit_name, Linkage::Local, &sig)?;
+            let variant = CompiledVariant { generic_args: generic_args.to_vec(), ty: Type::Fn { tys: arg_tys.to_vec(), ret: std::rc::Rc::new(ret_ty.clone()) }, fn_id };
             if let Some(FnVariant::Compiled(fns)) = self.fns.get_mut(id) {
                 fns.push(variant);
             } else {
@@ -175,7 +190,7 @@ impl JITRunTime {
         }
     }
 
-    fn define_compiled_fn(&mut self, fn_id: FuncId, name_id: Option<&(SmolStr, u32)>, arg_tys: &[Type], ret_ty: Type, stmt: &Stmt) -> Result<()> {
+    fn define_compiled_fn(&mut self, fn_id: FuncId, name_id: Option<&(SmolStr, u32)>, arg_tys: &[Type], ret_ty: Type, local_type_hints: Vec<Option<Type>>, stmt: &Stmt) -> Result<()> {
         let sig = self.get_sig(arg_tys, ret_ty.clone())?;
         #[cfg(feature = "ir-disassembly")]
         let fn_name = name_id.map(|(name, _)| name.clone());
@@ -185,7 +200,7 @@ impl JITRunTime {
         let mut func_ctx = FunctionBuilderContext::new();
         let builder = FunctionBuilder::new(&mut ctx.func, &mut func_ctx);
 
-        let mut build_ctx = BuildContext::new(builder, &arg_tys, ret_ty.clone())?;
+        let mut build_ctx = BuildContext::with_local_type_hints(builder, &arg_tys, ret_ty.clone(), local_type_hints)?;
         self.scope_enter(&mut build_ctx)?;
         self.compile_depth += 1;
         let stmt = Self::coerce_returns(stmt, &ret_ty);
@@ -207,9 +222,25 @@ impl JITRunTime {
     }
 
     pub(crate) fn compile_fn(&mut self, name_id: Option<(SmolStr, u32)>, arg_tys: &[Type], ret_ty: Type, stmt: &Stmt) -> Result<FuncId> {
+        self.compile_fn_with_generic_args(name_id, &[], arg_tys, ret_ty, stmt)
+    }
+
+    pub(crate) fn compile_fn_with_generic_args(&mut self, name_id: Option<(SmolStr, u32)>, generic_args: &[Type], arg_tys: &[Type], ret_ty: Type, stmt: &Stmt) -> Result<FuncId> {
+        self.compile_fn_with_generic_args_and_local_type_hints(name_id, generic_args, arg_tys, ret_ty, Vec::new(), stmt)
+    }
+
+    pub(crate) fn compile_fn_with_generic_args_and_local_type_hints(
+        &mut self,
+        name_id: Option<(SmolStr, u32)>,
+        generic_args: &[Type],
+        arg_tys: &[Type],
+        ret_ty: Type,
+        local_type_hints: Vec<Option<Type>>,
+        stmt: &Stmt,
+    ) -> Result<FuncId> {
         let drain_pending = self.compile_depth == 0;
-        let fn_id = self.declare_compiled_fn(name_id.as_ref(), arg_tys, ret_ty.clone())?;
-        self.define_compiled_fn(fn_id, name_id.as_ref(), arg_tys, ret_ty, stmt)?;
+        let fn_id = self.declare_compiled_fn(name_id.as_ref(), generic_args, arg_tys, ret_ty.clone())?;
+        self.define_compiled_fn(fn_id, name_id.as_ref(), arg_tys, ret_ty, local_type_hints, stmt)?;
         if drain_pending {
             self.drain_pending_fns()?;
         }
@@ -219,7 +250,7 @@ impl JITRunTime {
     fn drain_pending_fns(&mut self) -> Result<()> {
         while let Some(pending) = self.pending_fns.pop_front() {
             let name_id = (pending.name, pending.symbol_id);
-            self.define_compiled_fn(pending.fn_id, Some(&name_id), &pending.arg_tys, pending.ret_ty, &pending.body)?;
+            self.define_compiled_fn(pending.fn_id, Some(&name_id), &pending.arg_tys, pending.ret_ty, pending.local_type_hints, &pending.body)?;
         }
         Ok(())
     }
@@ -238,20 +269,24 @@ impl JITRunTime {
         let (name, s) = self.compiler.symbols.get_symbol(id).map(|(n, s)| (n.clone(), s.clone()))?;
         if let Symbol::Fn { ty, args, generic_params, cap, body, is_pub: _ } = s.clone() {
             if let Type::Fn { tys: decl_tys, ret: _ } = ty {
-                let inferred_generic_args = if generic_args.is_empty() { infer_generic_args_from_types(&generic_params, &decl_tys, &arg_tys) } else { generic_args.to_vec() };
-                let generic_args = if generic_params.is_empty() { &[] } else { inferred_generic_args.as_slice() };
+                let resolved_generic_args = resolve_generic_args_from_types(&generic_params, &decl_tys, &arg_tys, generic_args)?;
+                let generic_args = resolved_generic_args.as_slice();
                 let decl_tys = if generic_params.is_empty() { decl_tys } else { decl_tys.iter().map(|ty| substitute_type(ty, &generic_params, generic_args)).collect() };
                 while arg_tys.len() < decl_tys.len() {
                     arg_tys.push(self.compiler.symbols.get_type(&decl_tys[arg_tys.len()]).unwrap_or(Type::Any));
                 }
                 let ret_ty = self.compiler.infer_fn_with_params(id, &arg_tys, generic_args)?;
+                let local_type_hints = self.compiler.inferred_local_type_hints(id, generic_args, &arg_tys);
                 if let Some(FnVariant::Compiled(fns)) = self.fns.get(&id) {
-                    for (ty, fn_id) in fns {
-                        if let Type::Fn { tys, ret } = ty
+                    for variant in fns {
+                        if variant.generic_args.as_slice() != generic_args {
+                            continue;
+                        }
+                        if let Type::Fn { tys, ret } = &variant.ty
                             && tys == &arg_tys
                             && ret.as_ref() == &ret_ty
                         {
-                            return Ok(FnInfo::Call { fn_id: *fn_id, arg_tys: arg_tys.to_vec(), caps: Vec::new(), ret: ret_ty, context: None });
+                            return Ok(FnInfo::Call { fn_id: variant.fn_id, arg_tys: arg_tys.to_vec(), caps: Vec::new(), ret: ret_ty, context: None });
                         }
                     }
                 }
@@ -262,7 +297,13 @@ impl JITRunTime {
                     let mut compile_tys = decl_tys.clone();
                     let substituted = substitute_stmt(body.as_ref(), &generic_params, generic_args);
                     let saved_state = self.compiler.take_local_state();
+                    if let Some((module, _)) = name.split_once("::") {
+                        self.compiler.symbols.push_module_scope(module.into());
+                    }
                     let compiled_body = self.compiler.compile_fn(&args, &mut compile_tys, substituted, &mut compile_cap);
+                    if name.contains("::") {
+                        self.compiler.symbols.pop_module_scope();
+                    }
                     self.compiler.restore_local_state(saved_state);
                     Stmt::new(StmtKind::Block(compiled_body?), Span::default())
                 };
@@ -270,11 +311,11 @@ impl JITRunTime {
                     ctx.as_ref().map(|ctx| arg_tys.push(ctx.vars[*v].get_ty()));
                 }
                 let fn_id = if self.compile_depth > 0 {
-                    let fn_id = self.declare_compiled_fn(Some(&(name.clone(), id)), &arg_tys, ret_ty.clone())?;
-                    self.pending_fns.push_back(PendingFn { name: name.clone(), symbol_id: id, fn_id, arg_tys: arg_tys.clone(), ret_ty: ret_ty.clone(), body });
+                    let fn_id = self.declare_compiled_fn(Some(&(name.clone(), id)), generic_args, &arg_tys, ret_ty.clone())?;
+                    self.pending_fns.push_back(PendingFn { name: name.clone(), symbol_id: id, fn_id, arg_tys: arg_tys.clone(), ret_ty: ret_ty.clone(), local_type_hints, body });
                     fn_id
                 } else {
-                    let fn_id = self.compile_fn(Some((name.clone(), id)), &arg_tys, ret_ty.clone(), &body)?;
+                    let fn_id = self.compile_fn_with_generic_args_and_local_type_hints(Some((name.clone(), id)), generic_args, &arg_tys, ret_ty.clone(), local_type_hints, &body)?;
                     self.drain_pending_fns()?;
                     self.module.finalize_definitions()?;
                     fn_id
@@ -282,16 +323,17 @@ impl JITRunTime {
                 return Ok(FnInfo::Call { fn_id, arg_tys: arg_tys.to_vec(), caps: compile_cap.vars.clone(), ret: ret_ty, context: None });
             }
             let ret_ty = self.compiler.infer_fn_with_params(id, &arg_tys, generic_args)?;
+            let local_type_hints = self.compiler.inferred_local_type_hints(id, generic_args, &arg_tys);
             for v in cap.vars.iter() {
                 ctx.as_ref().map(|ctx| arg_tys.push(ctx.vars[*v].get_ty()));
             }
             let body = if generic_params.is_empty() { body.as_ref().clone() } else { substitute_stmt(body.as_ref(), &generic_params, generic_args) };
             let fn_id = if self.compile_depth > 0 {
-                let fn_id = self.declare_compiled_fn(Some(&(name.clone(), id)), &arg_tys, ret_ty.clone())?;
-                self.pending_fns.push_back(PendingFn { name: name.clone(), symbol_id: id, fn_id, arg_tys: arg_tys.clone(), ret_ty: ret_ty.clone(), body });
+                let fn_id = self.declare_compiled_fn(Some(&(name.clone(), id)), generic_args, &arg_tys, ret_ty.clone())?;
+                self.pending_fns.push_back(PendingFn { name: name.clone(), symbol_id: id, fn_id, arg_tys: arg_tys.clone(), ret_ty: ret_ty.clone(), local_type_hints, body });
                 fn_id
             } else {
-                let fn_id = self.compile_fn(Some((name.clone(), id)), &arg_tys, ret_ty.clone(), &body)?;
+                let fn_id = self.compile_fn_with_generic_args_and_local_type_hints(Some((name.clone(), id)), generic_args, &arg_tys, ret_ty.clone(), local_type_hints, &body)?;
                 self.drain_pending_fns()?;
                 self.module.finalize_definitions()?;
                 fn_id

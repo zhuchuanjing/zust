@@ -116,6 +116,10 @@ pub enum ExprKind {
     Var(u32),
     Capture(u32),
     Id(u32, Option<Box<Expr>>),
+    Generic {
+        obj: Box<Expr>,
+        params: Vec<Type>,
+    },
     Assoc {
         ty: Type,
         name: SmolStr,
@@ -198,6 +202,17 @@ impl Expr {
             ExprKind::Value(v) => v.get_type(),
             ExprKind::Unary { value, .. } => value.get_type(),
             ExprKind::Tuple(list) => Type::Tuple(list.iter().map(|l| l.get_type()).collect()),
+            ExprKind::List(list) => {
+                if list.is_empty() {
+                    return Type::list_any();
+                }
+                let mut elem_ty = Type::Any;
+                for item in list {
+                    let item_ty = item.get_type();
+                    elem_ty = if elem_ty.is_any() { item_ty } else { elem_ty + item_ty };
+                }
+                Type::Array(std::rc::Rc::new(elem_ty), list.len() as u32)
+            }
             ExprKind::Repeat { value, len } => {
                 if let Type::ConstInt(len) = len {
                     Type::Array(std::rc::Rc::new(value.get_type()), *len as u32)
@@ -374,13 +389,17 @@ impl Parser {
                 break;
             }
             if self.just("::<").is_ok() {
-                let ty = self.get_type()?;
+                let params = crate::parse_list!(self, Vec::new(), b'>', b',', self.get_type_param()?);
                 self.whitespace()?;
-                self.until(b'>')?;
-                self.whitespace()?;
-                self.just("::")?;
-                let name = self.ident()?;
-                expr = Expr::new(ExprKind::TypedMethod { obj: Box::new(expr), ty, name }, Span::new(start, self.current_pos()));
+                if self.just("::").is_ok() {
+                    if params.len() != 1 {
+                        return Err(anyhow!("类型提示只能包含一个类型参数"));
+                    }
+                    let name = self.ident()?;
+                    expr = Expr::new(ExprKind::TypedMethod { obj: Box::new(expr), ty: params[0].clone(), name }, Span::new(start, self.current_pos()));
+                } else {
+                    expr = Expr::new(ExprKind::Generic { obj: Box::new(expr), params }, Span::new(start, self.current_pos()));
+                }
             } else if self.take(b'.').is_ok() {
                 let key_start = self.current_pos();
                 let key = self.ident()?;

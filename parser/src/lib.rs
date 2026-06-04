@@ -589,4 +589,19 @@ mod tests {
         };
         assert!(args.is_empty());
     }
+
+    #[test]
+    fn parses_explicit_generic_function_call() {
+        let mut parser = Parser::new(b"value::<4>()".to_vec());
+        let expr = parser.get_expr().unwrap();
+        let ExprKind::Call { obj, params } = expr.kind else {
+            panic!("expected function call, got {expr:?}");
+        };
+        assert!(params.is_empty());
+        let ExprKind::Generic { obj, params } = obj.kind else {
+            panic!("expected generic callee, got {obj:?}");
+        };
+        assert!(matches!(obj.kind, ExprKind::Ident(name) if name.as_str() == "value"));
+        assert!(matches!(params.as_slice(), [Type::ConstInt(4)]));
+    }
 }

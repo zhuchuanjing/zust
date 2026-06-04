@@ -20,7 +20,7 @@ impl Into<LocalVar> for (Value, Type) {
 }
 
 impl LocalVar {
-    fn normalize_for_var(ctx: &mut BuildContext, val: Value, ty: &Type) -> Value {
+    pub(crate) fn normalize_for_var(ctx: &mut BuildContext, val: Value, ty: &Type) -> Value {
         let Ok(expected) = get_type(ty) else {
             return val;
         };
@@ -95,12 +95,17 @@ impl LocalVar {
 pub struct BuildContext<'a> {
     pub builder: FunctionBuilder<'a>,
     pub(crate) vars: Vec<LocalVar>,
+    pub(crate) local_type_hints: Vec<Option<Type>>,
     pub(crate) fn_refs: Vec<(FuncId, FuncRef)>,
     pub(crate) ret_ty: Type,
 }
 
 impl<'a> BuildContext<'a> {
-    pub fn new(mut builder: FunctionBuilder<'a>, arg_tys: &[Type], ret_ty: Type) -> Result<Self> {
+    pub fn new(builder: FunctionBuilder<'a>, arg_tys: &[Type], ret_ty: Type) -> Result<Self> {
+        Self::with_local_type_hints(builder, arg_tys, ret_ty, Vec::new())
+    }
+
+    pub fn with_local_type_hints(mut builder: FunctionBuilder<'a>, arg_tys: &[Type], ret_ty: Type, local_type_hints: Vec<Option<Type>>) -> Result<Self> {
         let entry_block = builder.create_block();
         builder.append_block_params_for_function_params(entry_block);
         builder.switch_to_block(entry_block);
@@ -108,7 +113,7 @@ impl<'a> BuildContext<'a> {
         for (idx, ty) in arg_tys.iter().enumerate() {
             vars.push(LocalVar::Value { val: builder.block_params(entry_block)[idx], ty: ty.clone() });
         }
-        Ok(Self { builder, vars, fn_refs: Vec::new(), ret_ty })
+        Ok(Self { builder, vars, local_type_hints, fn_refs: Vec::new(), ret_ty })
     }
 
     pub fn get_fn_ref(&mut self, fn_id: FuncId) -> Option<FuncRef> {
@@ -121,6 +126,10 @@ impl<'a> BuildContext<'a> {
 
     pub fn get_var_ty(&self, idx: u32) -> Option<Type> {
         self.vars.get(idx as usize).map(|v| v.get_ty())
+    }
+
+    pub fn local_type_hint(&self, idx: u32) -> Option<Type> {
+        self.local_type_hints.get(idx as usize).cloned().flatten()
     }
 
     pub fn set_var(&mut self, idx: u32, val: LocalVar) -> Result<()> {

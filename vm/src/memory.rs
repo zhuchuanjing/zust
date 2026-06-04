@@ -121,6 +121,10 @@ pub(crate) fn alloc_struct_bytes(size: usize) -> *mut u8 {
     VM_MEMORY.with(|memory| memory.borrow_mut().alloc_bytes(size))
 }
 
+pub(crate) fn owns_dynamic_ptr(ptr: *const Dynamic) -> bool {
+    VM_MEMORY.with(|memory| memory.borrow().owns_dynamic(ptr))
+}
+
 pub(crate) fn alloc_dynamic(value: Dynamic) -> *const Dynamic {
     VM_MEMORY.with(|memory| {
         let mut memory = memory.borrow_mut();

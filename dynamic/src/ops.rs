@@ -47,38 +47,70 @@ impl Add for Dynamic {
             rhs.clone().append(self);
             return rhs;
         }
-        if let (Self::String(left), Self::String(right)) = (&self, &rhs) {
-            let mut out = String::with_capacity(left.len() + right.len());
-            out.push_str(left.as_str());
-            out.push_str(right.as_str());
-            return Self::String(out.into());
-        } else if let Self::String(left) = &self {
-            let right = rhs.to_string();
-            let mut out = String::with_capacity(left.len() + right.len());
-            out.push_str(left.as_str());
-            out.push_str(&right);
-            return Self::String(out.into());
-        } else if let Self::String(right) = &rhs {
-            let left = self.to_string();
-            let mut out = String::with_capacity(left.len() + right.len());
-            out.push_str(&left);
-            out.push_str(right.as_str());
-            return Self::String(out.into());
-        } else if self.is_f64() || rhs.is_f64() {
-            return Dynamic::F64(self.as_float().unwrap_or(0.0) + rhs.as_float().unwrap_or(0.0));
-        } else if self.is_f32() || rhs.is_f32() {
-            return Dynamic::F32(self.as_float().unwrap_or(0.0) as f32 + rhs.as_float().unwrap_or(0.0) as f32);
+        match (self, rhs) {
+            (Self::StringBuf(mut left), Self::StringBuf(right)) => {
+                left.push_str(&right);
+                return Self::StringBuf(left);
+            }
+            (Self::StringBuf(mut left), Self::String(right)) => {
+                left.push_str(right.as_str());
+                return Self::StringBuf(left);
+            }
+            (Self::StringBuf(mut left), right) => {
+                left.push_str(&right.to_string());
+                return Self::StringBuf(left);
+            }
+            (Self::String(left), Self::StringBuf(right)) => {
+                let mut out = String::with_capacity(left.len() + right.len());
+                out.push_str(left.as_str());
+                out.push_str(&right);
+                return Self::StringBuf(out);
+            }
+            (Self::String(left), Self::String(right)) => {
+                let mut out = String::with_capacity(left.len() + right.len());
+                out.push_str(left.as_str());
+                out.push_str(right.as_str());
+                return Self::StringBuf(out);
+            }
+            (Self::String(left), right) => {
+                let right = right.to_string();
+                let mut out = String::with_capacity(left.len() + right.len());
+                out.push_str(left.as_str());
+                out.push_str(&right);
+                return Self::StringBuf(out);
+            }
+            (left, Self::StringBuf(right)) => {
+                let left = left.to_string();
+                let mut out = String::with_capacity(left.len() + right.len());
+                out.push_str(&left);
+                out.push_str(&right);
+                return Self::StringBuf(out);
+            }
+            (left, Self::String(right)) => {
+                let left = left.to_string();
+                let mut out = String::with_capacity(left.len() + right.len());
+                out.push_str(&left);
+                out.push_str(right.as_str());
+                return Self::StringBuf(out);
+            }
+            (left, right) => {
+                if left.is_f64() || right.is_f64() {
+                    return Dynamic::F64(left.as_float().unwrap_or(0.0) + right.as_float().unwrap_or(0.0));
+                } else if left.is_f32() || right.is_f32() {
+                    return Dynamic::F32(left.as_float().unwrap_or(0.0) as f32 + right.as_float().unwrap_or(0.0) as f32);
+                }
+                if left.is_int() || right.is_int() {
+                    return Self::I64(left.as_int().unwrap() + right.as_int().unwrap());
+                }
+                if left.is_uint() || right.is_uint() {
+                    return Self::U64(left.as_uint().unwrap() + right.as_uint().unwrap());
+                }
+                if left.is_map() && right.is_map() {
+                    left.append(right);
+                }
+                left
+            }
         }
-        if self.is_int() || rhs.is_int() {
-            return Self::I64(self.as_int().unwrap() + rhs.as_int().unwrap());
-        }
-        if self.is_uint() || rhs.is_uint() {
-            return Self::U64(self.as_uint().unwrap() + rhs.as_uint().unwrap());
-        }
-        if self.is_map() && rhs.is_map() {
-            self.append(rhs);
-        }
-        self
     }
 }
 

@@ -8,19 +8,39 @@ struct Bench {
     name: &'static str,
     desc: &'static str,
     size: i64,
+    is_generic: bool,
 }
 
 const BENCHMARKS: &[Bench] = &[
-    Bench { name: "fib_rec",     desc: "fibonacci(35) recursive", size: 35 },
-    Bench { name: "fib_iter",    desc: "fibonacci iter 50M      ", size: 50_000_000 },
-    Bench { name: "sieve",       desc: "sieve 100K             ", size: 100_000 },
-    Bench { name: "list_ops",    desc: "list push/sum 2M       ", size: 2_000_000 },
-    Bench { name: "bintree",     desc: "bintree depth 20       ", size: 20 },
-    Bench { name: "nbody",       desc: "nested loops(2000)     ", size: 2_000 },
-    Bench { name: "float_ops",   desc: "float ops 20M          ", size: 20_000_000 },
-    Bench { name: "strcat",      desc: "strcat x50000          ", size: 50_000 },
-    Bench { name: "collatz",     desc: "collatz(100K)          ", size: 100_000 },
-    Bench { name: "pow_mod",     desc: "pow mod 5M             ", size: 5_000_000 },
+    Bench { name: "fib_rec", desc: "fibonacci(35) recursive", size: 35, is_generic: false },
+    Bench { name: "fib_iter", desc: "fibonacci iter 50M      ", size: 50_000_000, is_generic: false },
+    Bench { name: "sieve", desc: "sieve 100K             ", size: 100_000, is_generic: true },
+    Bench { name: "list_ops", desc: "list push/sum 2M       ", size: 2_000_000, is_generic: false },
+    Bench { name: "bintree", desc: "bintree depth 20       ", size: 20, is_generic: false },
+    Bench { name: "nbody", desc: "nested loops(2000)     ", size: 2_000, is_generic: false },
+    Bench { name: "float_ops", desc: "float ops 20M          ", size: 20_000_000, is_generic: false },
+    Bench { name: "strcat", desc: "strcat x50000          ", size: 50_000, is_generic: false },
+    Bench { name: "collatz", desc: "collatz(100K)          ", size: 100_000, is_generic: false },
+    Bench { name: "pow_mod", desc: "pow mod 5M             ", size: 5_000_000, is_generic: false },
+    Bench { name: "gcd_bench", desc: "gcd(5M)                ", size: 5_000_000, is_generic: false },
+    Bench { name: "prime_count", desc: "prime check(500K)      ", size: 500_000, is_generic: false },
+    Bench { name: "sort", desc: "bubble sort 10K         ", size: 10_000, is_generic: true },
+    Bench { name: "map_ops", desc: "map bracket get/set 200K", size: 200_000, is_generic: false },
+    Bench { name: "mandelbrot", desc: "mandelbrot 1000        ", size: 1000, is_generic: false },
+    Bench { name: "spectral_norm", desc: "spectral norm 550      ", size: 550, is_generic: false },
+    Bench { name: "bit_count", desc: "bit popcount 50M       ", size: 50_000_000, is_generic: false },
+    Bench { name: "seq_fact", desc: "sequential fact 100M   ", size: 100_000_000, is_generic: false },
+    Bench { name: "string_build", desc: "string build x5000     ", size: 5_000, is_generic: false },
+    Bench { name: "map_access", desc: "map bracket acc 200K   ", size: 200_000, is_generic: false },
+    Bench { name: "struct_ops", desc: "struct field ops 20M   ", size: 20_000_000, is_generic: false },
+    Bench { name: "closure_sum", desc: "closure sum 50M        ", size: 50_000_000, is_generic: false },
+    Bench { name: "vec_add", desc: "vec add 100x500K       ", size: 500_000, is_generic: false },
+    Bench { name: "ackermann", desc: "ackermann(3,6)         ", size: 6, is_generic: false },
+    Bench { name: "quicksort", desc: "quicksort 2K           ", size: 2000, is_generic: true },
+    Bench { name: "matrix_mul", desc: "matrix mul 40x40 x50   ", size: 50, is_generic: false },
+    Bench { name: "binary_search", desc: "binary search 10K       ", size: 10_000, is_generic: true },
+    Bench { name: "random_gen", desc: "random LCG 50M         ", size: 50_000_000, is_generic: false },
+    Bench { name: "array_reverse", desc: "array reverse 1K x10K  ", size: 10_000, is_generic: false },
 ];
 
 struct LangResult {
@@ -40,8 +60,7 @@ fn main() -> Result<()> {
     for b in BENCHMARKS {
         let path = benches_dir.join("zs").join(format!("{}.zs", b.name));
         let t0 = Instant::now();
-        vm.import(b.name, path.to_str().context("invalid path")?)
-            .with_context(|| format!("import {}.zs", b.name))?;
+        vm.import(b.name, path.to_str().context("invalid path")?).with_context(|| format!("import {}.zs", b.name))?;
         println!("  compiled {}.zs ({:.0}ms)", b.name, t0.elapsed().as_secs_f64() * 1000.0);
     }
 
@@ -67,20 +86,37 @@ fn main() -> Result<()> {
 }
 
 fn run_zust(vm: &vm::Vm, b: &Bench) -> LangResult {
-    let fn_name = format!("{}::bench", b.name);
-    let compiled = match vm.get_fn(&fn_name, &[Type::I64]) {
-        Ok(c) => c,
-        Err(e) => return LangResult { exec_ms: 0.0, result: None, error: Some(format!("compile: {e}")) },
-    };
-    let bench_fn: extern "C" fn(i64) -> i64 = unsafe { std::mem::transmute(compiled.ptr()) };
+    if b.is_generic {
+        let fn_name = format!("{}::bench", b.name);
+        let compiled = match vm.get_fn_with_params(&fn_name, &[], &[Type::ConstInt(b.size)]) {
+            Ok(c) => c,
+            Err(e) => return LangResult { exec_ms: 0.0, result: None, error: Some(format!("compile: {e}")) },
+        };
+        let bench_fn: extern "C" fn() -> i64 = unsafe { std::mem::transmute(compiled.ptr()) };
 
-    bench_fn(1);
+        bench_fn();
 
-    let t0 = Instant::now();
-    let result = bench_fn(b.size);
-    let exec_ms = t0.elapsed().as_secs_f64() * 1000.0;
+        let t0 = Instant::now();
+        let result = bench_fn();
+        let exec_ms = t0.elapsed().as_secs_f64() * 1000.0;
 
-    LangResult { exec_ms, result: Some(result), error: None }
+        LangResult { exec_ms, result: Some(result), error: None }
+    } else {
+        let fn_name = format!("{}::bench", b.name);
+        let compiled = match vm.get_fn(&fn_name, &[Type::I64]) {
+            Ok(c) => c,
+            Err(e) => return LangResult { exec_ms: 0.0, result: None, error: Some(format!("compile: {e}")) },
+        };
+        let bench_fn: extern "C" fn(i64) -> i64 = unsafe { std::mem::transmute(compiled.ptr()) };
+
+        bench_fn(1);
+
+        let t0 = Instant::now();
+        let result = bench_fn(b.size);
+        let exec_ms = t0.elapsed().as_secs_f64() * 1000.0;
+
+        LangResult { exec_ms, result: Some(result), error: None }
+    }
 }
 
 fn measure_baseline(cmd: &str, dir: &PathBuf) -> Result<f64> {
@@ -119,7 +155,7 @@ fn run_script(cmd: &str, dir: &PathBuf, name: &str, size: i64, baseline_ms: f64)
                 let stdout = String::from_utf8_lossy(&out.stdout).trim().to_string();
                 match stdout.parse::<i64>() {
                     Ok(val) => LangResult { exec_ms, result: Some(val), error: None },
-                    Err(_) => LangResult { exec_ms, result: None, error: Some(format!("parse: {}", &stdout[..stdout.len().min(40)])) },
+                    Err(_) => LangResult { exec_ms, result: None, error: Some(format!("parse: {}", truncate_chars(&stdout, 40))) },
                 }
             } else {
                 let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
@@ -138,25 +174,41 @@ fn print_row(zs: &LangResult, lua: &LangResult, py: &LangResult) {
     print!("zust {}  lua {}  py {}", zs_str, lua_str, py_str);
 
     let mut notes = Vec::new();
-    if let Some(ref e) = zs.error { notes.push(format!("zust: {}", &e[..e.len().min(30)])); }
-    if let Some(ref e) = lua.error { notes.push(format!("lua: {}", &e[..e.len().min(30)])); }
-    if let Some(ref e) = py.error { notes.push(format!("py: {}", &e[..e.len().min(30)])); }
+    if let Some(ref e) = zs.error {
+        notes.push(format!("zust: {}", truncate_chars(e, 30)));
+    }
+    if let Some(ref e) = lua.error {
+        notes.push(format!("lua: {}", truncate_chars(e, 30)));
+    }
+    if let Some(ref e) = py.error {
+        notes.push(format!("py: {}", truncate_chars(e, 30)));
+    }
 
     if zs.error.is_none() && lua.error.is_none() && py.error.is_none() {
         let zr = zs.result.unwrap();
         let lr = lua.result.unwrap();
         let pr = py.result.unwrap();
 
-        if zr != lr { notes.push(format!("zs/lua: {}!={}", zr, lr)); }
-        if zr != pr { notes.push(format!("zs/py: {}!={}", zr, pr)); }
+        if zr != lr {
+            notes.push(format!("zs/lua: {}!={}", zr, lr));
+        }
+        if zr != pr {
+            notes.push(format!("zs/py: {}!={}", zr, pr));
+        }
 
         if zs.exec_ms > 0.0 {
             print!("  lua/zs {:4.1}x  py/zs {:4.1}x", lua.exec_ms / zs.exec_ms, py.exec_ms / zs.exec_ms);
         }
     }
 
-    if !notes.is_empty() { print!("  [{}]", notes.join(" | ")); }
+    if !notes.is_empty() {
+        print!("  [{}]", notes.join(" | "));
+    }
     println!();
+}
+
+fn truncate_chars(text: &str, max_chars: usize) -> String {
+    text.chars().take(max_chars).collect()
 }
 
 fn print_summary(results: &[(&Bench, LangResult, LangResult, LangResult)]) {
@@ -203,8 +255,13 @@ fn print_summary(results: &[(&Bench, LangResult, LangResult, LangResult)]) {
 }
 
 fn format_ms(ms: f64) -> String {
-    if ms < 0.01 { format!("{:.1}us", ms * 1000.0) }
-    else if ms < 1.0 { format!("{:.0}us", ms * 1000.0) }
-    else if ms < 1000.0 { format!("{:.0}ms", ms) }
-    else { format!("{:.1}s", ms / 1000.0) }
+    if ms < 0.01 {
+        format!("{:.1}us", ms * 1000.0)
+    } else if ms < 1.0 {
+        format!("{:.0}us", ms * 1000.0)
+    } else if ms < 1000.0 {
+        format!("{:.0}ms", ms)
+    } else {
+        format!("{:.1}s", ms / 1000.0)
+    }
 }

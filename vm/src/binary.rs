@@ -1,12 +1,25 @@
 use super::{JITRunTime, context::BuildContext};
 use cranelift::prelude::*;
-use cranelift_module::{DataDescription, Module};
 use dynamic::{Dynamic, Type};
 use parser::{BinaryOp, Expr};
 
 use anyhow::{Result, anyhow};
 
 impl JITRunTime {
+    fn strcat(&mut self, ctx: &mut BuildContext, left: Value, right: Value) -> Result<Value> {
+        let fn_id = self.strcat_fn.ok_or_else(|| anyhow!("VM strcat runtime is not registered"))?;
+        let fn_ref = self.get_fn_ref(ctx, fn_id);
+        let call_inst = ctx.builder.ins().call(fn_ref, &[left, right]);
+        Ok(ctx.builder.inst_results(call_inst)[0])
+    }
+
+    fn strcat_assign(&mut self, ctx: &mut BuildContext, left: Value, right: Value) -> Result<Value> {
+        let fn_id = self.strcat_assign_fn.ok_or_else(|| anyhow!("VM strcat assign runtime is not registered"))?;
+        let fn_ref = self.get_fn_ref(ctx, fn_id);
+        let call_inst = ctx.builder.ins().call(fn_ref, &[left, right]);
+        Ok(ctx.builder.inst_results(call_inst)[0])
+    }
+
     fn any_to_string(&mut self, ctx: &mut BuildContext, vt: (Value, Type)) -> Result<Value> {
         let value = self.convert(ctx, vt, Type::Any)?;
         self.call(ctx, self.get_method(&Type::Any, "to_string")?, vec![value]).map(|(v, _)| v)
@@ -26,15 +39,19 @@ impl JITRunTime {
         let Type::Struct { params: _, fields: _ } = ty else {
             return Err(anyhow!("不是结构体 {:?}", ty));
         };
-        let id = self.module.declare_anonymous_data(true, false)?;
-        let mut desc = DataDescription::new();
-        let ty_ptr = Box::into_raw(Box::new(ty.clone()));
-        desc.define((ty_ptr as i64).to_le_bytes().into());
-        self.module.define_data(id, &desc)?;
-        let ty_data = self.module.declare_data_in_func(id, &mut ctx.builder.func);
-        let ty_addr = ctx.builder.ins().global_value(crate::ptr_type(), ty_data);
-        let ty_ptr = ctx.builder.ins().load(crate::ptr_type(), MemFlags::new(), ty_addr, 0);
+        let ty_ptr = Self::type_ptr_const(ctx, ty);
         let fn_id = self.struct_from_ptr_fn.ok_or_else(|| anyhow!("VM struct Dynamic runtime is not registered"))?;
+        let fn_ref = self.get_fn_ref(ctx, fn_id);
+        let call_inst = ctx.builder.ins().call(fn_ref, &[base, ty_ptr]);
+        Ok(ctx.builder.inst_results(call_inst)[0])
+    }
+
+    fn array_to_dynamic(&mut self, ctx: &mut BuildContext, base: Value, ty: &Type) -> Result<Value> {
+        let Type::Array(_, _) = ty else {
+            return Err(anyhow!("不是数组 {:?}", ty));
+        };
+        let ty_ptr = Self::type_ptr_const(ctx, ty);
+        let fn_id = self.array_from_ptr_fn.ok_or_else(|| anyhow!("VM array Dynamic runtime is not registered"))?;
         let fn_ref = self.get_fn_ref(ctx, fn_id);
         let call_inst = ctx.builder.ins().call(fn_ref, &[base, ty_ptr]);
         Ok(ctx.builder.inst_results(call_inst)[0])
@@ -69,6 +86,8 @@ impl JITRunTime {
             if ty.is_any() {
                 if self.is_opaque_custom_ty(&vt.1) {
                     return Ok(vt.0);
+                } else if vt.1.is_array() {
+                    return self.array_to_dynamic(ctx, vt.0, &vt.1);
                 } else if vt.1.is_struct() {
                     return self.struct_to_dynamic(ctx, vt.0, &vt.1);
                 } else if vt.1.is_bool() {
@@ -86,12 +105,16 @@ impl JITRunTime {
                     return self.call(ctx, self.get_method(&Type::Any, "from_f64")?, vec![vt.0]).map(|(v, _)| v);
                 } else if vt.1.is_str() {
                     return Ok(vt.0);
+                } else if matches!(vt.1, Type::Map | Type::List(_) | Type::Iter) {
+                    return Ok(vt.0);
                 } else if matches!(vt.1, Type::Symbol { .. }) {
                     return Ok(vt.0);
                 }
             } else if vt.1.is_any() {
                 if ty.is_bool() {
                     return self.call(ctx, self.get_method(&Type::Any, "to_bool")?, vec![vt.0]).map(|(v, _)| v);
+                } else if ty.is_array() {
+                    return self.any_to_array(ctx, vt.0, &ty);
                 } else if ty.is_str() {
                     return self.call(ctx, self.get_method(&Type::Any, "to_string")?, vec![vt.0]).map(|(v, _)| v);
                 } else if ty.is_int() | ty.is_uint() {
@@ -216,6 +239,14 @@ impl JITRunTime {
             left.1.clone() + right.1.clone()
         }; //为了支持字符串的加法需要单独处理
         if ty.is_str() && op.is_add() {
+            if op == BinaryOp::AddAssign {
+                let left = self.convert(ctx, left, Type::Any)?;
+                let right = self.convert(ctx, right, Type::Any)?;
+                return Ok((self.strcat_assign(ctx, left, right)?, ty));
+            }
+            if left.1.is_str() && right.1.is_str() {
+                return Ok((self.strcat(ctx, left.0, right.0)?, Type::Str));
+            }
             let left = self.convert(ctx, left, Type::Any)?;
             let right = self.convert(ctx, right, Type::Any)?;
             let result = self.any_binary(ctx, left, op, right)?.0;
@@ -354,6 +385,23 @@ impl JITRunTime {
         let ty = left.1.clone() + right.get_type();
         let bool_imm = || right.as_bool().map(|value| if value { 1 } else { 0 });
         if ty.is_str() && op.is_add() {
+            if op == BinaryOp::AddAssign {
+                let left = self.convert(ctx, left, Type::Any)?;
+                let right_vt = ctx.get_const(&right).or_else(|_| {
+                    let idx = self.compiler.get_const(right.clone());
+                    self.get_const_value(ctx, idx)
+                })?;
+                let right = self.convert(ctx, right_vt, Type::Any)?;
+                return Ok((self.strcat_assign(ctx, left, right)?, ty));
+            }
+            if left.1.is_str() && right.is_str() {
+                let right_vt = ctx.get_const(&right).or_else(|_| {
+                    let idx = self.compiler.get_const(right.clone());
+                    self.get_const_value(ctx, idx)
+                })?;
+                let right = self.convert(ctx, right_vt, Type::Str)?;
+                return Ok((self.strcat(ctx, left.0, right)?, Type::Str));
+            }
             let left = self.convert(ctx, left, Type::Any)?;
             let right_vt = ctx.get_const(&right).or_else(|_| {
                 let idx = self.compiler.get_const(right.clone());

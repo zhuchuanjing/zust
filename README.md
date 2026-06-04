@@ -225,6 +225,10 @@ fn identity<T>(value: T) {
     value
 }
 
+fn const_value<N>() {
+    N
+}
+
 pub fn demo_closure() {
     let base = 10i32;
     let add_base = |value: i32| {
@@ -232,6 +236,10 @@ pub fn demo_closure() {
     };
 
     add_base(identity(5i32))
+}
+
+pub fn demo_const_generic() {
+    const_value::<4>()
 }
 
 // closures can be called immediately:

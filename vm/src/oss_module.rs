@@ -41,7 +41,5 @@ fn upload_bytes_result(config: Dynamic, object_name: Dynamic, bytes: Dynamic) ->
     Ok(map!("ok"=> true, "object_name"=> object_name, "oss_url"=> oss_url, "url"=> url))
 }
 
-pub const OSS_NATIVE: [(&str, &[Type], Type, *const u8); 2] = [
-    ("upload", &[Type::Any, Type::Any, Type::Any], Type::Any, oss_upload as *const u8),
-    ("signed_url", &[Type::Any, Type::Any], Type::Any, oss_signed_url as *const u8),
-];
+pub const OSS_NATIVE: [(&str, &[Type], Type, *const u8); 2] =
+    [("upload", &[Type::Any, Type::Any, Type::Any], Type::Any, oss_upload as *const u8), ("signed_url", &[Type::Any, Type::Any], Type::Any, oss_signed_url as *const u8)];

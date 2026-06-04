@@ -196,6 +196,7 @@ pub enum Dynamic {
     F32(f32), //默认浮点类型
     F64(f64),
     String(SmolStr),
+    StringBuf(String),
     Bytes(Vec<u8>),
     VecI8(MyVec<i8>),
     VecU16(MyVec<u16>),
@@ -228,7 +229,7 @@ impl PartialEq for Dynamic {
         match (self, other) {
             (Self::Null, Self::Null) => true,
             (Self::Bool(a), Self::Bool(b)) => a == b,
-            (Self::String(a), Self::String(b)) => a == b,
+            (a, b) if a.is_str() && b.is_str() => a.as_str() == b.as_str(),
             (Self::Bytes(a), Self::Bytes(b)) => a == b,
             // Integer types - compare as i64
             (Self::U8(a), Self::U8(b)) => a == b,
@@ -312,10 +313,8 @@ impl Ord for Dynamic {
             Ordering::Less
         } else if self.is_null() && other.is_null() {
             Ordering::Equal
-        } else if let Self::String(s1) = self
-            && let Self::String(s2) = other
-        {
-            s1.cmp(s2)
+        } else if self.is_str() && other.is_str() {
+            self.as_str().cmp(other.as_str())
         } else {
             Ordering::Equal
         }
@@ -435,6 +434,7 @@ impl TryFrom<Dynamic> for SmolStr {
     fn try_from(value: Dynamic) -> Result<Self, Self::Error> {
         match value {
             Dynamic::String(s) => Ok(s),
+            Dynamic::StringBuf(s) => Ok(s.into()),
             _ => Err(DynamicErr::TypeMismatch),
         }
     }
@@ -544,6 +544,7 @@ impl ToString for Dynamic {
             Self::F32(u) => u.to_string(),
             Self::F64(u) => u.to_string(),
             Self::String(s) => s.to_string(),
+            Self::StringBuf(s) => s.clone(),
             _ => {
                 let mut buf = String::new();
                 self.to_json(&mut buf);
@@ -664,6 +665,7 @@ impl Dynamic {
     pub fn as_str(&self) -> &str {
         match self {
             Dynamic::String(s) => s.as_str(),
+            Dynamic::StringBuf(s) => s.as_str(),
             _ => "",
         }
     }
@@ -886,6 +888,26 @@ impl Dynamic {
         }
     }
 
+    pub fn push_dynamic(&mut self, value: Dynamic) -> bool {
+        match self {
+            Self::List(list) => {
+                list.write().unwrap().push(value);
+                true
+            }
+            Self::Bytes(vec) => value.try_into().map(|value| vec.push(value)).is_ok(),
+            Self::VecI8(vec) => value.try_into().map(|value| vec.push(value)).is_ok(),
+            Self::VecU16(vec) => value.try_into().map(|value| vec.push(value)).is_ok(),
+            Self::VecI16(vec) => value.try_into().map(|value| vec.push(value)).is_ok(),
+            Self::VecU32(vec) => value.try_into().map(|value| vec.push(value)).is_ok(),
+            Self::VecI32(vec) => value.try_into().map(|value| vec.push(value)).is_ok(),
+            Self::VecF32(vec) => value.try_into().map(|value| vec.push(value)).is_ok(),
+            Self::VecU64(vec) => value.try_into().map(|value| vec.push(value)).is_ok(),
+            Self::VecI64(vec) => value.try_into().map(|value| vec.push(value)).is_ok(),
+            Self::VecF64(vec) => value.try_into().map(|value| vec.push(value)).is_ok(),
+            _ => false,
+        }
+    }
+
     pub fn pop(&mut self) -> Option<Dynamic> {
         match self {
             Self::List(list) => list.write().unwrap().pop(),
@@ -941,7 +963,7 @@ impl Dynamic {
             Self::U8(u) => Some(*u as i64),
             Self::U16(u) => Some(*u as i64),
             Self::U32(u) => Some(*u as i64),
-            Self::U64(u) => Some(*u as i64),
+            Self::U64(u) => i64::try_from(*u).ok(),
             Self::I8(i) => Some(*i as i64),
             Self::I16(i) => Some(*i as i64),
             Self::I32(i) => Some(*i as i64),
@@ -972,7 +994,7 @@ impl Dynamic {
     }
 
     pub fn is_str(&self) -> bool {
-        if let Self::String(_) = self { true } else { false }
+        if let Self::String(_) | Self::StringBuf(_) = self { true } else { false }
     }
 
     pub fn is_f64(&self) -> bool {
@@ -1009,6 +1031,7 @@ impl Dynamic {
             Self::I32(_) | Self::U32(_) | Self::F32(_) => 4,
             Self::I64(_) | Self::U64(_) | Self::F64(_) => 8,
             Self::String(s) => s.len(),
+            Self::StringBuf(s) => s.len(),
             Self::Bytes(bytes) => bytes.len(),
             Self::VecI8(vec) => vec.len(),
             Self::VecU16(vec) => vec.len(),
@@ -1041,6 +1064,7 @@ impl Dynamic {
     pub fn split(self, tag: &str) -> Self {
         match self {
             Self::String(s) => Self::list(s.split(tag).map(|p| Dynamic::from(p)).collect()),
+            Self::StringBuf(s) => Self::list(s.split(tag).map(|p| Dynamic::from(p)).collect()),
             _ => self,
         }
     }
@@ -1069,6 +1093,7 @@ impl Dynamic {
     pub fn len(&self) -> usize {
         match self {
             Self::String(value) => value.len(),
+            Self::StringBuf(value) => value.len(),
             Self::List(list) => list.read().unwrap().len(),
             Self::Bytes(bytes) => bytes.len(),
             Self::VecI8(vec) => vec.len(),
@@ -1105,13 +1130,21 @@ impl Dynamic {
             list.read().unwrap().iter().find(|l| l.as_str() == key).is_some()
         } else if let Self::String(s) = self {
             s.contains(key)
+        } else if let Self::StringBuf(s) = self {
+            s.contains(key)
         } else {
             false
         }
     }
 
     pub fn starts_with(&self, prefix: &str) -> bool {
-        if let Self::String(s) = self { s.starts_with(prefix) } else { false }
+        if let Self::String(s) = self {
+            s.starts_with(prefix)
+        } else if let Self::StringBuf(s) = self {
+            s.starts_with(prefix)
+        } else {
+            false
+        }
     }
 
     pub fn get_dynamic(&self, key: &str) -> Option<Dynamic> {
@@ -1371,10 +1404,28 @@ mod tests {
     fn string_add_keeps_concat_semantics() {
         let left = Dynamic::from("hello");
         let right = Dynamic::from(" world");
-        assert_eq!((left + right).as_str(), "hello world");
+        let joined = left + right;
+        assert!(matches!(joined, Dynamic::StringBuf(_)));
+        assert_eq!(joined.as_str(), "hello world");
 
         assert_eq!((Dynamic::from("level ") + Dynamic::I64(7)).as_str(), "level 7");
         assert_eq!((Dynamic::I64(7) + Dynamic::from(" days")).as_str(), "7 days");
+    }
+
+    #[test]
+    fn string_add_reuses_string_buf_after_first_concat() {
+        let mut value = Dynamic::from("a") + Dynamic::from("b");
+        assert!(matches!(value, Dynamic::StringBuf(_)));
+
+        value = value + Dynamic::from("c");
+        assert!(matches!(value, Dynamic::StringBuf(_)));
+        assert_eq!(value.as_str(), "abc");
+    }
+
+    #[test]
+    fn u64_as_int_does_not_wrap() {
+        assert_eq!(Dynamic::U64(i64::MAX as u64).as_int(), Some(i64::MAX));
+        assert_eq!(Dynamic::U64(i64::MAX as u64 + 1).as_int(), None);
     }
 }
 

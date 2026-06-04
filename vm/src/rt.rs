@@ -8,7 +8,7 @@ use crate::context::LocalVar;
 use super::{FnInfo, FnVariant, PTR_TYPE, context::BuildContext, get_type, ptr_type};
 use cranelift::prelude::*;
 use cranelift_jit::{JITBuilder, JITModule};
-use cranelift_module::{DataDescription, DataId, FuncId, Module};
+use cranelift_module::{FuncId, Module};
 
 use anyhow::{Result, anyhow};
 use smol_str::SmolStr;
@@ -25,13 +25,18 @@ pub struct JITRunTime {
     #[cfg(feature = "ir-disassembly")]
     pub ir_disassembly: BTreeMap<SmolStr, String>,
     pub module: JITModule,
-    pub consts: Vec<Option<DataId>>,
+    pub consts: Vec<Option<usize>>,
     pub(crate) scope_enter_fn: Option<FuncId>,
     pub(crate) scope_exit_void_fn: Option<FuncId>,
     pub(crate) scope_exit_dynamic_fn: Option<FuncId>,
     pub(crate) scope_exit_bytes_fn: Option<FuncId>,
     pub(crate) struct_alloc_fn: Option<FuncId>,
+    pub(crate) repeat_fill_fn: Option<FuncId>,
+    pub(crate) strcat_fn: Option<FuncId>,
+    pub(crate) strcat_assign_fn: Option<FuncId>,
     pub(crate) struct_from_ptr_fn: Option<FuncId>,
+    pub(crate) array_from_ptr_fn: Option<FuncId>,
+    pub(crate) array_to_ptr_fn: Option<FuncId>,
 }
 
 // TODO(memory): 函数调用期间为 VM 内部临时 Any/struct 分配引入 arena。
@@ -43,6 +48,7 @@ pub(crate) struct PendingFn {
     pub fn_id: FuncId,
     pub arg_tys: Vec<Type>,
     pub ret_ty: Type,
+    pub local_type_hints: Vec<Option<Type>>,
     pub body: Stmt,
 }
 
@@ -53,6 +59,11 @@ impl JITRunTime {
 
     fn stmt(kind: StmtKind) -> Stmt {
         Stmt::new(kind, Span::default())
+    }
+
+    pub(crate) fn type_ptr_const(ctx: &mut BuildContext, ty: &Type) -> Value {
+        let ty_ptr = Box::into_raw(Box::new(ty.clone()));
+        ctx.builder.ins().iconst(ptr_type(), ty_ptr as i64)
     }
 
     pub fn load(&mut self, code: Vec<u8>, arg_name: SmolStr) -> Result<(i64, Type)> {
@@ -100,25 +111,25 @@ impl JITRunTime {
         Ok((self.module.get_finalized_function(fn_info.get_id()?), fn_info.get_type()?))
     }
 
+    pub fn get_fn_ptr_with_params(&mut self, name: &str, arg_tys: &[Type], generic_args: &[Type]) -> Result<(*const u8, Type)> {
+        let main_id = self.get_id(name)?;
+        let fn_info = self.gen_fn_with_params(None, main_id, arg_tys, generic_args)?;
+        Ok((self.module.get_finalized_function(fn_info.get_id()?), fn_info.get_type()?))
+    }
+
     pub fn get_const_value(&mut self, ctx: &mut BuildContext, idx: usize) -> Result<(Value, Type)> {
         if self.consts.len() < idx + 1 {
             self.consts.resize(idx + 1, None);
         }
-        let id = if let Some(id) = self.consts.get(idx).cloned().unwrap_or(None) {
-            id
+        let ptr = if let Some(ptr) = self.consts.get(idx).cloned().unwrap_or(None) {
+            ptr
         } else {
-            let id = self.module.declare_anonymous_data(true, false)?;
-            let mut desc = DataDescription::new();
             let c = Box::new(self.compiler.consts[idx].deep_clone()); //深度拷贝 避免常量被污染
-            let ptr = Box::into_raw(c);
-            desc.define((ptr as i64).to_le_bytes().into());
-            self.module.define_data(id, &desc)?;
-            self.consts[idx] = Some(id);
-            id
+            let ptr = Box::into_raw(c) as usize;
+            self.consts[idx] = Some(ptr);
+            ptr
         };
-        let c = self.module.declare_data_in_func(id, &mut ctx.builder.func);
-        let addr = ctx.builder.ins().global_value(ptr_type(), c);
-        let value = ctx.builder.ins().load(ptr_type(), MemFlags::new(), addr, 0); //需要生成副本 避免被释放
+        let value = ctx.builder.ins().iconst(ptr_type(), ptr as i64); //需要生成副本 避免被释放
         Ok((self.call(ctx, self.get_method(&Type::Any, "clone")?, vec![value])?.0, Type::Any))
     }
 
@@ -190,7 +201,12 @@ impl JITRunTime {
             scope_exit_dynamic_fn: None,
             scope_exit_bytes_fn: None,
             struct_alloc_fn: None,
+            repeat_fill_fn: None,
+            strcat_fn: None,
+            strcat_assign_fn: None,
             struct_from_ptr_fn: None,
+            array_from_ptr_fn: None,
+            array_to_ptr_fn: None,
         }
     }
 
@@ -283,7 +299,7 @@ impl JITRunTime {
             return Ok(());
         };
 
-        if ret_ty.is_any() || ret_ty.is_str() || matches!(ret_ty, Type::Map | Type::List | Type::Iter) {
+        if ret_ty.is_any() || ret_ty.is_str() || matches!(ret_ty, Type::Map | Type::List(_) | Type::Iter) {
             let value = self.convert(ctx, (value, value_ty), Type::Any)?;
             let fn_id = self.scope_exit_dynamic_fn.ok_or_else(|| anyhow!("VM dynamic return runtime is not registered"))?;
             let fn_ref = self.get_fn_ref(ctx, fn_id);
@@ -443,6 +459,7 @@ impl JITRunTime {
         if elem_ty.is_struct() || elem_ty.is_array() {
             self.copy_vec_element(ctx, addr, value, elem_ty);
         } else {
+            let value = LocalVar::normalize_for_var(ctx, value, elem_ty);
             ctx.builder.ins().store(MemFlags::trusted(), value, addr, 0);
         }
         Ok(())
@@ -452,11 +469,35 @@ impl JITRunTime {
         let elem_ty = value.1.clone();
         let array_ty = Type::Array(std::rc::Rc::new(elem_ty.clone()), len);
         let base = self.struct_alloc(ctx, &array_ty)?;
+        if let Some(pattern) = self.repeat_fill_pattern(ctx, value.0, &elem_ty) {
+            let fn_id = self.repeat_fill_fn.ok_or_else(|| anyhow!("VM repeat fill runtime is not registered"))?;
+            let fn_ref = self.get_fn_ref(ctx, fn_id);
+            let width = ctx.builder.ins().iconst(types::I64, elem_ty.storage_width() as i64);
+            let len = ctx.builder.ins().iconst(types::I64, len as i64);
+            ctx.builder.ins().call(fn_ref, &[base, pattern, width, len]);
+            return Ok((base, array_ty));
+        }
         for idx in 0..len {
             let idx = (ctx.builder.ins().iconst(types::I64, idx as i64), Type::I64);
             self.store_array_index(ctx, base, idx, &elem_ty, value.clone())?;
         }
         Ok((base, array_ty))
+    }
+
+    fn repeat_fill_pattern(&mut self, ctx: &mut BuildContext, value: Value, ty: &Type) -> Option<Value> {
+        if matches!(ty, Type::Bool) || ty.is_int() || ty.is_uint() {
+            return Some(if ty.storage_width() < 8 { ctx.builder.ins().uextend(types::I64, value) } else { value });
+        }
+        if ty.is_f32() {
+            let flags = MemFlags::new().with_endianness(cranelift::codegen::ir::Endianness::Little);
+            let bits = ctx.builder.ins().bitcast(types::I32, flags, value);
+            return Some(ctx.builder.ins().uextend(types::I64, bits));
+        }
+        if ty.is_f64() {
+            let flags = MemFlags::new().with_endianness(cranelift::codegen::ir::Endianness::Little);
+            return Some(ctx.builder.ins().bitcast(types::I64, flags, value));
+        }
+        None
     }
 
     fn init_array_from_items(&mut self, ctx: &mut BuildContext, items: &[Expr], ty: &Type) -> Result<Value> {
@@ -472,6 +513,18 @@ impl JITRunTime {
             let idx = (ctx.builder.ins().iconst(types::I64, idx as i64), Type::I64);
             self.store_array_index(ctx, base, idx, elem_ty, value)?;
         }
+        Ok(base)
+    }
+
+    pub(crate) fn any_to_array(&mut self, ctx: &mut BuildContext, value: Value, ty: &Type) -> Result<Value> {
+        let Type::Array(_, _) = ty else {
+            return Err(anyhow!("not an array type: {:?}", ty));
+        };
+        let base = self.struct_alloc(ctx, ty)?;
+        let ty_ptr = Self::type_ptr_const(ctx, ty);
+        let fn_id = self.array_to_ptr_fn.ok_or_else(|| anyhow!("VM array assignment runtime is not registered"))?;
+        let fn_ref = self.get_fn_ref(ctx, fn_id);
+        ctx.builder.ins().call(fn_ref, &[base, value, ty_ptr]);
         Ok(base)
     }
 
@@ -511,6 +564,7 @@ impl JITRunTime {
         if elem_ty.is_struct() {
             self.copy_vec_element(ctx, addr, value, elem_ty);
         } else {
+            let value = LocalVar::normalize_for_var(ctx, value, elem_ty);
             ctx.builder.ins().store(MemFlags::trusted(), value, addr, 0);
         }
         Ok(())
@@ -705,6 +759,14 @@ impl JITRunTime {
                 let right_value = right.clone().value()?;
                 if let Some(idx) = right_value.as_int() {
                     let idx = ctx.builder.ins().iconst(types::I64, idx);
+                    if let Type::List(elem_ty) = &left.1
+                        && let Some((fn_name, value_ty)) = Self::list_set_idx_shortcut(elem_ty)
+                    {
+                        let stored = self.convert(ctx, value.clone(), value_ty.clone())?;
+                        let set_idx_fn = self.get_fn(self.get_id(fn_name)?, &[Type::Any, Type::I64, value_ty])?;
+                        self.call_for_side_effect(ctx, set_idx_fn, vec![left.0, idx, stored])?;
+                        return Ok(value);
+                    }
                     let f = self.get_method(&left.1, "set_idx")?;
                     let args = self.adjust_args(ctx, vec![left, (idx, Type::I64), value.clone()], f.arg_tys()?)?;
                     self.call_for_side_effect(ctx, f, args)?;
@@ -721,6 +783,15 @@ impl JITRunTime {
                     let args = self.adjust_args(ctx, vec![left, right, value.clone()], f.arg_tys()?)?;
                     self.call_for_side_effect(ctx, f, args)?;
                 } else {
+                    if let Type::List(elem_ty) = &left.1
+                        && let Some((fn_name, value_ty)) = Self::list_set_idx_shortcut(elem_ty)
+                    {
+                        let idx = self.convert(ctx, right.clone(), Type::I64)?;
+                        let stored = self.convert(ctx, value.clone(), value_ty.clone())?;
+                        let set_idx_fn = self.get_fn(self.get_id(fn_name)?, &[Type::Any, Type::I64, value_ty])?;
+                        self.call_for_side_effect(ctx, set_idx_fn, vec![left.0, idx, stored])?;
+                        return Ok(value);
+                    }
                     let f = self.get_method(&left.1, "set_idx")?;
                     let args = self.adjust_args(ctx, vec![left, right, value.clone()], f.arg_tys()?)?;
                     self.call_for_side_effect(ctx, f, args)?;
@@ -734,9 +805,92 @@ impl JITRunTime {
 
     fn assignment_target_ty(&mut self, ctx: &mut BuildContext, left: &Expr) -> Option<Type> {
         if let ExprKind::Var(idx) = &left.kind {
-            return ctx.get_var_ty(*idx).filter(|ty| !ty.is_any());
+            return ctx.get_var_ty(*idx).filter(|ty| !ty.is_any()).or_else(|| ctx.local_type_hint(*idx));
         }
         None
+    }
+
+    fn empty_typed_list(ty: &Type) -> Option<Dynamic> {
+        let Type::List(elem_ty) = ty else {
+            return None;
+        };
+        match elem_ty.as_ref() {
+            Type::Bool | Type::U8 => Some(Dynamic::list(Vec::new())),
+            Type::I8 => Some(Dynamic::VecI8(Default::default())),
+            Type::U16 => Some(Dynamic::VecU16(Default::default())),
+            Type::I16 => Some(Dynamic::VecI16(Default::default())),
+            Type::U32 => Some(Dynamic::VecU32(Default::default())),
+            Type::I32 => Some(Dynamic::VecI32(Default::default())),
+            Type::F32 => Some(Dynamic::VecF32(Default::default())),
+            Type::U64 => Some(Dynamic::VecU64(Vec::new())),
+            Type::I64 => Some(Dynamic::VecI64(Vec::new())),
+            Type::F64 => Some(Dynamic::VecF64(Vec::new())),
+            Type::Str => Some(Dynamic::list(Vec::new())),
+            _ => None,
+        }
+    }
+
+    fn list_push_shortcut(elem_ty: &Type) -> Option<(&'static str, Type)> {
+        match elem_ty {
+            Type::Bool => Some(("Any::push_bool", Type::Bool)),
+            Type::U8 => Some(("Any::push_u8", Type::U8)),
+            Type::I8 => Some(("Any::push_i8", Type::I8)),
+            Type::U16 => Some(("Any::push_u16", Type::U16)),
+            Type::I16 => Some(("Any::push_i16", Type::I16)),
+            Type::U32 => Some(("Any::push_u32", Type::U32)),
+            Type::I32 => Some(("Any::push_i32", Type::I32)),
+            Type::F32 => Some(("Any::push_f32", Type::F32)),
+            Type::U64 => Some(("Any::push_u64", Type::U64)),
+            Type::I64 => Some(("Any::push_i64", Type::I64)),
+            Type::F64 => Some(("Any::push_f64", Type::F64)),
+            Type::Str => Some(("Any::push_str", Type::Str)),
+            _ => None,
+        }
+    }
+
+    fn list_get_idx_shortcut(elem_ty: &Type) -> Option<(&'static str, Type)> {
+        match elem_ty {
+            Type::Bool => Some(("Any::get_idx_bool", Type::Bool)),
+            Type::U8 => Some(("Any::get_idx_u8", Type::U8)),
+            Type::I8 => Some(("Any::get_idx_i8", Type::I8)),
+            Type::U16 => Some(("Any::get_idx_u16", Type::U16)),
+            Type::I16 => Some(("Any::get_idx_i16", Type::I16)),
+            Type::U32 => Some(("Any::get_idx_u32", Type::U32)),
+            Type::I32 => Some(("Any::get_idx_i32", Type::I32)),
+            Type::F32 => Some(("Any::get_idx_f32", Type::F32)),
+            Type::U64 => Some(("Any::get_idx_u64", Type::U64)),
+            Type::I64 => Some(("Any::get_idx_i64", Type::I64)),
+            Type::F64 => Some(("Any::get_idx_f64", Type::F64)),
+            Type::Str => Some(("Any::get_idx_str", Type::Str)),
+            _ => None,
+        }
+    }
+
+    fn list_set_idx_shortcut(elem_ty: &Type) -> Option<(&'static str, Type)> {
+        match elem_ty {
+            Type::Bool => Some(("Any::set_idx_bool", Type::Bool)),
+            Type::U8 => Some(("Any::set_idx_u8", Type::U8)),
+            Type::I8 => Some(("Any::set_idx_i8", Type::I8)),
+            Type::U16 => Some(("Any::set_idx_u16", Type::U16)),
+            Type::I16 => Some(("Any::set_idx_i16", Type::I16)),
+            Type::U32 => Some(("Any::set_idx_u32", Type::U32)),
+            Type::I32 => Some(("Any::set_idx_i32", Type::I32)),
+            Type::F32 => Some(("Any::set_idx_f32", Type::F32)),
+            Type::U64 => Some(("Any::set_idx_u64", Type::U64)),
+            Type::I64 => Some(("Any::set_idx_i64", Type::I64)),
+            Type::F64 => Some(("Any::set_idx_f64", Type::F64)),
+            Type::Str => Some(("Any::set_idx_str", Type::Str)),
+            _ => None,
+        }
+    }
+
+    fn expr_is_empty_list(&self, expr: &Expr) -> bool {
+        match &expr.kind {
+            ExprKind::Value(value) => value.is_list() && value.len() == 0,
+            ExprKind::Const(idx) => self.compiler.consts.get(*idx).is_some_and(|value| value.is_list() && value.len() == 0),
+            ExprKind::Typed { value, .. } => self.expr_is_empty_list(value),
+            _ => false,
+        }
     }
 
     fn closure_value(&self, ctx: &mut BuildContext, id: u32) -> Result<LocalVar> {
@@ -763,6 +917,25 @@ impl JITRunTime {
         }
         if let Some(captures) = &capture_values {
             args.extend(captures.iter().cloned());
+        }
+        if let [list, value] = args.as_slice()
+            && fn_name.as_str() == "Any::push"
+            && let Type::List(elem_ty) = &list.1
+            && let Some((fn_name, value_ty)) = Self::list_push_shortcut(elem_ty)
+        {
+            let value = self.convert(ctx, (value.0, value.1.clone()), value_ty.clone())?;
+            let push_fn = self.get_fn(self.get_id(fn_name)?, &[Type::Any, value_ty])?;
+            self.call_for_side_effect(ctx, push_fn, vec![list.0, value])?;
+            return Ok(LocalVar::None);
+        }
+        if let [list, idx] = args.as_slice()
+            && fn_name.as_str() == "Any::get_idx"
+            && let Type::List(elem_ty) = &list.1
+            && let Some((fn_name, _ret_ty)) = Self::list_get_idx_shortcut(elem_ty)
+        {
+            let idx = self.convert(ctx, (idx.0, idx.1.clone()), Type::I64)?;
+            let get_idx_fn = self.get_fn(self.get_id(fn_name)?, &[Type::Any, Type::I64])?;
+            return self.call(ctx, get_idx_fn, vec![list.0, idx]).map(|value| value.into());
         }
         if fn_name.as_str().ends_with("Vec::swap")
             && let Some((base, vec_ty)) = args.first().cloned()
@@ -805,6 +978,14 @@ impl JITRunTime {
     }
 
     fn eval_with_expected(&mut self, ctx: &mut BuildContext, expr: &Expr, expected: Option<&Type>) -> Result<LocalVar> {
+        if let Some(ty) = expected
+            && self.expr_is_empty_list(expr)
+            && let Some(value) = Self::empty_typed_list(ty)
+        {
+            let idx = self.compiler.get_const(value);
+            let (val, _) = self.get_const_value(ctx, idx)?;
+            return Ok(LocalVar::Value { val, ty: ty.clone() });
+        }
         match &expr.kind {
             ExprKind::Value(v) => Ok(ctx.get_const(v)?.into()),
             ExprKind::Var(idx) => {

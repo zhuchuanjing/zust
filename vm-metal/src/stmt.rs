@@ -191,6 +191,7 @@ impl MetalCompiler {
                 self.collect_missing_assignments_expr(right, out);
             }
             ExprKind::Unary { value, .. } | ExprKind::Typed { value, .. } | ExprKind::Repeat { value, .. } => self.collect_missing_assignments_expr(value, out),
+            ExprKind::Generic { obj, .. } => self.collect_missing_assignments_expr(obj, out),
             ExprKind::TypedMethod { obj, .. } => self.collect_missing_assignments_expr(obj, out),
             ExprKind::Call { obj, params } => {
                 self.collect_missing_assignments_expr(obj, out);

@@ -1,12 +1,13 @@
 use super::FnVariant;
 use crate::JITRunTime;
-use crate::memory::{alloc_dynamic, alloc_struct_bytes, owns_dynamic_ptr};
+use crate::memory::{alloc_dynamic, alloc_struct_bytes};
 use anyhow::Result;
 use cranelift::prelude::AbiParam;
 use cranelift_module::{Linkage, Module};
 use dynamic::{Dynamic, Type};
 use parser::{BinaryOp, Expr, ExprKind, Span};
 use rand::RngExt;
+use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::sync::{Mutex, Weak};
 
@@ -124,29 +125,28 @@ pub(crate) extern "C" fn strcat_assign(left: *mut Dynamic, right: *const Dynamic
     if left.is_null() {
         return strcat(left, right);
     }
-    if !owns_dynamic_ptr(left) {
-        return strcat(left, right);
-    }
     let suffix = if right.is_null() {
-        String::new()
+        Cow::Borrowed("")
+    } else if std::ptr::eq(left as *const Dynamic, right) {
+        Cow::Owned(unsafe { (&*right).to_string() })
     } else {
         let right = unsafe { &*right };
-        if right.is_str() { right.as_str().to_string() } else { right.to_string() }
+        if right.is_str() { Cow::Borrowed(right.as_str()) } else { Cow::Owned(right.to_string()) }
     };
     unsafe {
         match &mut *left {
-            Dynamic::StringBuf(text) => text.push_str(&suffix),
+            Dynamic::StringBuf(text) => text.push_str(suffix.as_ref()),
             Dynamic::String(text) => {
                 let mut out = String::with_capacity(text.len() + suffix.len());
                 out.push_str(text.as_str());
-                out.push_str(&suffix);
+                out.push_str(suffix.as_ref());
                 *left = Dynamic::StringBuf(out);
             }
             value => {
                 let prefix = value.to_string();
                 let mut out = String::with_capacity(prefix.len() + suffix.len());
                 out.push_str(&prefix);
-                out.push_str(&suffix);
+                out.push_str(suffix.as_ref());
                 *value = Dynamic::StringBuf(out);
             }
         }

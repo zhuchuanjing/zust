@@ -51,13 +51,18 @@ struct LangResult {
 
 fn main() -> Result<()> {
     let benches_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let filters: Vec<String> = std::env::args().skip(1).collect();
+    let selected: Vec<&Bench> = BENCHMARKS.iter().filter(|bench| filters.is_empty() || filters.iter().any(|filter| bench.name.contains(filter) || bench.desc.contains(filter))).collect();
+    if selected.is_empty() {
+        anyhow::bail!("no benchmark matched filters: {}", filters.join(", "));
+    }
 
     print!("\nloading Zust VM...");
     let t0 = Instant::now();
     let vm = vm::Vm::with_all()?;
     println!(" {:.0}ms", t0.elapsed().as_secs_f64() * 1000.0);
 
-    for b in BENCHMARKS {
+    for b in &selected {
         let path = benches_dir.join("zs").join(format!("{}.zs", b.name));
         let t0 = Instant::now();
         vm.import(b.name, path.to_str().context("invalid path")?).with_context(|| format!("import {}.zs", b.name))?;
@@ -70,7 +75,7 @@ fn main() -> Result<()> {
 
     let mut all: Vec<(&Bench, LangResult, LangResult, LangResult)> = Vec::new();
 
-    for b in BENCHMARKS {
+    for b in selected {
         print!("{:28} ", b.desc.trim());
 
         let zs = run_zust(&vm, b);

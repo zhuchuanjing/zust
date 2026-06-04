@@ -301,7 +301,16 @@ impl SpirvCompiler {
         let saved_state = self.compiler.take_local_state();
         let compiled_body = self.compiler.compile_fn(&user_fn.arg_names, &mut compile_tys, body, &mut Capture::default());
         self.compiler.restore_local_state(saved_state);
-        Ok((generic_args.to_vec(), compile_tys.into_iter().map(|ty| self.resolve_type(&ty)).collect(), ret_ty, Stmt::new(StmtKind::Block(compiled_body?), Span::default())))
+        let body = Stmt::new(StmtKind::Block(compiled_body?), Span::default());
+        let ret_ty = if ret_ty.is_any() {
+            let saved_state = self.compiler.take_local_state();
+            let inferred = self.compiler.infer_stmt(&body);
+            self.compiler.restore_local_state(saved_state);
+            self.resolve_type(&self.compiler.symbols.get_type(&inferred?)?)
+        } else {
+            ret_ty
+        };
+        Ok((generic_args.to_vec(), compile_tys.into_iter().map(|ty| self.resolve_type(&ty)).collect(), ret_ty, body))
     }
 
     pub(crate) fn clear_statement_temps(&mut self) {

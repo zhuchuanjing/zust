@@ -82,12 +82,35 @@ impl Compiler {
 
     fn for_pattern_ty(&mut self, range: &Expr) -> Result<Type> {
         if matches!(range.kind, ExprKind::Range { .. }) {
-            return self.infer_expr(range);
+            return self.infer_range_expr(range);
         }
         Ok(match self.infer_expr(range)? {
             Type::Array(elem_ty, _) | Type::Vec(elem_ty, _) | Type::List(elem_ty) => elem_ty.as_ref().clone(),
             _ => Type::Any,
         })
+    }
+
+    fn infer_range_expr(&mut self, range: &Expr) -> Result<Type> {
+        let ExprKind::Range { start, stop, .. } = &range.kind else {
+            return self.infer_expr(range);
+        };
+        let start_ty = self.infer_expr(start)?;
+        let stop_ty = self.infer_expr(stop)?;
+        Ok(Self::merge_range_bound_types(start_ty, stop_ty))
+    }
+
+    fn merge_range_bound_types(start_ty: Type, stop_ty: Type) -> Type {
+        if start_ty.is_any() {
+            stop_ty
+        } else if stop_ty.is_any() {
+            start_ty
+        } else if start_ty == Type::I32 && stop_ty.is_uint() {
+            stop_ty
+        } else if stop_ty == Type::I32 && start_ty.is_uint() {
+            start_ty
+        } else {
+            start_ty + stop_ty
+        }
     }
 
     fn merge_return_type(span: Span, left: Option<Type>, right: Type) -> Result<Type> {
@@ -412,12 +435,38 @@ impl Compiler {
                 Ok(ty)
             }
             ExprKind::Call { obj, params } => {
-                if let ExprKind::AssocId { id, params: generic_args } = &obj.kind {
+                if let ExprKind::Assoc { ty, name } = &obj.kind {
+                    let base_name = match ty {
+                        Type::Ident { name, .. } => name.clone(),
+                        Type::Symbol { id, .. } => self.symbols.get_symbol(*id)?.0.clone(),
+                        _ => return Ok(Type::Any),
+                    };
+                    let id = self.symbols.get_id(&format!("{}::{}", base_name, name))?;
+                    let generic_args = match ty {
+                        Type::Ident { params, .. } | Type::Symbol { params, .. } => params.iter().map(|param| self.symbols.get_type(param).unwrap_or_else(|_| param.clone())).collect::<Vec<_>>(),
+                        _ => Vec::new(),
+                    };
+                    let mut args = Vec::new();
+                    for p in params {
+                        args.push(self.infer_expr(p)?);
+                    }
+                    self.infer_fn_with_params(id, &args, &generic_args)
+                } else if let ExprKind::AssocId { id, params: generic_args } = &obj.kind {
                     let mut args = Vec::new();
                     for p in params {
                         args.push(self.infer_expr(p)?);
                     }
                     self.infer_fn_with_params(*id, &args, generic_args)
+                } else if let ExprKind::Generic { obj, params: generic_args } = &obj.kind {
+                    let Type::Symbol { id, .. } = self.infer_expr(obj)? else {
+                        return Ok(Type::Any);
+                    };
+                    let generic_args = generic_args.iter().map(|param| self.symbols.get_type(param).unwrap_or_else(|_| param.clone())).collect::<Vec<_>>();
+                    let mut args = Vec::new();
+                    for p in params {
+                        args.push(self.infer_expr(p)?);
+                    }
+                    self.infer_fn_with_params(id, &args, &generic_args)
                 } else if let ExprKind::TypedMethod { obj: target, ty, name } = &obj.kind {
                     let base_name = match ty {
                         Type::Ident { name, .. } => name.clone(),
@@ -551,13 +600,7 @@ impl Compiler {
             ExprKind::Range { start, stop, .. } => {
                 let start_ty = self.infer_expr(start)?;
                 let stop_ty = self.infer_expr(stop)?;
-                Ok(if start_ty.is_any() {
-                    stop_ty
-                } else if stop_ty.is_any() {
-                    start_ty
-                } else {
-                    start_ty + stop_ty
-                })
+                Ok(Self::merge_range_bound_types(start_ty, stop_ty))
             }
             _ => Ok(Type::Any),
         }

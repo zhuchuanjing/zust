@@ -210,7 +210,6 @@ fn check_code_with_lsp_externs(name: &str, code: Vec<u8>, source_path: Option<&P
 }
 
 fn register_lsp_imports(compiler: &mut Compiler, stmts: &[Stmt], source_path: Option<&Path>) -> Option<CompilerDiagnostic> {
-    let mut visited = BTreeSet::new();
     for stmt in stmts {
         let Some((module, path)) = lsp_import_decl(stmt) else {
             continue;
@@ -218,86 +217,12 @@ fn register_lsp_imports(compiler: &mut Compiler, stmts: &[Stmt], source_path: Op
         if !compiler.symbols.symbol(&module).is_empty() {
             continue;
         }
-        let resolved =
-            resolve_lsp_import_path(&path, source_path).map_err(|err| err.to_string()).and_then(|path| register_lsp_import_declarations(compiler, &module, &path, &mut visited).map_err(|err| format!("{err:#}")));
+        let resolved = resolve_lsp_import_path(&path, source_path).map_err(|err| err.to_string()).and_then(|path| compiler.import_file(&module, &path).map(|_| ()).map_err(|err| format!("{err:#}")));
         if let Err(message) = resolved {
             return Some(CompilerDiagnostic { message: format!("导入 {module} 失败：{message}"), span: stmt.span });
         }
     }
     None
-}
-
-fn register_lsp_import_declarations(compiler: &mut Compiler, module: &str, path: &Path, visited: &mut BTreeSet<PathBuf>) -> std::result::Result<(), String> {
-    let canonical = std::fs::canonicalize(path).map_err(|err| err.to_string())?;
-    if !visited.insert(canonical.clone()) {
-        return Ok(());
-    }
-    let code = std::fs::read(&canonical).map_err(|err| err.to_string())?;
-    let stmts = Compiler::parse_code(code).map_err(|err| format!("{err:#}"))?;
-
-    compiler.symbols.add_module(module.into());
-    for stmt in &stmts {
-        register_lsp_import_decl_symbol(compiler, module, stmt);
-    }
-    compiler.symbols.pop_module();
-    Ok(())
-}
-
-fn register_lsp_import_decl_symbol(compiler: &mut Compiler, module: &str, stmt: &Stmt) {
-    match &stmt.kind {
-        StmtKind::Fn { name, args, is_pub, .. } if *is_pub => {
-            let (ty, _) = Type::from_args(args.clone());
-            let _ = compiler.symbols.add_to_module(module, name.clone(), Symbol::Native(ty));
-        }
-        StmtKind::Struct { name, def, is_pub } if *is_pub => {
-            let _ = compiler.symbols.add_to_module(module, name.clone(), Symbol::Struct(def.clone(), true));
-        }
-        StmtKind::Static { name, ty, is_pub, .. } if *is_pub => {
-            let _ = compiler.symbols.add_to_module(module, name.clone(), Symbol::Static { value: None, ty: ty.clone(), is_pub: true });
-        }
-        StmtKind::Const { name, ty, is_pub, .. } if *is_pub => {
-            let _ = compiler.symbols.add_to_module(module, name.clone(), Symbol::Static { value: None, ty: ty.clone(), is_pub: true });
-        }
-        StmtKind::Impl { target, body } => {
-            register_lsp_import_impl_symbols(compiler, module, target, body);
-        }
-        _ => {}
-    }
-}
-
-fn register_lsp_import_impl_symbols(compiler: &mut Compiler, module: &str, target: &Type, body: &Stmt) {
-    let Some(target_name) = lsp_impl_target_name(target) else {
-        return;
-    };
-    let StmtKind::Block(fns) = &body.kind else {
-        return;
-    };
-    let struct_id = compiler.symbols.get_id(&format!("{module}::{target_name}")).ok();
-    for stmt in fns {
-        let StmtKind::Fn { name, args, is_pub, .. } = &stmt.kind else {
-            continue;
-        };
-        if !*is_pub {
-            continue;
-        }
-        let (ty, _) = Type::from_args(args.clone());
-        let Ok(fn_id) = compiler.symbols.add_to_module(module, format!("{target_name}::{name}").into(), Symbol::Native(ty)) else {
-            continue;
-        };
-        if let Some(struct_id) = struct_id
-            && let Some((_, Symbol::Struct(struct_ty, _))) = compiler.symbols.get_symbol_mut(struct_id)
-        {
-            let _ = struct_ty.add_field(name.clone(), Type::Symbol { id: fn_id, params: Vec::new() });
-        }
-    }
-}
-
-fn lsp_impl_target_name(target: &Type) -> Option<String> {
-    match target {
-        Type::Ident { name, .. } => Some(name.to_string()),
-        Type::Symbol { id, .. } => Some(id.to_string()),
-        _ => None,
-    }
 }
 
 fn lsp_import_decl(stmt: &Stmt) -> Option<(String, String)> {

@@ -30,6 +30,7 @@ pub struct Compiler {
     pub consts: Vec<Dynamic>,
     names: Vec<SmolStr>,
     list_elem_states: Vec<Option<ListElemState>>,
+    arg_counts: Vec<usize>,
     fns: BTreeMap<u32, Vec<(Vec<Type>, Vec<Type>, FnInferRet)>>,
     local_type_hints: BTreeMap<u32, Vec<(Vec<Type>, Vec<Type>, Vec<Option<Type>>)>>,
     infer_stack: Vec<(u32, Vec<Type>, Vec<Type>)>,
@@ -182,6 +183,43 @@ mod tests {
         let loop_index = compiler.symbols.get_id("compiler_return_check_args::loop_index")?;
         assert_eq!(compiler.infer_fn(loop_index, &[Type::I64, Type::I64])?, Type::I64);
 
+        Ok(())
+    }
+
+    #[test]
+    fn return_check_infers_raw_assoc_calls_before_body_compile() -> anyhow::Result<()> {
+        let mut compiler = Compiler::new();
+        compiler.import_code(
+            "compiler_return_check_assoc",
+            br#"
+            pub struct Box<N> {
+                data: [u32; N],
+            }
+
+            impl Box<N> {
+                pub fn make() {
+                    Box<N>{ data: [0u32; N] }
+                }
+
+                pub fn ok(self: Box<N>) {
+                    true
+                }
+            }
+
+            pub fn main() {
+                let item = Box<2>::make();
+                if item.ok() {
+                    1i32
+                } else {
+                    0i32
+                }
+            }
+            "#
+            .to_vec(),
+        )?;
+
+        let main_id = compiler.symbols.get_id("compiler_return_check_assoc::main")?;
+        assert_eq!(compiler.infer_fn(main_id, &[])?, Type::I32);
         Ok(())
     }
 
@@ -706,17 +744,19 @@ impl Compiler {
         self.names.clear();
         self.tys.clear();
         self.list_elem_states.clear();
+        self.arg_counts.clear();
     }
 
-    pub fn take_local_state(&mut self) -> (Vec<usize>, Vec<SmolStr>, Vec<Type>, Vec<Option<ListElemState>>) {
-        (std::mem::take(&mut self.frames), std::mem::take(&mut self.names), std::mem::take(&mut self.tys), std::mem::take(&mut self.list_elem_states))
+    pub fn take_local_state(&mut self) -> (Vec<usize>, Vec<SmolStr>, Vec<Type>, Vec<Option<ListElemState>>, Vec<usize>) {
+        (std::mem::take(&mut self.frames), std::mem::take(&mut self.names), std::mem::take(&mut self.tys), std::mem::take(&mut self.list_elem_states), std::mem::take(&mut self.arg_counts))
     }
 
-    pub fn restore_local_state(&mut self, state: (Vec<usize>, Vec<SmolStr>, Vec<Type>, Vec<Option<ListElemState>>)) {
+    pub fn restore_local_state(&mut self, state: (Vec<usize>, Vec<SmolStr>, Vec<Type>, Vec<Option<ListElemState>>, Vec<usize>)) {
         self.frames = state.0;
         self.names = state.1;
         self.tys = state.2;
         self.list_elem_states = state.3;
+        self.arg_counts = state.4;
     }
 
     pub fn get_value(&self, expr: &Expr) -> Option<Dynamic> {
@@ -734,9 +774,23 @@ impl Compiler {
         })
     }
 
-    fn normalize_self_assign(left: Expr, op: BinaryOp, right: Expr, span: Span) -> Expr {
+    fn normalize_self_assign(left: Expr, op: BinaryOp, right: Expr, span: Span, arg_count: usize) -> Expr {
+        if let Some(idx) = left.var()
+            && (idx as usize) < arg_count
+        {
+            let op = match op {
+                BinaryOp::AddAssign => Some(BinaryOp::Add),
+                BinaryOp::SubAssign => Some(BinaryOp::Sub),
+                _ => None,
+            };
+            if let Some(op) = op {
+                let right = Expr::new(ExprKind::Binary { left: Box::new(left.clone()), op, right: Box::new(right) }, span);
+                return Expr::new(ExprKind::Binary { left: Box::new(left), op: BinaryOp::Assign, right: Box::new(right) }, span);
+            }
+        }
         if op == BinaryOp::Assign
             && let Some(idx) = left.var()
+            && idx as usize >= arg_count
             && let ExprKind::Binary { left: rhs_left, op: rhs_op, right: rhs_right } = &right.kind
             && rhs_left.var() == Some(idx)
         {
@@ -816,6 +870,7 @@ impl Compiler {
             consts: Vec::with_capacity(10240),
             frames: Vec::new(),
             list_elem_states: Vec::new(),
+            arg_counts: Vec::new(),
             fns: BTreeMap::new(),
             local_type_hints: BTreeMap::new(),
             infer_stack: Vec::new(),
@@ -1048,6 +1103,7 @@ impl Compiler {
     pub fn compile_fn(&mut self, args: &[SmolStr], tys: &mut Vec<Type>, body: Stmt, cap: &mut Capture) -> Result<Vec<Stmt>> {
         let top = self.tys.len();
         self.frames.push(top);
+        self.arg_counts.push(args.len());
         let result = (|| -> Result<Vec<Stmt>> {
             for (arg, ty) in args.iter().zip(tys.iter_mut()) {
                 *ty = self.symbols.get_type(ty)?;
@@ -1055,7 +1111,7 @@ impl Compiler {
                 self.add_ty(ty.clone());
             }
             if cap.names.is_empty() && tys.iter().all(|ty| !ty.is_any()) {
-                let saved_state = (self.frames.clone(), self.names.clone(), self.tys.clone(), self.list_elem_states.clone());
+                let saved_state = (self.frames.clone(), self.names.clone(), self.tys.clone(), self.list_elem_states.clone(), self.arg_counts.clone());
                 let result = self.check_return_type(&body);
                 self.restore_local_state(saved_state);
                 result?;
@@ -1072,6 +1128,7 @@ impl Compiler {
             self.names.truncate(top);
             self.list_elem_states.truncate(top);
         }
+        self.arg_counts.pop();
         result
     }
 
@@ -1203,6 +1260,10 @@ impl Compiler {
             if start_ty.is_any() {
                 stop_ty
             } else if stop_ty.is_any() {
+                start_ty
+            } else if start_ty == Type::I32 && stop_ty.is_uint() {
+                stop_ty
+            } else if stop_ty == Type::I32 && start_ty.is_uint() {
                 start_ty
             } else {
                 start_ty + stop_ty
@@ -1443,7 +1504,7 @@ impl Compiler {
                     }
                 }
                 let right = self.eval(right, stmts, cap)?;
-                let value = Self::normalize_self_assign(left, op.clone(), right, expr.span);
+                let value = Self::normalize_self_assign(left, op.clone(), right, expr.span, self.arg_counts.last().copied().unwrap_or(0));
                 if let Some(v) = value.compact() { Ok(Expr::new(ExprKind::Value(v), expr.span)) } else { Ok(value) }
             }
             ExprKind::Call { obj, params } => {

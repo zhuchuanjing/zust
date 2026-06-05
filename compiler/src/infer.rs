@@ -376,6 +376,21 @@ impl Compiler {
                 UnaryOp::Unknow => Ok(Type::Any),
             },
             ExprKind::Binary { left, op, right } => {
+                if op == &BinaryOp::Assign
+                    && let ExprKind::Tuple(left_items) | ExprKind::List(left_items) = &left.kind
+                {
+                    if let ExprKind::Tuple(right_items) | ExprKind::List(right_items) = &right.kind {
+                        if left_items.len() != right_items.len() {
+                            return Err(Self::semantic_error(expr.span, format!("多重赋值数量不匹配: 左侧 {} 个，右侧 {} 个", left_items.len(), right_items.len())));
+                        }
+                        for item in right_items {
+                            let _ = self.infer_expr(item)?;
+                        }
+                    } else {
+                        let _ = self.infer_expr(right)?;
+                    }
+                    return Ok(Type::Void);
+                }
                 let assign_idx = if op.is_assign() { if let ExprKind::Var(idx) = &left.kind { Some(*idx) } else { None } } else { None };
                 let ty = if op.is_logic() {
                     Type::Bool

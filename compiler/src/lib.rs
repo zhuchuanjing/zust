@@ -394,7 +394,7 @@ mod tests {
                 }
                 let sum = 0i64;
                 for i in 0..n {
-                    sum = sum + l.get_idx(i);
+                    sum = sum + l[i];
                 }
                 sum
             }
@@ -416,7 +416,7 @@ mod tests {
             pub fn pushed_empty() {
                 let items = [];
                 items.push(1i64);
-                items.get_idx(0)
+                items[0]
             }
 
             pub fn ints() {
@@ -428,7 +428,7 @@ mod tests {
                 items.push(1i64);
                 items.push("aaa");
                 items.push(2i64);
-                items.get_idx(0)
+                items[0]
             }
 
             "#
@@ -1286,6 +1286,75 @@ impl Compiler {
         Expr::new(ExprKind::Var(temp), span)
     }
 
+    fn is_multi_assign_target(expr: &Expr) -> bool {
+        matches!(expr.kind, ExprKind::Tuple(_) | ExprKind::List(_))
+    }
+
+    fn push_assign(stmts: &mut Vec<Stmt>, left: Expr, right: Expr, span: Span) {
+        stmts.push(Stmt::new(StmtKind::Expr(Expr::new(ExprKind::Binary { left: Box::new(left), op: BinaryOp::Assign, right: Box::new(right) }, span), true), span));
+    }
+
+    fn temp_var(&mut self, ty: Type, span: Span) -> Expr {
+        self.add_name("".into());
+        let idx = self.add_ty(ty);
+        Expr::new(ExprKind::Var(idx), span)
+    }
+
+    fn typed_expr(value: Expr, ty: &Type) -> Expr {
+        if ty.is_any() {
+            value
+        } else {
+            let span = value.span;
+            Expr::new(ExprKind::Typed { value: Box::new(value), ty: ty.clone() }, span)
+        }
+    }
+
+    fn lower_multi_assign(&mut self, left: &Expr, right: &Expr, stmts: &mut Vec<Stmt>, cap: &mut Capture, span: Span) -> Result<Expr> {
+        let left_items = match &left.kind {
+            ExprKind::Tuple(items) | ExprKind::List(items) => items,
+            _ => return Err(Self::semantic_error(left.span, "多重赋值左侧必须是 tuple 或 list")),
+        };
+        if left_items.is_empty() {
+            return Err(Self::semantic_error(left.span, "多重赋值左侧不能为空"));
+        }
+
+        let mut temps = Vec::with_capacity(left_items.len());
+        if let ExprKind::Tuple(right_items) | ExprKind::List(right_items) = &right.kind {
+            if left_items.len() != right_items.len() {
+                return Err(Self::semantic_error(span, format!("多重赋值数量不匹配: 左侧 {} 个，右侧 {} 个", left_items.len(), right_items.len())));
+            }
+            for item in right_items {
+                let value = self.eval(item, stmts, cap)?;
+                let ty = self.infer_expr(&value)?;
+                let temp = self.temp_var(ty.clone(), item.span);
+                Self::push_assign(stmts, temp.clone(), Self::typed_expr(value, &ty), item.span);
+                temps.push((temp, ty));
+            }
+        } else {
+            let value = self.eval(right, stmts, cap)?;
+            let ty = self.infer_expr(&value)?;
+            let source = self.temp_var(ty.clone(), right.span);
+            Self::push_assign(stmts, source.clone(), Self::typed_expr(value, &ty), right.span);
+            for idx in 0..left_items.len() {
+                let item_span = left_items[idx].span;
+                let item = Expr::new(ExprKind::Binary { left: Box::new(source.clone()), op: BinaryOp::Idx, right: Box::new(Expr::new(ExprKind::Value((idx as u32).into()), item_span)) }, item_span);
+                let value = self.eval(&item, stmts, cap)?;
+                let ty = self.infer_expr(&value)?;
+                let temp = self.temp_var(ty.clone(), item_span);
+                Self::push_assign(stmts, temp.clone(), Self::typed_expr(value, &ty), item_span);
+                temps.push((temp, ty));
+            }
+        }
+
+        for (target, (temp, ty)) in left_items.iter().zip(temps.iter()) {
+            let target = self.eval(target, stmts, cap)?;
+            let assign_span = target.span.merge(temp.span);
+            Self::push_assign(stmts, target, Self::typed_expr(temp.clone(), ty), assign_span);
+        }
+
+        Ok(temps.last().map(|(temp, ty)| Self::typed_expr(temp.clone(), ty)).unwrap_or_else(|| Expr::new(ExprKind::Value(Dynamic::Null), span)))
+    }
+
     fn static_composite_literal(&self, expr: &Expr) -> Result<Option<Dynamic>> {
         match &expr.kind {
             ExprKind::List(items) | ExprKind::Tuple(items) => {
@@ -1469,6 +1538,9 @@ impl Compiler {
                 if let Some(v) = value.compact() { Ok(Expr::new(ExprKind::Value(v), expr.span)) } else { Ok(value) }
             }
             ExprKind::Binary { left, op, right } => {
+                if *op == BinaryOp::Assign && Self::is_multi_assign_target(left) {
+                    return self.lower_multi_assign(left, right, stmts, cap, expr.span);
+                }
                 let left = self.eval(left, stmts, cap)?;
                 if *op == BinaryOp::Idx {
                     if let Some(key) = self.get_value(right).and_then(|v| if v.is_str() { Some(v.as_str().to_string()) } else { None }) {
@@ -1640,6 +1712,12 @@ impl Compiler {
                 compiled.last_mut().ok_or_else(|| Self::semantic_error(stmt_span, "没有生成可绑定模式的编译语句")).and_then(|stmt| stmt.bind_pattern(pat))?;
             }
             StmtKind::Expr(expr, close) => {
+                if let ExprKind::Binary { left, op: BinaryOp::Assign, right } = &expr.kind
+                    && Self::is_multi_assign_target(left)
+                {
+                    self.lower_multi_assign(left, right, compiled, cap, stmt_span)?;
+                    return Ok(());
+                }
                 let e = self.eval(&expr, compiled, cap)?;
                 compiled.push(Stmt::new(StmtKind::Expr(e, close), stmt_span));
             }

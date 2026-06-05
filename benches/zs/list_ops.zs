@@ -5,7 +5,7 @@ pub fn bench(n: i64) {
     }
     let sum = 0i64;
     for j in 0..n {
-        sum = sum + l.get_idx(j);
+        sum = sum + l[j];
     }
     sum
 }

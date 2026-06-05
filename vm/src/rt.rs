@@ -1069,6 +1069,12 @@ impl JITRunTime {
                                 self.call(ctx, self.get_method(&left.1, "get_key")?, vec![left.0, right]).map(|r| r.into())
                             } else {
                                 let right = self.convert(ctx, right, Type::I64)?;
+                                if let Type::List(elem_ty) = &left.1
+                                    && let Some((fn_name, _ret_ty)) = Self::list_get_idx_shortcut(elem_ty)
+                                {
+                                    let get_idx_fn = self.get_fn(self.get_id(fn_name)?, &[Type::Any, Type::I64])?;
+                                    return self.call(ctx, get_idx_fn, vec![left.0, right]).map(|r| r.into());
+                                }
                                 self.call(ctx, self.get_method(&left.1, "get_idx")?, vec![left.0, right]).map(|r| r.into())
                             }
                         }

@@ -545,6 +545,41 @@ mod tests {
     }
 
     #[test]
+    fn tuple_assignment_uses_simultaneous_scalar_temps() -> anyhow::Result<()> {
+        let vm = Vm::with_all()?;
+        vm.import_code(
+            "vm_tuple_assignment",
+            br#"
+            pub fn swap() {
+                let a = 1i64;
+                let b = 2i64;
+                (a, b) = (b, a);
+                a * 10i64 + b
+            }
+
+            pub fn fib(n: i64) {
+                let a = 0i64;
+                let b = 1i64;
+                for _ in 0..n {
+                    (a, b) = (b, (a + b) % 1000000007i64);
+                }
+                a
+            }
+            "#
+            .to_vec(),
+        )?;
+
+        let swap = vm.get_fn("vm_tuple_assignment::swap", &[])?;
+        let swap: extern "C" fn() -> i64 = unsafe { std::mem::transmute(swap.ptr()) };
+        assert_eq!(swap(), 21);
+
+        let fib = vm.get_fn("vm_tuple_assignment::fib", &[Type::I64])?;
+        let fib: extern "C" fn(i64) -> i64 = unsafe { std::mem::transmute(fib.ptr()) };
+        assert_eq!(fib(10), 55);
+        Ok(())
+    }
+
+    #[test]
     fn nested_struct_arg_return_struct_field_is_static_field_access() -> anyhow::Result<()> {
         let vm = Vm::with_all()?;
         vm.import_code(
@@ -3210,7 +3245,7 @@ mod tests {
                 }
                 let sum = 0i64;
                 for j in 0..n {
-                    sum = sum + l.get_idx(j);
+                    sum = sum + l[j];
                 }
                 sum
             }
@@ -3261,13 +3296,13 @@ mod tests {
                 let l = [];
                 l.push(true);
                 l.push(false);
-                l.get_idx(1)
+                l[1]
             }
 
             pub fn first_u8() {
                 let l = [];
                 l.push(7u8);
-                l.get_idx(0)
+                l[0]
             }
 
             pub fn sum_i32(n: i64) {
@@ -3277,7 +3312,7 @@ mod tests {
                 }
                 let sum = 0i32;
                 for j in 0..n {
-                    sum = sum + l.get_idx(j);
+                    sum = sum + l[j];
                 }
                 sum
             }
@@ -3289,7 +3324,7 @@ mod tests {
                 }
                 let sum = 0f32;
                 for j in 0..n {
-                    sum = sum + l.get_idx(j);
+                    sum = sum + l[j];
                 }
                 sum
             }
@@ -3298,7 +3333,7 @@ mod tests {
                 let l = [];
                 l.push("first");
                 l.push("second");
-                l.get_idx(1)
+                l[1]
             }
             "#
             .to_vec(),
@@ -3358,18 +3393,18 @@ mod tests {
                 items.push(1i64);
                 items.push(2i64);
                 let j = 0i64;
-                let a = items.get_idx(j);
-                let b = items.get_idx(j + 1);
+                let a = items[j];
+                let b = items[j + 1];
                 items[j] = b;
                 items[j + 1] = a;
-                items.get_idx(0) * 10i64 + items.get_idx(1)
+                items[0] * 10i64 + items[1]
             }
 
             pub fn replace_string() {
                 let items = [];
                 items.push("old");
                 items[0] = "new";
-                items.get_idx(0)
+                items[0]
             }
             "#
             .to_vec(),

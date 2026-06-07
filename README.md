@@ -287,6 +287,10 @@ The standard functions are available without a module prefix:
 - `import(module, path)`: import another `.zs` file or a source object stored in `root`.
 - `spawn(target, args)`: start a detached OS thread and call `target`. `target` can be a function name string or a closure without captures. `args` is always a tuple argument pack: `spawn("job::run", ())` calls with no arguments, and `spawn(|x, y| { print(x + y); }, (10, 20))` calls with two arguments. The spawned function currently receives arguments through the dynamic `Any` boundary, and the return value is ignored.
 
+### Native Callbacks
+
+When a closure is passed to a native function through an `Any` argument, the VM packages it as `Dynamic::Custom(ZustCallback)`. Rust native code can downcast and save it, then call `callback.call0()` later. The first supported callback shape is a zero-argument closure such as `button.on_pressed(|| { label.set_text("clicked!"); })`. Captures are deep-cloned as dynamic values, so scalar values and native custom objects can be used after the original Zust call returns.
+
 ### `Any`
 
 Dynamic values expose common methods:

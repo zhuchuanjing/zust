@@ -260,8 +260,13 @@ impl JITRunTime {
     }
 
     pub fn gen_fn_with_params(&mut self, ctx: Option<&BuildContext>, id: u32, arg_tys: &[Type], generic_args: &[Type]) -> Result<FnInfo> {
+        self.gen_fn_with_capture_tys(ctx, id, arg_tys, generic_args, None)
+    }
+
+    pub(crate) fn gen_fn_with_capture_tys(&mut self, ctx: Option<&BuildContext>, id: u32, arg_tys: &[Type], generic_args: &[Type], capture_tys: Option<&[Type]>) -> Result<FnInfo> {
         let mut arg_tys: Vec<Type> = arg_tys.iter().map(|ty| self.compiler.symbols.get_type(ty).unwrap()).collect();
-        if generic_args.is_empty()
+        if capture_tys.is_none()
+            && generic_args.is_empty()
             && let Ok(info) = self.get_fn(id, &arg_tys)
         {
             return Ok(info);
@@ -307,8 +312,15 @@ impl JITRunTime {
                     self.compiler.restore_local_state(saved_state);
                     Stmt::new(StmtKind::Block(compiled_body?), Span::default())
                 };
-                for v in compile_cap.vars.iter() {
-                    ctx.as_ref().map(|ctx| arg_tys.push(ctx.vars[*v].get_ty()));
+                if let Some(capture_tys) = capture_tys {
+                    if capture_tys.len() != compile_cap.vars.len() {
+                        return Err(anyhow!("capture type count mismatch: got {}, want {}", capture_tys.len(), compile_cap.vars.len()));
+                    }
+                    arg_tys.extend_from_slice(capture_tys);
+                } else {
+                    for v in compile_cap.vars.iter() {
+                        ctx.as_ref().map(|ctx| arg_tys.push(ctx.vars[*v].get_ty()));
+                    }
                 }
                 let fn_id = if self.compile_depth > 0 {
                     let fn_id = self.declare_compiled_fn(Some(&(name.clone(), id)), generic_args, &arg_tys, ret_ty.clone())?;
@@ -324,8 +336,15 @@ impl JITRunTime {
             }
             let ret_ty = self.compiler.infer_fn_with_params(id, &arg_tys, generic_args)?;
             let local_type_hints = self.compiler.inferred_local_type_hints(id, generic_args, &arg_tys);
-            for v in cap.vars.iter() {
-                ctx.as_ref().map(|ctx| arg_tys.push(ctx.vars[*v].get_ty()));
+            if let Some(capture_tys) = capture_tys {
+                if capture_tys.len() != cap.vars.len() {
+                    return Err(anyhow!("capture type count mismatch: got {}, want {}", capture_tys.len(), cap.vars.len()));
+                }
+                arg_tys.extend_from_slice(capture_tys);
+            } else {
+                for v in cap.vars.iter() {
+                    ctx.as_ref().map(|ctx| arg_tys.push(ctx.vars[*v].get_ty()));
+                }
             }
             let body = if generic_params.is_empty() { body.as_ref().clone() } else { substitute_stmt(body.as_ref(), &generic_params, generic_args) };
             let fn_id = if self.compile_depth > 0 {

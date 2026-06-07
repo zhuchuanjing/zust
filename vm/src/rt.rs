@@ -35,6 +35,7 @@ pub struct JITRunTime {
     pub(crate) strcat_fn: Option<FuncId>,
     pub(crate) strcat_i64_fn: Option<FuncId>,
     pub(crate) strcat_assign_fn: Option<FuncId>,
+    pub(crate) callback_new_fn: Option<FuncId>,
     pub(crate) spawn_ptr_fn: Option<FuncId>,
     pub(crate) struct_from_ptr_fn: Option<FuncId>,
     pub(crate) array_from_ptr_fn: Option<FuncId>,
@@ -208,6 +209,7 @@ impl JITRunTime {
             strcat_fn: None,
             strcat_i64_fn: None,
             strcat_assign_fn: None,
+            callback_new_fn: None,
             spawn_ptr_fn: None,
             struct_from_ptr_fn: None,
             array_from_ptr_fn: None,
@@ -924,16 +926,42 @@ impl JITRunTime {
         let (ExprKind::Tuple(items) | ExprKind::List(items)) = &expr.kind else {
             return self.eval(ctx, expr)?.get(ctx).ok_or_else(|| anyhow!("spawn closure args expression has no value"));
         };
-        let idx = self.compiler.get_const(Dynamic::list(vec![Dynamic::Null; items.len()]));
+        let values = items.iter().map(|item| self.eval(ctx, item)?.get(ctx).ok_or_else(|| anyhow!("spawn closure arg has no value: {:?}", item))).collect::<Result<Vec<_>>>()?;
+        self.dynamic_list_from_values(ctx, values)
+    }
+
+    fn dynamic_list_from_values(&mut self, ctx: &mut BuildContext, values: Vec<(Value, Type)>) -> Result<(Value, Type)> {
+        let idx = self.compiler.get_const(Dynamic::list(vec![Dynamic::Null; values.len()]));
         let (list, _) = self.get_const_value(ctx, idx)?;
-        for (idx, item) in items.iter().enumerate() {
-            let value = self.eval(ctx, item)?.get(ctx).ok_or_else(|| anyhow!("spawn closure arg has no value: {:?}", item))?;
+        for (idx, value) in values.into_iter().enumerate() {
             let value = self.convert(ctx, value, Type::Any)?;
             let idx = ctx.builder.ins().iconst(types::I64, idx as i64);
             let set_idx = self.get_fn(self.get_id("Any::set_idx")?, &[Type::Any, Type::I64, Type::Any])?;
             self.call_for_side_effect(ctx, set_idx, vec![list, idx, value])?;
         }
         Ok((list, Type::Any))
+    }
+
+    fn callback_value(&mut self, ctx: &mut BuildContext, id: u32, captures: Vec<(Value, Type)>) -> Result<LocalVar> {
+        let (_, symbol) = self.compiler.symbols.get_symbol(id)?;
+        if let Symbol::Fn { ty: Type::Fn { tys, .. }, .. } = symbol
+            && !tys.is_empty()
+        {
+            return Err(anyhow!("native callback closure only supports 0 explicit args"));
+        }
+        let capture_tys = vec![Type::Any; captures.len()];
+        let fn_info = self.gen_fn_with_capture_tys(Some(ctx), id, &[], &[], Some(&capture_tys))?;
+        let FnInfo::Call { fn_id, ret, .. } = fn_info else {
+            return Err(anyhow!("callback target must be compiled function"));
+        };
+        let captures = self.dynamic_list_from_values(ctx, captures)?;
+        let fn_ref = self.get_fn_ref(ctx, fn_id);
+        let fn_addr = ctx.builder.ins().func_addr(ptr_type(), fn_ref);
+        let ret_ty = Self::type_ptr_const(ctx, &ret);
+        let callback_new = self.callback_new_fn.ok_or_else(|| anyhow!("VM callback runtime is not registered"))?;
+        let callback_new_ref = self.get_fn_ref(ctx, callback_new);
+        let call_inst = ctx.builder.ins().call(callback_new_ref, &[fn_addr, ret_ty, captures.0]);
+        Ok((ctx.builder.inst_results(call_inst)[0], Type::Any).into())
     }
 
     fn spawn_closure(&mut self, ctx: &mut BuildContext, id: u32, captures: Vec<(Value, Type)>, args_expr: &Expr) -> Result<LocalVar> {
@@ -981,7 +1009,12 @@ impl JITRunTime {
         }
         let mut args: Vec<(Value, Type)> = if let Some(obj) = obj { vec![self.eval(ctx, &obj)?.get(ctx).ok_or_else(|| anyhow!("函数 {} 的接收者表达式没有值: {:?}", fn_name, obj))?] } else { Vec::new() };
         for p in params {
-            args.push(self.eval(ctx, p)?.get(ctx).ok_or_else(|| anyhow!("函数 {} 的参数表达式没有值: {:?}", fn_name, p))?);
+            let value = self.eval(ctx, p)?;
+            let value = match value {
+                LocalVar::Closure { id, captures } => self.callback_value(ctx, id, captures)?.get(ctx).ok_or_else(|| anyhow!("函数 {} 的 callback 参数没有值: {:?}", fn_name, p))?,
+                value => value.get(ctx).ok_or_else(|| anyhow!("函数 {} 的参数表达式没有值: {:?}", fn_name, p))?,
+            };
+            args.push(value);
         }
         if let Some(captures) = &capture_values {
             args.extend(captures.iter().cloned());

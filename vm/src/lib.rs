@@ -2,7 +2,7 @@
 mod binary;
 mod memory;
 mod native;
-pub use native::{ANY, STD};
+pub use native::{ANY, STD, ZustCallback};
 
 mod fns;
 use anyhow::{Result, anyhow};
@@ -103,6 +103,7 @@ impl JITRunTime {
         self.native_symbols.write().unwrap().insert("__vm_strcat".to_string(), native::strcat as *const () as usize);
         self.native_symbols.write().unwrap().insert("__vm_strcat_i64".to_string(), native::strcat_i64 as *const () as usize);
         self.native_symbols.write().unwrap().insert("__vm_strcat_assign".to_string(), native::strcat_assign as *const () as usize);
+        self.native_symbols.write().unwrap().insert("__vm_callback_new".to_string(), native::callback_new as *const () as usize);
         self.native_symbols.write().unwrap().insert("__vm_spawn_ptr".to_string(), native::spawn_ptr as *const () as usize);
         self.native_symbols.write().unwrap().insert("__vm_struct_from_ptr".to_string(), native::struct_from_ptr as *const () as usize);
         self.native_symbols.write().unwrap().insert("__vm_array_from_ptr".to_string(), native::array_from_ptr as *const () as usize);
@@ -132,6 +133,9 @@ impl JITRunTime {
 
         let strcat_assign_sig = self.get_sig(&[Type::Any, Type::Any], Type::Any)?;
         self.strcat_assign_fn = Some(self.module.declare_function("__vm_strcat_assign", cranelift_module::Linkage::Import, &strcat_assign_sig)?);
+
+        let callback_new_sig = self.get_sig(&[Type::I64, Type::I64, Type::Any], Type::Any)?;
+        self.callback_new_fn = Some(self.module.declare_function("__vm_callback_new", cranelift_module::Linkage::Import, &callback_new_sig)?);
 
         let spawn_ptr_sig = self.get_sig(&[Type::I64, Type::I64, Type::Any], Type::Bool)?;
         self.spawn_ptr_fn = Some(self.module.declare_function("__vm_spawn_ptr", cranelift_module::Linkage::Import, &spawn_ptr_sig)?);
@@ -476,8 +480,9 @@ impl Default for Vm {
 
 #[cfg(test)]
 mod tests {
-    use super::Vm;
+    use super::{Vm, ZustCallback};
     use dynamic::{Dynamic, ToJson, Type};
+    use std::sync::Mutex;
 
     extern "C" fn math_double(value: i64) -> i64 {
         value * 2
@@ -1562,6 +1567,54 @@ mod tests {
         }
 
         anyhow::bail!("spawned jobs did not write expected results");
+    }
+
+    #[test]
+    fn native_can_save_and_later_call_closure_callback() -> anyhow::Result<()> {
+        static SAVED_CALLBACK: Mutex<Option<ZustCallback>> = Mutex::new(None);
+
+        extern "C" fn save_callback(callback: *const Dynamic) -> bool {
+            if callback.is_null() {
+                return false;
+            }
+            let Some(callback) = (unsafe { &*callback }).as_custom::<ZustCallback>().cloned() else {
+                return false;
+            };
+            *SAVED_CALLBACK.lock().unwrap() = Some(callback);
+            true
+        }
+
+        let path = "local/vm_callback/result";
+        let _ = root::remove(path);
+        *SAVED_CALLBACK.lock().unwrap() = None;
+
+        let vm = Vm::with_all()?;
+        vm.add_native_module_ptr("callback_test", "save", &[Type::Any], Type::Bool, save_callback as *const u8)?;
+        vm.import_code(
+            "vm_callback",
+            br#"
+            pub fn register() {
+                let n = 41;
+                callback_test::save(|| {
+                    root::add("local/vm_callback/result", n + 1);
+                    true
+                })
+            }
+            "#
+            .to_vec(),
+        )?;
+
+        let compiled = vm.get_fn("vm_callback::register", &[])?;
+        assert_eq!(compiled.ret_ty(), &Type::Bool);
+        let register: extern "C" fn() -> bool = unsafe { std::mem::transmute(compiled.ptr()) };
+        assert!(register());
+        assert!(root::get(path).is_err());
+
+        let callback = SAVED_CALLBACK.lock().unwrap().clone().expect("callback should be saved");
+        let result = callback.call0()?;
+        assert_eq!(result.as_bool(), Some(true));
+        assert_eq!(root::get(path)?.as_int(), Some(42));
+        Ok(())
     }
 
     #[test]

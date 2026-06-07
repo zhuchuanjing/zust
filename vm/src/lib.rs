@@ -1250,7 +1250,83 @@ mod tests {
         let compiled = vm.get_fn("vm_string_concat_to_i64::run", &[Type::I64])?;
         assert_eq!(compiled.ret_ty(), &Type::I64);
         let run: extern "C" fn(i64) -> i64 = unsafe { std::mem::transmute(compiled.ptr()) };
-        assert_eq!(run(7), 0);
+        assert_eq!(run(7), 7);
+        Ok(())
+    }
+
+    #[test]
+    fn casts_dynamic_string_numbers_to_ints_and_floats() -> anyhow::Result<()> {
+        let vm = Vm::with_all()?;
+        vm.import_code(
+            "vm_string_number_casts",
+            br#"
+            pub fn limit_i64(req) {
+                req["@query"].limit as i64
+            }
+
+            pub fn limit_i32(req) {
+                req["@query"].limit as i32
+            }
+
+            pub fn price_f64(req) {
+                req["@query"].price as f64
+            }
+
+            pub fn price_f32(req) {
+                req["@query"].price as f32
+            }
+
+            pub fn literal_i64() {
+                "42" as i64
+            }
+
+            pub fn literal_f64() {
+                "3.5" as f64
+            }
+
+            pub fn bad_number(req) {
+                req["@query"].bad as i64
+            }
+            "#
+            .to_vec(),
+        )?;
+
+        let req = dynamic::map!("@query"=> dynamic::map!("limit"=> "50", "price"=> "3.5", "bad"=> "nope"));
+
+        let limit_i64 = vm.get_fn("vm_string_number_casts::limit_i64", &[Type::Any])?;
+        assert_eq!(limit_i64.ret_ty(), &Type::I64);
+        let limit_i64: extern "C" fn(*const Dynamic) -> i64 = unsafe { std::mem::transmute(limit_i64.ptr()) };
+        assert_eq!(limit_i64(&req), 50);
+
+        let limit_i32 = vm.get_fn("vm_string_number_casts::limit_i32", &[Type::Any])?;
+        assert_eq!(limit_i32.ret_ty(), &Type::I32);
+        let limit_i32: extern "C" fn(*const Dynamic) -> i32 = unsafe { std::mem::transmute(limit_i32.ptr()) };
+        assert_eq!(limit_i32(&req), 50);
+
+        let price_f64 = vm.get_fn("vm_string_number_casts::price_f64", &[Type::Any])?;
+        assert_eq!(price_f64.ret_ty(), &Type::F64);
+        let price_f64: extern "C" fn(*const Dynamic) -> f64 = unsafe { std::mem::transmute(price_f64.ptr()) };
+        assert_eq!(price_f64(&req), 3.5);
+
+        let price_f32 = vm.get_fn("vm_string_number_casts::price_f32", &[Type::Any])?;
+        assert_eq!(price_f32.ret_ty(), &Type::F32);
+        let price_f32: extern "C" fn(*const Dynamic) -> f32 = unsafe { std::mem::transmute(price_f32.ptr()) };
+        assert_eq!(price_f32(&req), 3.5);
+
+        let literal_i64 = vm.get_fn("vm_string_number_casts::literal_i64", &[])?;
+        assert_eq!(literal_i64.ret_ty(), &Type::I64);
+        let literal_i64: extern "C" fn() -> i64 = unsafe { std::mem::transmute(literal_i64.ptr()) };
+        assert_eq!(literal_i64(), 42);
+
+        let literal_f64 = vm.get_fn("vm_string_number_casts::literal_f64", &[])?;
+        assert_eq!(literal_f64.ret_ty(), &Type::F64);
+        let literal_f64: extern "C" fn() -> f64 = unsafe { std::mem::transmute(literal_f64.ptr()) };
+        assert_eq!(literal_f64(), 3.5);
+
+        let bad_number = vm.get_fn("vm_string_number_casts::bad_number", &[Type::Any])?;
+        assert_eq!(bad_number.ret_ty(), &Type::I64);
+        let bad_number: extern "C" fn(*const Dynamic) -> i64 = unsafe { std::mem::transmute(bad_number.ptr()) };
+        assert_eq!(bad_number(&req), 0);
         Ok(())
     }
 

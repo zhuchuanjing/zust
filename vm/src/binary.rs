@@ -182,6 +182,9 @@ impl JITRunTime {
                     return Ok(ctx.builder.ins().fcvt_from_uint(types::F32, vt.0));
                 } else if vt.1.is_f64() {
                     return Ok(ctx.builder.ins().fdemote(types::F32, vt.0));
+                } else if vt.1.is_str() {
+                    let v = self.call(ctx, self.get_method(&Type::Any, "to_f64")?, vec![vt.0]).map(|(v, _)| v)?;
+                    return Ok(ctx.builder.ins().fdemote(types::F32, v));
                 }
             } else if ty.is_f64() {
                 if vt.1.is_int() {
@@ -190,6 +193,8 @@ impl JITRunTime {
                     return Ok(ctx.builder.ins().fcvt_from_uint(types::F64, vt.0));
                 } else if vt.1.is_f32() {
                     return Ok(ctx.builder.ins().fpromote(types::F64, vt.0));
+                } else if vt.1.is_str() {
+                    return self.call(ctx, self.get_method(&Type::Any, "to_f64")?, vec![vt.0]).map(|(v, _)| v);
                 }
             } else if let Type::Symbol { id: _, params: _ } = ty {
                 log::info!("convert {:?} -> {:?}", vt, ty);

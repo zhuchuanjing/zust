@@ -244,6 +244,7 @@ impl Type {
             Self::U64 => src.try_into().map(Dynamic::U64),
             Self::F32 => src.try_into().map(Dynamic::F32),
             Self::F64 => src.try_into().map(Dynamic::F64),
+            Self::Str => Ok(Dynamic::from(src.to_string())),
             _ => Ok(src),
         }
     }

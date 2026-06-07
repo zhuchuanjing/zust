@@ -407,6 +407,10 @@ macro_rules! impl_try_from_dynamic_int {
                 type Error = DynamicErr;
                 fn try_from(value: Dynamic) -> Result<Self, Self::Error> {
                     match value {
+                        Dynamic::F32(v) => Ok(v as $target),
+                        Dynamic::F64(v) => Ok(v as $target),
+                        Dynamic::String(v) => v.trim().parse::<$target>().or_else(|_| v.trim().parse::<f64>().map(|value| value as $target)).map_err(|_| DynamicErr::TypeMismatch),
+                        Dynamic::StringBuf(v) => v.trim().parse::<$target>().or_else(|_| v.trim().parse::<f64>().map(|value| value as $target)).map_err(|_| DynamicErr::TypeMismatch),
                         Dynamic::U8(v)  => v.try_into().map_err(|_| DynamicErr::OutOfRange),
                         Dynamic::U16(v) => v.try_into().map_err(|_| DynamicErr::OutOfRange),
                         Dynamic::U32(v) => v.try_into().map_err(|_| DynamicErr::OutOfRange),
@@ -438,6 +442,8 @@ impl TryFrom<Dynamic> for f64 {
             Dynamic::I16(v) => Ok(v as f64),
             Dynamic::I32(v) => Ok(v as f64),
             Dynamic::I64(v) => Ok(v as f64),
+            Dynamic::String(v) => v.trim().parse::<f64>().map_err(|_| DynamicErr::TypeMismatch),
+            Dynamic::StringBuf(v) => v.trim().parse::<f64>().map_err(|_| DynamicErr::TypeMismatch),
             _ => Err(DynamicErr::TypeMismatch),
         }
     }
@@ -457,6 +463,8 @@ impl TryFrom<Dynamic> for f32 {
             Dynamic::I16(v) => Ok(v as f32),
             Dynamic::I32(v) => Ok(v as f32),
             Dynamic::I64(v) => Ok(v as f32),
+            Dynamic::String(v) => v.trim().parse::<f32>().map_err(|_| DynamicErr::TypeMismatch),
+            Dynamic::StringBuf(v) => v.trim().parse::<f32>().map_err(|_| DynamicErr::TypeMismatch),
             _ => Err(DynamicErr::TypeMismatch),
         }
     }

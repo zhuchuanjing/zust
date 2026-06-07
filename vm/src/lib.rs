@@ -1492,6 +1492,36 @@ mod tests {
     }
 
     #[test]
+    fn nested_closure_captures_outer_closure_arg() -> anyhow::Result<()> {
+        let vm = Vm::with_all()?;
+        vm.import_code(
+            "vm_nested_closure_capture",
+            br#"
+            pub fn run() {
+                |path: string| {
+                    let upload_done = |uploaded: bool| {
+                        if uploaded {
+                            path
+                        } else {
+                            "missing"
+                        }
+                    };
+                    upload_done(true)
+                }("reference.png")
+            }
+            "#
+            .to_vec(),
+        )?;
+
+        let compiled = vm.get_fn("vm_nested_closure_capture::run", &[])?;
+        assert_eq!(compiled.ret_ty(), &Type::Any);
+        let run: extern "C" fn() -> *const Dynamic = unsafe { std::mem::transmute(compiled.ptr()) };
+        let result = unsafe { &*run() };
+        assert_eq!(result.as_str(), "reference.png");
+        Ok(())
+    }
+
+    #[test]
     fn semicolon_tail_call_makes_function_void() -> anyhow::Result<()> {
         let vm = Vm::with_all()?;
         vm.import_code(

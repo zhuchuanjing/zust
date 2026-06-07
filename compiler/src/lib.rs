@@ -1458,7 +1458,8 @@ impl Compiler {
             ExprKind::Stmt(stmt) => self.eval_stmt_expr(stmt, stmts, cap, expr.span),
             ExprKind::Closure { args, body } => {
                 let (mut names, mut tys): (Vec<SmolStr>, Vec<Type>) = args.clone().into_iter().unzip();
-                let cap_vars: Vec<(SmolStr, Type)> = self.names.iter().zip(self.tys.iter()).map(|(n, ty)| (n.clone(), ty.clone())).collect();
+                let top = self.top();
+                let cap_vars: Vec<(SmolStr, Type)> = self.names[top..].iter().zip(self.tys[top..].iter()).map(|(n, ty)| (n.clone(), ty.clone())).collect();
                 let mut local_cap = Capture::new(cap_vars);
                 let _ = self.compile_fn(names.as_slice(), &mut tys.clone(), *body.clone(), &mut local_cap)?;
                 for cap_idx in local_cap.vars.iter() {

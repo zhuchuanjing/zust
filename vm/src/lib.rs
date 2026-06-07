@@ -134,7 +134,7 @@ impl JITRunTime {
         let strcat_assign_sig = self.get_sig(&[Type::Any, Type::Any], Type::Any)?;
         self.strcat_assign_fn = Some(self.module.declare_function("__vm_strcat_assign", cranelift_module::Linkage::Import, &strcat_assign_sig)?);
 
-        let callback_new_sig = self.get_sig(&[Type::I64, Type::I64, Type::Any], Type::Any)?;
+        let callback_new_sig = self.get_sig(&[Type::I64, Type::I64, Type::I64, Type::Any], Type::Any)?;
         self.callback_new_fn = Some(self.module.declare_function("__vm_callback_new", cranelift_module::Linkage::Import, &callback_new_sig)?);
 
         let spawn_ptr_sig = self.get_sig(&[Type::I64, Type::I64, Type::Any], Type::Bool)?;
@@ -1691,6 +1691,53 @@ mod tests {
         let result = callback.call0()?;
         assert_eq!(result.as_bool(), Some(true));
         assert_eq!(root::get(path)?.as_int(), Some(42));
+        Ok(())
+    }
+
+    #[test]
+    fn native_can_save_and_later_call_named_function_callback() -> anyhow::Result<()> {
+        static SAVED_CALLBACK: Mutex<Option<ZustCallback>> = Mutex::new(None);
+
+        extern "C" fn save_callback(callback: *const Dynamic) -> bool {
+            if callback.is_null() {
+                return false;
+            }
+            let Some(callback) = (unsafe { &*callback }).as_custom::<ZustCallback>().cloned() else {
+                return false;
+            };
+            *SAVED_CALLBACK.lock().unwrap() = Some(callback);
+            true
+        }
+
+        let path = "local/vm_named_callback/result";
+        let _ = root::remove(path);
+        *SAVED_CALLBACK.lock().unwrap() = None;
+
+        let vm = Vm::with_all()?;
+        vm.add_native_module_ptr("callback_test", "save", &[Type::Any], Type::Bool, save_callback as *const u8)?;
+        vm.import_code(
+            "vm_named_callback",
+            br#"
+            pub fn on_result() {
+                root::add("local/vm_named_callback/result", "done");
+                true
+            }
+
+            pub fn register() {
+                callback_test::save(on_result)
+            }
+            "#
+            .to_vec(),
+        )?;
+
+        let register = vm.get_fn("vm_named_callback::register", &[])?;
+        let register: extern "C" fn() -> bool = unsafe { std::mem::transmute(register.ptr()) };
+        assert!(register());
+        assert!(root::get(path).is_err());
+
+        let callback = SAVED_CALLBACK.lock().unwrap().clone().expect("callback should be saved");
+        assert_eq!(callback.call1(dynamic::map!("text"=> "done"))?.as_bool(), Some(true));
+        assert_eq!(root::get(path)?.as_str(), "done");
         Ok(())
     }
 

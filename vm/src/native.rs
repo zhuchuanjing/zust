@@ -16,12 +16,17 @@ use std::sync::{Mutex, Weak};
 pub struct ZustCallback {
     pub fn_ptr: usize,
     pub ret_ty: Type,
+    pub explicit_arg_len: usize,
     pub captures: Vec<Dynamic>,
 }
 
 impl ZustCallback {
     pub fn new(fn_ptr: usize, ret_ty: Type, captures: Vec<Dynamic>) -> Self {
-        Self { fn_ptr, ret_ty, captures }
+        Self { fn_ptr, ret_ty, explicit_arg_len: usize::MAX, captures }
+    }
+
+    pub fn new_with_arg_len(fn_ptr: usize, ret_ty: Type, explicit_arg_len: usize, captures: Vec<Dynamic>) -> Self {
+        Self { fn_ptr, ret_ty, explicit_arg_len, captures }
     }
 
     pub fn call0(&self) -> Result<Dynamic> {
@@ -33,6 +38,12 @@ impl ZustCallback {
     }
 
     pub fn call(&self, mut args: Vec<Dynamic>) -> Result<Dynamic> {
+        if self.explicit_arg_len != usize::MAX {
+            args.truncate(self.explicit_arg_len);
+            while args.len() < self.explicit_arg_len {
+                args.push(Dynamic::Null);
+            }
+        }
         args.extend(self.captures.iter().map(|value| value.deep_clone()));
         let args: Vec<Box<Dynamic>> = args.into_iter().map(Box::new).collect();
         let ptrs: Vec<*const Dynamic> = args.iter().map(|arg| arg.as_ref() as *const Dynamic).collect();
@@ -353,11 +364,12 @@ pub(crate) extern "C" fn spawn_ptr(fn_ptr: i64, ret_ty: i64, args: *const Dynami
         .is_ok()
 }
 
-pub(crate) extern "C" fn callback_new(fn_ptr: i64, ret_ty: i64, captures: *const Dynamic) -> *const Dynamic {
+pub(crate) extern "C" fn callback_new(fn_ptr: i64, ret_ty: i64, explicit_arg_len: i64, captures: *const Dynamic) -> *const Dynamic {
     if fn_ptr == 0 || ret_ty == 0 {
         return alloc_dynamic(Dynamic::Null);
     }
     let ret_ty = unsafe { (&*(ret_ty as *const Type)).clone() };
+    let explicit_arg_len = usize::try_from(explicit_arg_len).unwrap_or(usize::MAX);
     let captures = if captures.is_null() {
         Vec::new()
     } else {
@@ -366,7 +378,7 @@ pub(crate) extern "C" fn callback_new(fn_ptr: i64, ret_ty: i64, captures: *const
             value => vec![value.deep_clone()],
         }
     };
-    alloc_dynamic(Dynamic::custom(ZustCallback::new(fn_ptr as usize, ret_ty, captures)))
+    alloc_dynamic(Dynamic::custom(ZustCallback::new_with_arg_len(fn_ptr as usize, ret_ty, explicit_arg_len, captures)))
 }
 
 fn spawn_run_ptr(fn_ptr: usize, ret_ty: Type, args: Dynamic) -> Result<()> {

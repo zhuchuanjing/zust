@@ -963,9 +963,10 @@ impl JITRunTime {
         let fn_ref = self.get_fn_ref(ctx, fn_id);
         let fn_addr = ctx.builder.ins().func_addr(ptr_type(), fn_ref);
         let ret_ty = Self::type_ptr_const(ctx, &ret);
+        let explicit_arg_len = ctx.builder.ins().iconst(types::I64, explicit_arg_len as i64);
         let callback_new = self.callback_new_fn.ok_or_else(|| anyhow!("VM callback runtime is not registered"))?;
         let callback_new_ref = self.get_fn_ref(ctx, callback_new);
-        let call_inst = ctx.builder.ins().call(callback_new_ref, &[fn_addr, ret_ty, captures.0]);
+        let call_inst = ctx.builder.ins().call(callback_new_ref, &[fn_addr, ret_ty, explicit_arg_len, captures.0]);
         Ok((ctx.builder.inst_results(call_inst)[0], Type::Any).into())
     }
 

@@ -1,3 +1,4 @@
+use crate::ZustCallback;
 use crate::memory::alloc_dynamic;
 use anyhow::Result;
 use dynamic::{Dynamic, Type};
@@ -67,14 +68,28 @@ where
     id.into()
 }
 
+fn llm_tx(notifier: &Dynamic) -> Option<Dynamic> {
+    if notifier.as_custom::<ZustCallback>().is_some() { None } else { Some(notifier.clone()) }
+}
+
+fn notify_or_call(notifier: &Dynamic, result: Dynamic) -> Result<()> {
+    if let Some(callback) = notifier.as_custom::<ZustCallback>() {
+        callback.call1(result)?;
+        Ok(())
+    } else {
+        llm::notify(notifier, result)
+    }
+}
+
 extern "C" fn llm_deep(openai: *const Dynamic, value: *const Dynamic, notifier: *const Dynamic) -> *const Dynamic {
     //启动一个任务 使用 消息点来接收 中间消息
     let openai = unsafe { (&*openai).clone() };
     let value = unsafe { (&*value).clone() };
     let notifier = unsafe { (&*notifier).clone() };
+    let tx = llm_tx(&notifier);
     let id = start_llm_task(value.clone(), || async move {
-        let r = llm::complete(openai, value, Some(notifier.clone())).await?;
-        llm::notify(&notifier, r.clone())?;
+        let r = llm::complete(openai, value, tx).await?;
+        notify_or_call(&notifier, r.clone())?;
         Ok(r)
     });
     alloc_dynamic(id.into())
@@ -85,9 +100,10 @@ extern "C" fn llm_image(openai: *const Dynamic, value: *const Dynamic, notifier:
     let openai = unsafe { (&*openai).clone() };
     let value = unsafe { (&*value).clone() };
     let notifier = unsafe { (&*notifier).clone() };
+    let tx = llm_tx(&notifier);
     let id = start_llm_task(value.clone(), || async move {
-        let r = llm::image(openai, value, Some(notifier.clone())).await?;
-        let _ = llm::notify(&notifier, r.clone());
+        let r = llm::image(openai, value, tx).await?;
+        let _ = notify_or_call(&notifier, r.clone());
         Ok(r)
     });
     alloc_dynamic(id.into())
@@ -100,3 +116,32 @@ pub const LLM_NATIVE: [(&str, &[Type], Type, *const u8); 5] = [
     ("tts", &[Type::Any, Type::Any], Type::Any, llm_tts as *const u8),
     ("deep", &[Type::Any, Type::Any, Type::Any], Type::Any, llm_deep as *const u8),
 ];
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    static CALLBACK_RESULT: Mutex<Option<Dynamic>> = Mutex::new(None);
+
+    extern "C" fn record_callback_result(result: *const Dynamic) -> bool {
+        if result.is_null() {
+            return false;
+        }
+        *CALLBACK_RESULT.lock().unwrap() = Some(unsafe { &*result }.deep_clone());
+        true
+    }
+
+    #[test]
+    fn llm_notifier_can_call_zust_callback() -> anyhow::Result<()> {
+        *CALLBACK_RESULT.lock().unwrap() = None;
+        let callback = Dynamic::custom(ZustCallback::new(record_callback_result as *const () as usize, Type::Bool, Vec::new()));
+
+        assert!(llm_tx(&callback).is_none());
+        notify_or_call(&callback, dynamic::map!("text"=> "done"))?;
+
+        let result = CALLBACK_RESULT.lock().unwrap().clone().expect("callback should receive result");
+        assert_eq!(result.get_dynamic("text").map(|value| value.as_str().to_string()), Some("done".to_string()));
+        Ok(())
+    }
+}

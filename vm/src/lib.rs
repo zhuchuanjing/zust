@@ -1498,10 +1498,11 @@ mod tests {
             "vm_nested_closure_capture",
             br#"
             pub fn run() {
+                let reference_label = "reference";
                 |path: string| {
                     let upload_done = |uploaded: bool| {
                         if uploaded {
-                            path
+                            reference_label + ":" + path
                         } else {
                             "missing"
                         }
@@ -1517,7 +1518,7 @@ mod tests {
         assert_eq!(compiled.ret_ty(), &Type::Any);
         let run: extern "C" fn() -> *const Dynamic = unsafe { std::mem::transmute(compiled.ptr()) };
         let result = unsafe { &*run() };
-        assert_eq!(result.as_str(), "reference.png");
+        assert_eq!(result.as_str(), "reference:reference.png");
         Ok(())
     }
 

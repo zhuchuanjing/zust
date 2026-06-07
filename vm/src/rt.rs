@@ -943,14 +943,19 @@ impl JITRunTime {
     }
 
     fn callback_value(&mut self, ctx: &mut BuildContext, id: u32, captures: Vec<(Value, Type)>) -> Result<LocalVar> {
-        let (_, symbol) = self.compiler.symbols.get_symbol(id)?;
-        if let Symbol::Fn { ty: Type::Fn { tys, .. }, .. } = symbol
-            && !tys.is_empty()
-        {
-            return Err(anyhow!("native callback closure only supports 0 explicit args"));
+        let explicit_arg_len = match self.compiler.symbols.get_symbol(id)?.1 {
+            Symbol::Fn { ty: Type::Fn { tys, .. }, .. } => tys.len(),
+            _ => 0,
+        };
+        if explicit_arg_len > 8 {
+            return Err(anyhow!("native callback closure supports at most 8 explicit args"));
         }
+        if explicit_arg_len + captures.len() > 16 {
+            return Err(anyhow!("native callback closure supports at most 16 args including captures, got {}", explicit_arg_len + captures.len()));
+        }
+        let explicit_arg_tys = vec![Type::Any; explicit_arg_len];
         let capture_tys = vec![Type::Any; captures.len()];
-        let fn_info = self.gen_fn_with_capture_tys(Some(ctx), id, &[], &[], Some(&capture_tys))?;
+        let fn_info = self.gen_fn_with_capture_tys(Some(ctx), id, &explicit_arg_tys, &[], Some(&capture_tys))?;
         let FnInfo::Call { fn_id, ret, .. } = fn_info else {
             return Err(anyhow!("callback target must be compiled function"));
         };

@@ -481,8 +481,9 @@ impl Default for Vm {
 #[cfg(test)]
 mod tests {
     use super::{Vm, ZustCallback};
-    use dynamic::{Dynamic, ToJson, Type};
-    use std::sync::Mutex;
+    use dynamic::{CustomProperty, Dynamic, ToJson, Type};
+    use std::collections::BTreeMap;
+    use std::sync::{Mutex, RwLock};
 
     extern "C" fn math_double(value: i64) -> i64 {
         value * 2
@@ -1618,6 +1619,83 @@ mod tests {
     }
 
     #[test]
+    fn native_callback_can_receive_later_dynamic_args() -> anyhow::Result<()> {
+        static SAVED_PATH_CALLBACK: Mutex<Option<ZustCallback>> = Mutex::new(None);
+        static SAVED_SUM_CALLBACK: Mutex<Option<ZustCallback>> = Mutex::new(None);
+
+        extern "C" fn save_path_callback(callback: *const Dynamic) -> bool {
+            if callback.is_null() {
+                return false;
+            }
+            let Some(callback) = (unsafe { &*callback }).as_custom::<ZustCallback>().cloned() else {
+                return false;
+            };
+            *SAVED_PATH_CALLBACK.lock().unwrap() = Some(callback);
+            true
+        }
+
+        extern "C" fn save_sum_callback(callback: *const Dynamic) -> bool {
+            if callback.is_null() {
+                return false;
+            }
+            let Some(callback) = (unsafe { &*callback }).as_custom::<ZustCallback>().cloned() else {
+                return false;
+            };
+            *SAVED_SUM_CALLBACK.lock().unwrap() = Some(callback);
+            true
+        }
+
+        let path_result = "local/vm_callback/path";
+        let sum_result = "local/vm_callback/sum8";
+        let _ = root::remove(path_result);
+        let _ = root::remove(sum_result);
+        *SAVED_PATH_CALLBACK.lock().unwrap() = None;
+        *SAVED_SUM_CALLBACK.lock().unwrap() = None;
+
+        let vm = Vm::with_all()?;
+        vm.add_native_module_ptr("callback_test", "save_path", &[Type::Any], Type::Bool, save_path_callback as *const u8)?;
+        vm.add_native_module_ptr("callback_test", "save_sum", &[Type::Any], Type::Bool, save_sum_callback as *const u8)?;
+        vm.import_code(
+            "vm_callback_args",
+            br#"
+            pub fn register_path() {
+                let key = "local/vm_callback/path";
+                callback_test::save_path(|path| {
+                    root::add(key, path);
+                    true
+                })
+            }
+
+            pub fn register_sum() {
+                callback_test::save_sum(|a, b, c, d, e, f, g, h| {
+                    root::add("local/vm_callback/sum8", a + b + c + d + e + f + g + h);
+                    true
+                })
+            }
+            "#
+            .to_vec(),
+        )?;
+
+        let register_path = vm.get_fn("vm_callback_args::register_path", &[])?;
+        let register_path: extern "C" fn() -> bool = unsafe { std::mem::transmute(register_path.ptr()) };
+        assert!(register_path());
+
+        let register_sum = vm.get_fn("vm_callback_args::register_sum", &[])?;
+        let register_sum: extern "C" fn() -> bool = unsafe { std::mem::transmute(register_sum.ptr()) };
+        assert!(register_sum());
+
+        let path_callback = SAVED_PATH_CALLBACK.lock().unwrap().clone().expect("path callback should be saved");
+        assert_eq!(path_callback.call1(Dynamic::from("picked.txt"))?.as_bool(), Some(true));
+        assert_eq!(root::get(path_result)?.as_str(), "picked.txt");
+
+        let sum_callback = SAVED_SUM_CALLBACK.lock().unwrap().clone().expect("sum callback should be saved");
+        let sum_args = (1i64..=8).map(Dynamic::from).collect();
+        assert_eq!(sum_callback.call(sum_args)?.as_bool(), Some(true));
+        assert_eq!(root::get(sum_result)?.as_int(), Some(36));
+        Ok(())
+    }
+
+    #[test]
     fn root_add_fn_accepts_string_concat_in_registered_handler() -> anyhow::Result<()> {
         let vm = Vm::with_all()?;
         vm.import_code(
@@ -2715,6 +2793,26 @@ mod tests {
         Box::into_raw(Box::new(Dynamic::custom(NavMapForFunctionArg)))
     }
 
+    #[derive(Debug, Default)]
+    struct PropertyForwardingObject {
+        values: RwLock<BTreeMap<String, Dynamic>>,
+    }
+
+    impl CustomProperty for PropertyForwardingObject {
+        fn get_key(&self, key: &str) -> Option<Dynamic> {
+            self.values.read().unwrap().get(key).cloned()
+        }
+
+        fn set_key(&self, key: &str, value: Dynamic) -> bool {
+            self.values.write().unwrap().insert(key.to_string(), value);
+            true
+        }
+    }
+
+    extern "C" fn property_forwarding_object_new() -> *const Dynamic {
+        Box::into_raw(Box::new(Dynamic::custom_with_properties(PropertyForwardingObject::default())))
+    }
+
     #[test]
     fn typed_receiver_method_call_dispatches_with_type_hint() -> anyhow::Result<()> {
         let vm = Vm::with_all()?;
@@ -2769,6 +2867,32 @@ mod tests {
         let result = unsafe { &*result };
 
         assert!(result.as_custom::<NavMapForFunctionArg>().is_some());
+        Ok(())
+    }
+
+    #[test]
+    fn any_field_assignment_forwards_to_custom_properties() -> anyhow::Result<()> {
+        let vm = Vm::with_all()?;
+        vm.add_empty_type("Dialog")?;
+        vm.add_native_method_ptr("Dialog", "new", &[], Type::Any, property_forwarding_object_new as *const u8)?;
+        vm.import_code(
+            "vm_custom_property_forwarding",
+            br#"
+            pub fn run() {
+                let dialog = Dialog::new();
+                dialog.file_mode = 3;
+                dialog.file_mode
+            }
+            "#
+            .to_vec(),
+        )?;
+
+        let compiled = vm.get_fn("vm_custom_property_forwarding::run", &[])?;
+        assert_eq!(compiled.ret_ty(), &Type::Any);
+        let run: extern "C" fn() -> *const Dynamic = unsafe { std::mem::transmute(compiled.ptr()) };
+        let result = unsafe { &*run() };
+
+        assert_eq!(result.as_int(), Some(3));
         Ok(())
     }
 

@@ -25,7 +25,16 @@ impl ZustCallback {
     }
 
     pub fn call0(&self) -> Result<Dynamic> {
-        let args: Vec<Box<Dynamic>> = self.captures.iter().map(|value| Box::new(value.deep_clone())).collect();
+        self.call(Vec::new())
+    }
+
+    pub fn call1(&self, arg: Dynamic) -> Result<Dynamic> {
+        self.call(vec![arg])
+    }
+
+    pub fn call(&self, mut args: Vec<Dynamic>) -> Result<Dynamic> {
+        args.extend(self.captures.iter().map(|value| value.deep_clone()));
+        let args: Vec<Box<Dynamic>> = args.into_iter().map(Box::new).collect();
         let ptrs: Vec<*const Dynamic> = args.iter().map(|arg| arg.as_ref() as *const Dynamic).collect();
         unsafe { call_callback(self.fn_ptr as *const u8, &self.ret_ty, &ptrs) }
     }
@@ -374,71 +383,59 @@ fn spawn_run_ptr(fn_ptr: usize, ret_ty: Type, args: Dynamic) -> Result<()> {
 }
 
 unsafe fn call_callback(ptr: *const u8, ret_ty: &Type, args: &[*const Dynamic]) -> Result<Dynamic> {
-    macro_rules! call_void {
-        () => {
+    macro_rules! callback_arg_ty {
+        ($arg:ident) => {
+            *const Dynamic
+        };
+    }
+
+    macro_rules! callback_args {
+        ($body:ident $(, $extra:tt)*) => {
             match args {
-                [] => unsafe { std::mem::transmute::<_, extern "C" fn()>(ptr)() },
-                [a] => unsafe { std::mem::transmute::<_, extern "C" fn(*const Dynamic)>(ptr)(*a) },
-                [a, b] => unsafe { std::mem::transmute::<_, extern "C" fn(*const Dynamic, *const Dynamic)>(ptr)(*a, *b) },
-                [a, b, c] => unsafe { std::mem::transmute::<_, extern "C" fn(*const Dynamic, *const Dynamic, *const Dynamic)>(ptr)(*a, *b, *c) },
-                [a, b, c, d] => unsafe { std::mem::transmute::<_, extern "C" fn(*const Dynamic, *const Dynamic, *const Dynamic, *const Dynamic)>(ptr)(*a, *b, *c, *d) },
-                [a, b, c, d, e] => unsafe { std::mem::transmute::<_, extern "C" fn(*const Dynamic, *const Dynamic, *const Dynamic, *const Dynamic, *const Dynamic)>(ptr)(*a, *b, *c, *d, *e) },
-                [a, b, c, d, e, f] => unsafe { std::mem::transmute::<_, extern "C" fn(*const Dynamic, *const Dynamic, *const Dynamic, *const Dynamic, *const Dynamic, *const Dynamic)>(ptr)(*a, *b, *c, *d, *e, *f) },
-                [a, b, c, d, e, f, g] => unsafe {
-                    std::mem::transmute::<_, extern "C" fn(*const Dynamic, *const Dynamic, *const Dynamic, *const Dynamic, *const Dynamic, *const Dynamic, *const Dynamic)>(ptr)(*a, *b, *c, *d, *e, *f, *g)
-                },
-                [a, b, c, d, e, f, g, h] => unsafe {
-                    std::mem::transmute::<_, extern "C" fn(*const Dynamic, *const Dynamic, *const Dynamic, *const Dynamic, *const Dynamic, *const Dynamic, *const Dynamic, *const Dynamic)>(ptr)(
-                        *a, *b, *c, *d, *e, *f, *g, *h,
-                    )
-                },
-                _ => anyhow::bail!("callback supports at most 8 captures, got {}", args.len()),
+                [] => $body!($($extra),*;),
+                [a] => $body!($($extra),*; a),
+                [a, b] => $body!($($extra),*; a, b),
+                [a, b, c] => $body!($($extra),*; a, b, c),
+                [a, b, c, d] => $body!($($extra),*; a, b, c, d),
+                [a, b, c, d, e] => $body!($($extra),*; a, b, c, d, e),
+                [a, b, c, d, e, f] => $body!($($extra),*; a, b, c, d, e, f),
+                [a, b, c, d, e, f, g] => $body!($($extra),*; a, b, c, d, e, f, g),
+                [a, b, c, d, e, f, g, h] => $body!($($extra),*; a, b, c, d, e, f, g, h),
+                [a, b, c, d, e, f, g, h, i] => $body!($($extra),*; a, b, c, d, e, f, g, h, i),
+                [a, b, c, d, e, f, g, h, i, j] => $body!($($extra),*; a, b, c, d, e, f, g, h, i, j),
+                [a, b, c, d, e, f, g, h, i, j, k] => $body!($($extra),*; a, b, c, d, e, f, g, h, i, j, k),
+                [a, b, c, d, e, f, g, h, i, j, k, l] => $body!($($extra),*; a, b, c, d, e, f, g, h, i, j, k, l),
+                [a, b, c, d, e, f, g, h, i, j, k, l, m] => $body!($($extra),*; a, b, c, d, e, f, g, h, i, j, k, l, m),
+                [a, b, c, d, e, f, g, h, i, j, k, l, m, n] => $body!($($extra),*; a, b, c, d, e, f, g, h, i, j, k, l, m, n),
+                [a, b, c, d, e, f, g, h, i, j, k, l, m, n, o] => $body!($($extra),*; a, b, c, d, e, f, g, h, i, j, k, l, m, n, o),
+                [a, b, c, d, e, f, g, h, i, j, k, l, m, n, o, p] => $body!($($extra),*; a, b, c, d, e, f, g, h, i, j, k, l, m, n, o, p),
+                _ => anyhow::bail!("callback supports at most 16 args including captures, got {}", args.len()),
             }
         };
     }
 
-    macro_rules! call_ret {
-        ($ret:ty, $dynamic:expr) => {
-            match args {
-                [] => {
-                    let fn_ptr: extern "C" fn() -> $ret = unsafe { std::mem::transmute(ptr) };
-                    $dynamic(fn_ptr())
-                }
-                [a] => {
-                    let fn_ptr: extern "C" fn(*const Dynamic) -> $ret = unsafe { std::mem::transmute(ptr) };
-                    $dynamic(fn_ptr(*a))
-                }
-                [a, b] => {
-                    let fn_ptr: extern "C" fn(*const Dynamic, *const Dynamic) -> $ret = unsafe { std::mem::transmute(ptr) };
-                    $dynamic(fn_ptr(*a, *b))
-                }
-                [a, b, c] => {
-                    let fn_ptr: extern "C" fn(*const Dynamic, *const Dynamic, *const Dynamic) -> $ret = unsafe { std::mem::transmute(ptr) };
-                    $dynamic(fn_ptr(*a, *b, *c))
-                }
-                [a, b, c, d] => {
-                    let fn_ptr: extern "C" fn(*const Dynamic, *const Dynamic, *const Dynamic, *const Dynamic) -> $ret = unsafe { std::mem::transmute(ptr) };
-                    $dynamic(fn_ptr(*a, *b, *c, *d))
-                }
-                [a, b, c, d, e] => {
-                    let fn_ptr: extern "C" fn(*const Dynamic, *const Dynamic, *const Dynamic, *const Dynamic, *const Dynamic) -> $ret = unsafe { std::mem::transmute(ptr) };
-                    $dynamic(fn_ptr(*a, *b, *c, *d, *e))
-                }
-                [a, b, c, d, e, f] => {
-                    let fn_ptr: extern "C" fn(*const Dynamic, *const Dynamic, *const Dynamic, *const Dynamic, *const Dynamic, *const Dynamic) -> $ret = unsafe { std::mem::transmute(ptr) };
-                    $dynamic(fn_ptr(*a, *b, *c, *d, *e, *f))
-                }
-                [a, b, c, d, e, f, g] => {
-                    let fn_ptr: extern "C" fn(*const Dynamic, *const Dynamic, *const Dynamic, *const Dynamic, *const Dynamic, *const Dynamic, *const Dynamic) -> $ret = unsafe { std::mem::transmute(ptr) };
-                    $dynamic(fn_ptr(*a, *b, *c, *d, *e, *f, *g))
-                }
-                [a, b, c, d, e, f, g, h] => {
-                    let fn_ptr: extern "C" fn(*const Dynamic, *const Dynamic, *const Dynamic, *const Dynamic, *const Dynamic, *const Dynamic, *const Dynamic, *const Dynamic) -> $ret = unsafe { std::mem::transmute(ptr) };
-                    $dynamic(fn_ptr(*a, *b, *c, *d, *e, *f, *g, *h))
-                }
-                _ => anyhow::bail!("callback supports at most 8 captures, got {}", args.len()),
-            }
+    macro_rules! call_void_body {
+        (; $($arg:ident),*) => {{
+            let fn_ptr: extern "C" fn($(callback_arg_ty!($arg)),*) = unsafe { std::mem::transmute(ptr) };
+            fn_ptr($(*$arg),*)
+        }};
+    }
+
+    macro_rules! call_void {
+        () => {
+            callback_args!(call_void_body)
         };
+    }
+
+    macro_rules! call_ret_body {
+        ($ret:ty, $dynamic:expr; $($arg:ident),*) => {{
+            let fn_ptr: extern "C" fn($(callback_arg_ty!($arg)),*) -> $ret = unsafe { std::mem::transmute(ptr) };
+            $dynamic(fn_ptr($(*$arg),*))
+        }};
+    }
+
+    macro_rules! call_ret {
+        ($ret:ty, $dynamic:expr) => {{ callback_args!(call_ret_body, $ret, $dynamic) }};
     }
 
     if ret_ty.is_void() {

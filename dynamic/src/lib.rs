@@ -140,10 +140,23 @@ pub enum DynamicErr {
 
 use std::sync::{Arc, RwLock};
 
+pub trait CustomProperty: Any + Send + Sync {
+    fn get_key(&self, key: &str) -> Option<Dynamic>;
+
+    fn set_key(&self, key: &str, value: Dynamic) -> bool;
+
+    fn contains_key(&self, key: &str) -> bool {
+        self.get_key(key).is_some()
+    }
+}
+
 #[derive(Clone)]
 pub struct CustomValue {
     type_name: &'static str,
     value: Arc<dyn Any + Send + Sync>,
+    get_key: Option<fn(&(dyn Any + Send + Sync), &str) -> Option<Dynamic>>,
+    set_key: Option<fn(&(dyn Any + Send + Sync), &str, Dynamic) -> bool>,
+    contains_key: Option<fn(&(dyn Any + Send + Sync), &str) -> bool>,
 }
 
 impl CustomValue {
@@ -151,14 +164,40 @@ impl CustomValue {
     where
         T: Any + Send + Sync + 'static,
     {
-        Self { type_name: std::any::type_name::<T>(), value: Arc::new(value) }
+        Self { type_name: std::any::type_name::<T>(), value: Arc::new(value), get_key: None, set_key: None, contains_key: None }
     }
 
     pub fn from_arc<T>(value: Arc<T>) -> Self
     where
         T: Any + Send + Sync + 'static,
     {
-        Self { type_name: std::any::type_name::<T>(), value }
+        Self { type_name: std::any::type_name::<T>(), value, get_key: None, set_key: None, contains_key: None }
+    }
+
+    pub fn new_with_properties<T>(value: T) -> Self
+    where
+        T: CustomProperty + 'static,
+    {
+        Self::from_property_arc(Arc::new(value))
+    }
+
+    pub fn from_property_arc<T>(value: Arc<T>) -> Self
+    where
+        T: CustomProperty + 'static,
+    {
+        fn get_key<T: CustomProperty + 'static>(value: &(dyn Any + Send + Sync), key: &str) -> Option<Dynamic> {
+            value.downcast_ref::<T>()?.get_key(key)
+        }
+
+        fn set_key<T: CustomProperty + 'static>(value: &(dyn Any + Send + Sync), key: &str, next: Dynamic) -> bool {
+            value.downcast_ref::<T>().is_some_and(|value| value.set_key(key, next))
+        }
+
+        fn contains_key<T: CustomProperty + 'static>(value: &(dyn Any + Send + Sync), key: &str) -> bool {
+            value.downcast_ref::<T>().is_some_and(|value| value.contains_key(key))
+        }
+
+        Self { type_name: std::any::type_name::<T>(), value, get_key: Some(get_key::<T>), set_key: Some(set_key::<T>), contains_key: Some(contains_key::<T>) }
     }
 
     pub fn as_any(&self) -> &(dyn Any + Send + Sync) {
@@ -171,6 +210,18 @@ impl CustomValue {
 
     fn ptr_eq(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.value, &other.value)
+    }
+
+    fn get_key(&self, key: &str) -> Option<Dynamic> {
+        self.get_key.and_then(|get_key| get_key(self.as_any(), key))
+    }
+
+    fn set_key(&self, key: &str, value: Dynamic) -> bool {
+        self.set_key.is_some_and(|set_key| set_key(self.as_any(), key, value))
+    }
+
+    fn contains_key(&self, key: &str) -> bool {
+        self.contains_key.is_some_and(|contains_key| contains_key(self.as_any(), key))
     }
 }
 
@@ -568,6 +619,20 @@ impl Dynamic {
         T: Any + Send + Sync + 'static,
     {
         Self::Custom(CustomValue::from_arc(value))
+    }
+
+    pub fn custom_with_properties<T>(value: T) -> Self
+    where
+        T: CustomProperty + 'static,
+    {
+        Self::Custom(CustomValue::new_with_properties(value))
+    }
+
+    pub fn custom_property_arc<T>(value: Arc<T>) -> Self
+    where
+        T: CustomProperty + 'static,
+    {
+        Self::Custom(CustomValue::from_property_arc(value))
     }
 
     pub fn is_custom(&self) -> bool {
@@ -1132,6 +1197,8 @@ impl Dynamic {
             s.contains(key)
         } else if let Self::StringBuf(s) = self {
             s.contains(key)
+        } else if let Self::Custom(value) = self {
+            value.contains_key(key)
         } else {
             false
         }
@@ -1153,6 +1220,8 @@ impl Dynamic {
         } else if let Self::Struct { addr, ty } = self {
             let (idx, field_ty) = ty.get_field(key).ok()?;
             Self::read_struct_field(*addr, idx, field_ty, ty)
+        } else if let Self::Custom(value) = self {
+            value.get_key(key)
         } else {
             None
         }
@@ -1165,6 +1234,8 @@ impl Dynamic {
             && let Ok((idx, field_ty)) = ty.get_field(key.as_str())
         {
             Self::write_struct_field(*addr, idx, field_ty, ty, value.into());
+        } else if let Self::Custom(custom) = self {
+            custom.set_key(key.as_str(), value.into());
         }
     }
 
@@ -1381,6 +1452,32 @@ mod tests {
         cloned.as_custom::<RwLock<CustomCounter>>().unwrap().write().unwrap().value = 9;
         assert_eq!(value.as_custom::<RwLock<CustomCounter>>().unwrap().read().unwrap().value, 9);
         assert_eq!(value, cloned);
+    }
+
+    #[derive(Debug, Default)]
+    struct CustomPropertyBag {
+        values: RwLock<BTreeMap<SmolStr, Dynamic>>,
+    }
+
+    impl CustomProperty for CustomPropertyBag {
+        fn get_key(&self, key: &str) -> Option<Dynamic> {
+            self.values.read().unwrap().get(key).cloned()
+        }
+
+        fn set_key(&self, key: &str, value: Dynamic) -> bool {
+            self.values.write().unwrap().insert(key.into(), value);
+            true
+        }
+    }
+
+    #[test]
+    fn custom_values_can_forward_dynamic_properties() {
+        let value = Dynamic::custom_with_properties(CustomPropertyBag::default());
+
+        value.set_dynamic("file_mode".into(), 2i64);
+
+        assert!(value.contains("file_mode"));
+        assert_eq!(value.get_dynamic("file_mode").and_then(|value| value.as_int()), Some(2));
     }
 
     #[test]

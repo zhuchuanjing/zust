@@ -289,7 +289,7 @@ The standard functions are available without a module prefix:
 
 ### Native Callbacks
 
-When a closure is passed to a native function through an `Any` argument, the VM packages it as `Dynamic::Custom(ZustCallback)`. Rust native code can downcast and save it, then call `callback.call0()` later. The first supported callback shape is a zero-argument closure such as `button.on_pressed(|| { label.set_text("clicked!"); })`. Captures are deep-cloned as dynamic values, so scalar values and native custom objects can be used after the original Zust call returns.
+When a closure is passed to a native function through an `Any` argument, the VM packages it as `Dynamic::Custom(ZustCallback)`. Rust native code can downcast and save it, then call it later with `callback.call0()`, `callback.call1(value)`, or `callback.call(vec![...])`. Callback closures support up to 8 explicit dynamic arguments, such as `button.on_pressed(|| { label.set_text("clicked!"); })` and `dialog.on_file_selected(|path| { label.set_text(path); })`. Captures are deep-cloned as dynamic values, so scalar values and native custom objects can be used after the original Zust call returns.
 
 ### `Any`
 
@@ -303,6 +303,8 @@ Dynamic values expose common methods:
 - Operator helpers used by the compiler for dynamic expressions: `Any::binary(left, op, right)` and `Any::logic(left, op, right)`.
 
 Most normal script syntax, such as `list[idx]`, `map.key`, `value.len()`, and dynamic arithmetic, is lowered through these helpers.
+
+Native custom values can opt into property forwarding with `Dynamic::custom_with_properties(...)`. Then Zust field syntax such as `dialog.file_mode = 3` and `dialog.file_mode` goes through `Any::set_key/get_key`, and the custom Rust value receives the property name and dynamic value.
 
 ### `Vec`
 

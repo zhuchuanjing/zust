@@ -101,7 +101,9 @@ impl JITRunTime {
         self.native_symbols.write().unwrap().insert("__vm_struct_alloc".to_string(), native::struct_alloc as *const () as usize);
         self.native_symbols.write().unwrap().insert("__vm_repeat_fill".to_string(), native::repeat_fill as *const () as usize);
         self.native_symbols.write().unwrap().insert("__vm_strcat".to_string(), native::strcat as *const () as usize);
+        self.native_symbols.write().unwrap().insert("__vm_strcat_i64".to_string(), native::strcat_i64 as *const () as usize);
         self.native_symbols.write().unwrap().insert("__vm_strcat_assign".to_string(), native::strcat_assign as *const () as usize);
+        self.native_symbols.write().unwrap().insert("__vm_spawn_ptr".to_string(), native::spawn_ptr as *const () as usize);
         self.native_symbols.write().unwrap().insert("__vm_struct_from_ptr".to_string(), native::struct_from_ptr as *const () as usize);
         self.native_symbols.write().unwrap().insert("__vm_array_from_ptr".to_string(), native::array_from_ptr as *const () as usize);
         self.native_symbols.write().unwrap().insert("__vm_array_to_ptr".to_string(), native::array_to_ptr as *const () as usize);
@@ -125,8 +127,14 @@ impl JITRunTime {
         let strcat_sig = self.get_sig(&[Type::Str, Type::Str], Type::Str)?;
         self.strcat_fn = Some(self.module.declare_function("__vm_strcat", cranelift_module::Linkage::Import, &strcat_sig)?);
 
+        let strcat_i64_sig = self.get_sig(&[Type::Str, Type::I64], Type::Str)?;
+        self.strcat_i64_fn = Some(self.module.declare_function("__vm_strcat_i64", cranelift_module::Linkage::Import, &strcat_i64_sig)?);
+
         let strcat_assign_sig = self.get_sig(&[Type::Any, Type::Any], Type::Any)?;
         self.strcat_assign_fn = Some(self.module.declare_function("__vm_strcat_assign", cranelift_module::Linkage::Import, &strcat_assign_sig)?);
+
+        let spawn_ptr_sig = self.get_sig(&[Type::I64, Type::I64, Type::Any], Type::Bool)?;
+        self.spawn_ptr_fn = Some(self.module.declare_function("__vm_spawn_ptr", cranelift_module::Linkage::Import, &spawn_ptr_sig)?);
 
         let struct_from_ptr_sig = self.get_sig(&[Type::I64, Type::I64], Type::Any)?;
         self.struct_from_ptr_fn = Some(self.module.declare_function("__vm_struct_from_ptr", cranelift_module::Linkage::Import, &struct_from_ptr_sig)?);
@@ -188,6 +196,7 @@ impl JITRunTime {
             self.add_native_ptr(name, name, arg_tys, ret_ty, fn_ptr)?;
         }
         self.add_context_native_ptr("import", "import", &[Type::Any, Type::Any], Type::Bool, native::import_with_vm as *const u8)?;
+        self.add_context_native_ptr("spawn", "spawn", &[Type::Any, Type::Any], Type::Bool, native::spawn_with_vm as *const u8)?;
         Ok(())
     }
 
@@ -1031,14 +1040,14 @@ mod tests {
         assert_eq!(result.as_str(), "alpha-tail");
 
         let compiled = vm.get_fn("vm_static_strcat::append_local", &[])?;
-        assert_eq!(compiled.ret_ty(), &Type::Any);
+        assert_eq!(compiled.ret_ty(), &Type::Str);
         let append_local: extern "C" fn() -> *const Dynamic = unsafe { std::mem::transmute(compiled.ptr()) };
         let result = unsafe { &*append_local() };
         assert!(matches!(result, Dynamic::StringBuf(_)));
         assert_eq!(result.as_str(), "alpha-beta-tail");
 
         let compiled = vm.get_fn("vm_static_strcat::append_local_assign", &[])?;
-        assert_eq!(compiled.ret_ty(), &Type::Any);
+        assert_eq!(compiled.ret_ty(), &Type::Str);
         let append_local_assign: extern "C" fn() -> *const Dynamic = unsafe { std::mem::transmute(compiled.ptr()) };
         let result = unsafe { &*append_local_assign() };
         assert!(matches!(result, Dynamic::StringBuf(_)));
@@ -1061,7 +1070,7 @@ mod tests {
         assert_eq!(input.as_str(), "alpha");
 
         let compiled = vm.get_fn("vm_static_strcat::append_any", &[Type::Any])?;
-        assert_eq!(compiled.ret_ty(), &Type::Any);
+        assert_eq!(compiled.ret_ty(), &Type::Str);
         let append_any: extern "C" fn(*const Dynamic) -> *const Dynamic = unsafe { std::mem::transmute(compiled.ptr()) };
         let input = Dynamic::from("alpha");
         let result = unsafe { &*append_any(&input) };
@@ -1169,7 +1178,7 @@ mod tests {
         let int_eq_str: extern "C" fn(i64) -> bool = unsafe { std::mem::transmute(compiled.ptr()) };
 
         let compiled = vm.get_fn("vm_string_compare_imm::int_to_str", &[Type::I64])?;
-        assert_eq!(compiled.ret_ty(), &Type::Any);
+        assert_eq!(compiled.ret_ty(), &Type::Str);
         let int_to_str: extern "C" fn(i64) -> *const Dynamic = unsafe { std::mem::transmute(compiled.ptr()) };
         let text = int_to_str(42);
         assert_eq!(unsafe { &*text }.as_str(), "42");
@@ -1472,6 +1481,87 @@ mod tests {
         let register: extern "C" fn() -> bool = unsafe { std::mem::transmute(compiled.ptr()) };
         assert!(register());
         Ok(())
+    }
+
+    #[test]
+    fn std_spawn_runs_named_function_with_tuple_args() -> anyhow::Result<()> {
+        let zero_path = "local/vm_std_spawn/zero";
+        let sum_path = "local/vm_std_spawn/sum";
+        let closure_path = "local/vm_std_spawn/closure";
+        let closure_vars_path = "local/vm_std_spawn/closure_vars";
+        let _ = root::remove(zero_path);
+        let _ = root::remove(sum_path);
+        let _ = root::remove(closure_path);
+        let _ = root::remove(closure_vars_path);
+        let vm = Vm::with_all()?;
+        vm.import_code(
+            "vm_std_spawn",
+            br#"
+            pub fn zero() {
+                root::add("local/vm_std_spawn/zero", 1);
+            }
+
+            pub fn job(left, right) {
+                root::add("local/vm_std_spawn/sum", left + right);
+            }
+
+            pub fn start_zero() {
+                spawn("vm_std_spawn::zero", ())
+            }
+
+            pub fn start_sum() {
+                spawn("vm_std_spawn::job", (10, 20))
+            }
+
+            pub fn start_closure() {
+                spawn(|x, y| {
+                    root::add("local/vm_std_spawn/closure", x + y);
+                }, (3, 4))
+            }
+
+            pub fn start_closure_vars() {
+                let x = 5;
+                let y = 6;
+                spawn(|left, right| {
+                    root::add("local/vm_std_spawn/closure_vars", left + right);
+                }, (x, y))
+            }
+            "#
+            .to_vec(),
+        )?;
+
+        let compiled = vm.get_fn("vm_std_spawn::start_zero", &[])?;
+        assert_eq!(compiled.ret_ty(), &Type::Bool);
+        let start_zero: extern "C" fn() -> bool = unsafe { std::mem::transmute(compiled.ptr()) };
+        assert!(start_zero());
+
+        let compiled = vm.get_fn("vm_std_spawn::start_sum", &[])?;
+        assert_eq!(compiled.ret_ty(), &Type::Bool);
+        let start_sum: extern "C" fn() -> bool = unsafe { std::mem::transmute(compiled.ptr()) };
+        assert!(start_sum());
+
+        let compiled = vm.get_fn("vm_std_spawn::start_closure", &[])?;
+        assert_eq!(compiled.ret_ty(), &Type::Bool);
+        let start_closure: extern "C" fn() -> bool = unsafe { std::mem::transmute(compiled.ptr()) };
+        assert!(start_closure());
+
+        let compiled = vm.get_fn("vm_std_spawn::start_closure_vars", &[])?;
+        assert_eq!(compiled.ret_ty(), &Type::Bool);
+        let start_closure_vars: extern "C" fn() -> bool = unsafe { std::mem::transmute(compiled.ptr()) };
+        assert!(start_closure_vars());
+
+        for _ in 0..50 {
+            let zero_done = root::get(zero_path).ok().and_then(|value| value.as_int()) == Some(1);
+            let sum_done = root::get(sum_path).ok().and_then(|value| value.as_int()) == Some(30);
+            let closure_done = root::get(closure_path).ok().and_then(|value| value.as_int()) == Some(7);
+            let closure_vars_done = root::get(closure_vars_path).ok().and_then(|value| value.as_int()) == Some(11);
+            if zero_done && sum_done && closure_done && closure_vars_done {
+                return Ok(());
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+
+        anyhow::bail!("spawned jobs did not write expected results");
     }
 
     #[test]
@@ -1862,7 +1952,7 @@ mod tests {
         )?;
 
         let compiled = vm.get_fn("vm_if_empty_object_branch::first_note", &[Type::Any])?;
-        assert_eq!(compiled.ret_ty(), &Type::Any);
+        assert_eq!(compiled.ret_ty(), &Type::Str);
         let first_note: extern "C" fn(*const Dynamic) -> *const Dynamic = unsafe { std::mem::transmute(compiled.ptr()) };
 
         let empty_steps = Dynamic::list(Vec::new());

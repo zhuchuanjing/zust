@@ -33,7 +33,9 @@ pub struct JITRunTime {
     pub(crate) struct_alloc_fn: Option<FuncId>,
     pub(crate) repeat_fill_fn: Option<FuncId>,
     pub(crate) strcat_fn: Option<FuncId>,
+    pub(crate) strcat_i64_fn: Option<FuncId>,
     pub(crate) strcat_assign_fn: Option<FuncId>,
+    pub(crate) spawn_ptr_fn: Option<FuncId>,
     pub(crate) struct_from_ptr_fn: Option<FuncId>,
     pub(crate) array_from_ptr_fn: Option<FuncId>,
     pub(crate) array_to_ptr_fn: Option<FuncId>,
@@ -130,7 +132,8 @@ impl JITRunTime {
             ptr
         };
         let value = ctx.builder.ins().iconst(ptr_type(), ptr as i64); //需要生成副本 避免被释放
-        Ok((self.call(ctx, self.get_method(&Type::Any, "clone")?, vec![value])?.0, Type::Any))
+        let ty = if self.compiler.consts[idx].is_str() { Type::Str } else { Type::Any };
+        Ok((self.call(ctx, self.get_method(&Type::Any, "clone")?, vec![value])?.0, ty))
     }
 
     fn get_null_value(&mut self, ctx: &mut BuildContext) -> Result<(Value, Type)> {
@@ -203,7 +206,9 @@ impl JITRunTime {
             struct_alloc_fn: None,
             repeat_fill_fn: None,
             strcat_fn: None,
+            strcat_i64_fn: None,
             strcat_assign_fn: None,
+            spawn_ptr_fn: None,
             struct_from_ptr_fn: None,
             array_from_ptr_fn: None,
             array_to_ptr_fn: None,
@@ -901,6 +906,60 @@ impl JITRunTime {
         Ok(LocalVar::Closure { id, captures })
     }
 
+    fn is_spawn_fn_name(name: &str) -> bool {
+        name == "spawn" || name == "std::spawn"
+    }
+
+    fn spawn_arg_pack_len(&self, expr: &Expr) -> Option<usize> {
+        match &expr.kind {
+            ExprKind::Tuple(items) | ExprKind::List(items) => Some(items.len()),
+            ExprKind::Value(value) => value.is_list().then(|| value.len()),
+            ExprKind::Const(idx) => self.compiler.consts.get(*idx).and_then(|value| value.is_list().then(|| value.len())),
+            ExprKind::Typed { value, .. } => self.spawn_arg_pack_len(value),
+            _ => None,
+        }
+    }
+
+    fn eval_spawn_arg_pack(&mut self, ctx: &mut BuildContext, expr: &Expr) -> Result<(Value, Type)> {
+        let (ExprKind::Tuple(items) | ExprKind::List(items)) = &expr.kind else {
+            return self.eval(ctx, expr)?.get(ctx).ok_or_else(|| anyhow!("spawn closure args expression has no value"));
+        };
+        let idx = self.compiler.get_const(Dynamic::list(vec![Dynamic::Null; items.len()]));
+        let (list, _) = self.get_const_value(ctx, idx)?;
+        for (idx, item) in items.iter().enumerate() {
+            let value = self.eval(ctx, item)?.get(ctx).ok_or_else(|| anyhow!("spawn closure arg has no value: {:?}", item))?;
+            let value = self.convert(ctx, value, Type::Any)?;
+            let idx = ctx.builder.ins().iconst(types::I64, idx as i64);
+            let set_idx = self.get_fn(self.get_id("Any::set_idx")?, &[Type::Any, Type::I64, Type::Any])?;
+            self.call_for_side_effect(ctx, set_idx, vec![list, idx, value])?;
+        }
+        Ok((list, Type::Any))
+    }
+
+    fn spawn_closure(&mut self, ctx: &mut BuildContext, id: u32, captures: Vec<(Value, Type)>, args_expr: &Expr) -> Result<LocalVar> {
+        if !captures.is_empty() {
+            return Err(anyhow!("spawn closure does not support captures yet"));
+        }
+        let arg_len = self.spawn_arg_pack_len(args_expr).ok_or_else(|| anyhow!("spawn closure args must be a tuple argument pack"))?;
+        if arg_len > 8 {
+            return Err(anyhow!("spawn supports at most 8 args, got {}", arg_len));
+        }
+        let arg_tys = vec![Type::Any; arg_len];
+        let fn_info = self.gen_fn_with_params(Some(ctx), id, &arg_tys, &[])?;
+        let FnInfo::Call { fn_id, ret, .. } = fn_info else {
+            return Err(anyhow!("spawn closure target must be compiled function"));
+        };
+        let args = self.eval_spawn_arg_pack(ctx, args_expr)?;
+        let args = self.convert(ctx, args, Type::Any)?;
+        let fn_ref = self.get_fn_ref(ctx, fn_id);
+        let fn_addr = ctx.builder.ins().func_addr(ptr_type(), fn_ref);
+        let ret_ty = Self::type_ptr_const(ctx, &ret);
+        let spawn_ptr = self.spawn_ptr_fn.ok_or_else(|| anyhow!("VM spawn ptr runtime is not registered"))?;
+        let spawn_ref = self.get_fn_ref(ctx, spawn_ptr);
+        let call_inst = ctx.builder.ins().call(spawn_ref, &[fn_addr, ret_ty, args]);
+        Ok((ctx.builder.inst_results(call_inst)[0], Type::Bool).into())
+    }
+
     pub(crate) fn call_fn(&mut self, ctx: &mut BuildContext, id: u32, obj: Option<Expr>, params: &Vec<Expr>) -> Result<LocalVar> {
         self.call_fn_with_params(ctx, id, &[], obj, params)
     }
@@ -911,6 +970,15 @@ impl JITRunTime {
 
     pub(crate) fn call_fn_with_capture_values(&mut self, ctx: &mut BuildContext, id: u32, generic_args: &[Type], obj: Option<Expr>, params: &Vec<Expr>, capture_values: Option<Vec<(Value, Type)>>) -> Result<LocalVar> {
         let fn_name = self.compiler.symbols.get_symbol(id).map(|(name, _)| name.clone())?;
+        if capture_values.is_none()
+            && generic_args.is_empty()
+            && obj.is_none()
+            && Self::is_spawn_fn_name(fn_name.as_str())
+            && let [target, args] = params.as_slice()
+            && let LocalVar::Closure { id, captures } = self.eval(ctx, target)?
+        {
+            return self.spawn_closure(ctx, id, captures, args);
+        }
         let mut args: Vec<(Value, Type)> = if let Some(obj) = obj { vec![self.eval(ctx, &obj)?.get(ctx).ok_or_else(|| anyhow!("函数 {} 的接收者表达式没有值: {:?}", fn_name, obj))?] } else { Vec::new() };
         for p in params {
             args.push(self.eval(ctx, p)?.get(ctx).ok_or_else(|| anyhow!("函数 {} 的参数表达式没有值: {:?}", fn_name, p))?);

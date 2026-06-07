@@ -703,6 +703,11 @@ impl Parser {
         let mut expr = if ch == b'(' {
             let start = self.current_pos();
             self.pos += 1;
+            self.whitespace()?;
+            if self.take(b')').is_ok() {
+                let expr = Expr::new(ExprKind::Tuple(Vec::new()), Span::new(start, self.current_pos()));
+                return Ok((self.postfix_expr(start, expr)?, true));
+            }
             let (e, _closed) = self.expr_with_min_weight(None, None, 0, true)?;
             self.whitespace()?;
             if self.get()? == b',' {

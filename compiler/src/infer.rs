@@ -117,6 +117,7 @@ impl Compiler {
         match left {
             Some(left) if left == right => Ok(left),
             Some(left) if left.is_void() || right.is_void() => Err(Self::semantic_error(span, format!("返回类型不一致: {:?} 和 {:?}", left, right))),
+            Some(left) if left.is_any() || right.is_any() => Ok(Type::Any),
             Some(left) => Ok(left + right),
             None => Ok(right),
         }
@@ -330,7 +331,11 @@ impl Compiler {
             ExprKind::Value(v) if v.is_list() => Ok(v.get_type()),
             ExprKind::Value(v) if v.is_map() => Ok(Type::Any),
             ExprKind::Value(v) => Ok(v.get_type()),
-            ExprKind::Const(idx) => Ok(if self.consts.get(*idx).is_some_and(|value| value.is_list() && value.len() == 0) { Type::list_any() } else { Type::Any }),
+            ExprKind::Const(idx) => Ok(match self.consts.get(*idx) {
+                Some(value) if value.is_str() => Type::Str,
+                Some(value) if value.is_list() && value.len() == 0 => Type::list_any(),
+                _ => Type::Any,
+            }),
             ExprKind::Var(idx) => {
                 let idx = self.top() + (*idx as usize);
                 if idx < self.tys.len() { self.symbols.get_type(&self.tys[idx]) } else { Ok(Type::Any) }
@@ -829,7 +834,7 @@ impl Compiler {
                     let else_ty = self.infer_stmt(e)?;
                     if then_ty != else_ty {
                         log::info!("then 和 else 有不同类型 {:?} {:?}", then_ty, else_ty);
-                        return Ok(if then_ty.is_any() { else_ty } else { then_ty });
+                        return Self::merge_return_type(stmt.span, Some(then_ty), else_ty);
                     }
                 }
                 if else_body.is_none() {

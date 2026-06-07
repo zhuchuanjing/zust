@@ -13,6 +13,13 @@ impl JITRunTime {
         Ok(ctx.builder.inst_results(call_inst)[0])
     }
 
+    fn strcat_i64(&mut self, ctx: &mut BuildContext, left: Value, right: Value) -> Result<Value> {
+        let fn_id = self.strcat_i64_fn.ok_or_else(|| anyhow!("VM strcat i64 runtime is not registered"))?;
+        let fn_ref = self.get_fn_ref(ctx, fn_id);
+        let call_inst = ctx.builder.ins().call(fn_ref, &[left, right]);
+        Ok(ctx.builder.inst_results(call_inst)[0])
+    }
+
     fn strcat_assign(&mut self, ctx: &mut BuildContext, left: Value, right: Value) -> Result<Value> {
         let fn_id = self.strcat_assign_fn.ok_or_else(|| anyhow!("VM strcat assign runtime is not registered"))?;
         let fn_ref = self.get_fn_ref(ctx, fn_id);
@@ -247,6 +254,10 @@ impl JITRunTime {
             if left.1.is_str() && right.1.is_str() {
                 return Ok((self.strcat(ctx, left.0, right.0)?, Type::Str));
             }
+            if left.1.is_str() && right.1.is_int() {
+                let right = self.convert(ctx, right, Type::I64)?;
+                return Ok((self.strcat_i64(ctx, left.0, right)?, Type::Str));
+            }
             let left = self.convert(ctx, left, Type::Any)?;
             let right = self.convert(ctx, right, Type::Any)?;
             let result = self.any_binary(ctx, left, op, right)?.0;
@@ -401,6 +412,11 @@ impl JITRunTime {
                 })?;
                 let right = self.convert(ctx, right_vt, Type::Str)?;
                 return Ok((self.strcat(ctx, left.0, right)?, Type::Str));
+            }
+            if left.1.is_str() && right.is_int() {
+                let right = ctx.get_const(&right)?;
+                let right = self.convert(ctx, right, Type::I64)?;
+                return Ok((self.strcat_i64(ctx, left.0, right)?, Type::Str));
             }
             let left = self.convert(ctx, left, Type::Any)?;
             let right_vt = ctx.get_const(&right).or_else(|_| {

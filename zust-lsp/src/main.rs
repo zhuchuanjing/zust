@@ -292,6 +292,7 @@ fn lsp_externs() -> Vec<LspExtern> {
     vec![
         LspExtern { full_name: "std::print", arg_tys: vec![Type::Any], ret_ty: Type::Void },
         LspExtern { full_name: "std::import", arg_tys: vec![Type::Any, Type::Any], ret_ty: Type::Bool },
+        LspExtern { full_name: "std::spawn", arg_tys: vec![Type::Any, Type::Any], ret_ty: Type::Bool },
         LspExtern { full_name: "std::uuid", arg_tys: vec![], ret_ty: Type::Any },
         LspExtern { full_name: "std::rand", arg_tys: vec![Type::Any, Type::Any], ret_ty: Type::Any },
         LspExtern { full_name: "std::__struct_alloc", arg_tys: vec![Type::I64], ret_ty: Type::Any },

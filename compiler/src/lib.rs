@@ -1286,6 +1286,17 @@ impl Compiler {
         Expr::new(ExprKind::Var(temp), span)
     }
 
+    fn is_spawn_closure_call(obj: &Expr, params: &[Expr]) -> bool {
+        params.len() == 2 && matches!(&obj.kind, ExprKind::Ident(name) if name.as_str() == "spawn") && matches!(&params[0].kind, ExprKind::Closure { .. })
+    }
+
+    fn eval_spawn_arg_pack(&mut self, expr: &Expr, stmts: &mut Vec<Stmt>, cap: &mut Capture) -> Result<Expr> {
+        match &expr.kind {
+            ExprKind::Tuple(items) | ExprKind::List(items) => Ok(Expr::new(ExprKind::Tuple(items.iter().map(|item| self.eval(item, stmts, cap)).collect::<Result<Vec<_>>>()?), expr.span)),
+            _ => Err(Self::semantic_error(expr.span, "spawn closure args must be tuple")),
+        }
+    }
+
     fn is_multi_assign_target(expr: &Expr) -> bool {
         matches!(expr.kind, ExprKind::Tuple(_) | ExprKind::List(_))
     }
@@ -1580,7 +1591,11 @@ impl Compiler {
                 if let Some(v) = value.compact() { Ok(Expr::new(ExprKind::Value(v), expr.span)) } else { Ok(value) }
             }
             ExprKind::Call { obj, params } => {
-                let params: Vec<Expr> = params.iter().map(|p| self.eval(p, stmts, cap)).collect::<Result<Vec<_>>>()?;
+                let params: Vec<Expr> = if Self::is_spawn_closure_call(obj, params) {
+                    vec![self.eval(&params[0], stmts, cap)?, self.eval_spawn_arg_pack(&params[1], stmts, cap)?]
+                } else {
+                    params.iter().map(|p| self.eval(p, stmts, cap)).collect::<Result<Vec<_>>>()?
+                };
                 let obj_result = if let Some(method_obj) = self.method_call_obj_expr(obj, stmts, cap)? { Ok(method_obj) } else { self.eval(obj, stmts, cap) };
                 match obj_result {
                     Ok(obj) if obj.is_value() && params.is_empty() => Ok(obj),

@@ -1,6 +1,6 @@
 use super::FnVariant;
 use crate::JITRunTime;
-use crate::memory::{alloc_dynamic, alloc_struct_bytes};
+use crate::memory::{alloc_dynamic, alloc_struct_bytes, take_dynamic_return};
 use anyhow::Result;
 use cranelift::prelude::AbiParam;
 use cranelift_module::{Linkage, Module};
@@ -9,6 +9,7 @@ use parser::{BinaryOp, Expr, ExprKind, Span};
 use rand::RngExt;
 use std::borrow::Cow;
 use std::collections::BTreeMap;
+use std::fmt::Write as _;
 use std::sync::{Mutex, Weak};
 
 extern "C" fn any_clone(addr: *const Dynamic) -> *const Dynamic {
@@ -118,6 +119,14 @@ pub(crate) extern "C" fn strcat(left: *const Dynamic, right: *const Dynamic) -> 
     let mut out = String::with_capacity(left.len() + right.len());
     out.push_str(left);
     out.push_str(right);
+    alloc_dynamic(Dynamic::StringBuf(out))
+}
+
+pub(crate) extern "C" fn strcat_i64(left: *const Dynamic, right: i64) -> *const Dynamic {
+    let left = if left.is_null() { "" } else { unsafe { (&*left).as_str() } };
+    let mut out = String::with_capacity(left.len() + 20);
+    out.push_str(left);
+    let _ = write!(&mut out, "{right}");
     alloc_dynamic(Dynamic::StringBuf(out))
 }
 
@@ -254,6 +263,180 @@ pub(crate) extern "C" fn import_with_vm(context: *const Weak<Mutex<JITRunTime>>,
         return false;
     }
     super::with_vm_context(context, |vm| vm.import(unsafe { &*addr }.as_str(), unsafe { &*path }.as_str())).map_err(|e| println!("import {:?}", e)).is_ok()
+}
+
+pub(crate) extern "C" fn spawn_with_vm(context: *const Weak<Mutex<JITRunTime>>, fn_name: *const Dynamic, args: *const Dynamic) -> bool {
+    if context.is_null() || fn_name.is_null() {
+        return false;
+    }
+    let fn_name = unsafe { (&*fn_name).as_str().to_string() };
+    if fn_name.is_empty() {
+        return false;
+    }
+    let args = if args.is_null() { Dynamic::Null } else { unsafe { (&*args).deep_clone() } };
+    let context = unsafe { (&*context).clone() };
+    std::thread::Builder::new()
+        .name(format!("zust:{fn_name}"))
+        .spawn(move || {
+            if let Err(err) = spawn_run(context, fn_name.as_str(), args) {
+                log::error!("spawn {fn_name} failed: {err:?}");
+            }
+        })
+        .is_ok()
+}
+
+fn spawn_args(args: Dynamic) -> Vec<Dynamic> {
+    match args {
+        Dynamic::Null => Vec::new(),
+        Dynamic::List(values) => values.read().unwrap().iter().map(Dynamic::deep_clone).collect(),
+        value => vec![value],
+    }
+}
+
+fn spawn_run(context: Weak<Mutex<JITRunTime>>, fn_name: &str, args: Dynamic) -> Result<()> {
+    let args = spawn_args(args);
+    if args.len() > 8 {
+        anyhow::bail!("spawn supports at most 8 args, got {}", args.len());
+    }
+    let arg_tys = vec![Type::Any; args.len()];
+    let (ptr, ret_ty) = super::with_vm_context(&context as *const Weak<Mutex<JITRunTime>>, |vm| vm.get_fn_ptr(fn_name, &arg_tys))?;
+    let args: Vec<Box<Dynamic>> = args.into_iter().map(Box::new).collect();
+    let ptrs: Vec<*const Dynamic> = args.iter().map(|arg| arg.as_ref() as *const Dynamic).collect();
+    unsafe {
+        call_spawned(ptr, &ret_ty, &ptrs)?;
+    }
+    Ok(())
+}
+
+pub(crate) extern "C" fn spawn_ptr(fn_ptr: i64, ret_ty: i64, args: *const Dynamic) -> bool {
+    if fn_ptr == 0 || ret_ty == 0 {
+        return false;
+    }
+    let fn_ptr = fn_ptr as usize;
+    let ret_ty = unsafe { (&*(ret_ty as *const Type)).clone() };
+    let args = if args.is_null() { Dynamic::Null } else { unsafe { (&*args).deep_clone() } };
+    std::thread::Builder::new()
+        .name("zust:closure".to_string())
+        .spawn(move || {
+            if let Err(err) = spawn_run_ptr(fn_ptr, ret_ty, args) {
+                log::error!("spawn closure failed: {err:?}");
+            }
+        })
+        .is_ok()
+}
+
+fn spawn_run_ptr(fn_ptr: usize, ret_ty: Type, args: Dynamic) -> Result<()> {
+    let args = spawn_args(args);
+    if args.len() > 8 {
+        anyhow::bail!("spawn supports at most 8 args, got {}", args.len());
+    }
+    let args: Vec<Box<Dynamic>> = args.into_iter().map(Box::new).collect();
+    let ptrs: Vec<*const Dynamic> = args.iter().map(|arg| arg.as_ref() as *const Dynamic).collect();
+    unsafe {
+        call_spawned(fn_ptr as *const u8, &ret_ty, &ptrs)?;
+    }
+    Ok(())
+}
+
+unsafe fn call_spawned(ptr: *const u8, ret_ty: &Type, args: &[*const Dynamic]) -> Result<()> {
+    macro_rules! call_void {
+        () => {
+            match args {
+                [] => unsafe { std::mem::transmute::<_, extern "C" fn()>(ptr)() },
+                [a] => unsafe { std::mem::transmute::<_, extern "C" fn(*const Dynamic)>(ptr)(*a) },
+                [a, b] => unsafe { std::mem::transmute::<_, extern "C" fn(*const Dynamic, *const Dynamic)>(ptr)(*a, *b) },
+                [a, b, c] => unsafe { std::mem::transmute::<_, extern "C" fn(*const Dynamic, *const Dynamic, *const Dynamic)>(ptr)(*a, *b, *c) },
+                [a, b, c, d] => unsafe { std::mem::transmute::<_, extern "C" fn(*const Dynamic, *const Dynamic, *const Dynamic, *const Dynamic)>(ptr)(*a, *b, *c, *d) },
+                [a, b, c, d, e] => unsafe { std::mem::transmute::<_, extern "C" fn(*const Dynamic, *const Dynamic, *const Dynamic, *const Dynamic, *const Dynamic)>(ptr)(*a, *b, *c, *d, *e) },
+                [a, b, c, d, e, f] => unsafe { std::mem::transmute::<_, extern "C" fn(*const Dynamic, *const Dynamic, *const Dynamic, *const Dynamic, *const Dynamic, *const Dynamic)>(ptr)(*a, *b, *c, *d, *e, *f) },
+                [a, b, c, d, e, f, g] => unsafe {
+                    std::mem::transmute::<_, extern "C" fn(*const Dynamic, *const Dynamic, *const Dynamic, *const Dynamic, *const Dynamic, *const Dynamic, *const Dynamic)>(ptr)(*a, *b, *c, *d, *e, *f, *g)
+                },
+                [a, b, c, d, e, f, g, h] => unsafe {
+                    std::mem::transmute::<_, extern "C" fn(*const Dynamic, *const Dynamic, *const Dynamic, *const Dynamic, *const Dynamic, *const Dynamic, *const Dynamic, *const Dynamic)>(ptr)(
+                        *a, *b, *c, *d, *e, *f, *g, *h,
+                    )
+                },
+                _ => unreachable!(),
+            }
+        };
+    }
+
+    if ret_ty.is_void() {
+        call_void!();
+        return Ok(());
+    }
+
+    macro_rules! call_ret {
+        ($ret:ty, $drop_result:expr) => {
+            match args {
+                [] => {
+                    let fn_ptr: extern "C" fn() -> $ret = unsafe { std::mem::transmute(ptr) };
+                    $drop_result(fn_ptr());
+                }
+                [a] => {
+                    let fn_ptr: extern "C" fn(*const Dynamic) -> $ret = unsafe { std::mem::transmute(ptr) };
+                    $drop_result(fn_ptr(*a));
+                }
+                [a, b] => {
+                    let fn_ptr: extern "C" fn(*const Dynamic, *const Dynamic) -> $ret = unsafe { std::mem::transmute(ptr) };
+                    $drop_result(fn_ptr(*a, *b));
+                }
+                [a, b, c] => {
+                    let fn_ptr: extern "C" fn(*const Dynamic, *const Dynamic, *const Dynamic) -> $ret = unsafe { std::mem::transmute(ptr) };
+                    $drop_result(fn_ptr(*a, *b, *c));
+                }
+                [a, b, c, d] => {
+                    let fn_ptr: extern "C" fn(*const Dynamic, *const Dynamic, *const Dynamic, *const Dynamic) -> $ret = unsafe { std::mem::transmute(ptr) };
+                    $drop_result(fn_ptr(*a, *b, *c, *d));
+                }
+                [a, b, c, d, e] => {
+                    let fn_ptr: extern "C" fn(*const Dynamic, *const Dynamic, *const Dynamic, *const Dynamic, *const Dynamic) -> $ret = unsafe { std::mem::transmute(ptr) };
+                    $drop_result(fn_ptr(*a, *b, *c, *d, *e));
+                }
+                [a, b, c, d, e, f] => {
+                    let fn_ptr: extern "C" fn(*const Dynamic, *const Dynamic, *const Dynamic, *const Dynamic, *const Dynamic, *const Dynamic) -> $ret = unsafe { std::mem::transmute(ptr) };
+                    $drop_result(fn_ptr(*a, *b, *c, *d, *e, *f));
+                }
+                [a, b, c, d, e, f, g] => {
+                    let fn_ptr: extern "C" fn(*const Dynamic, *const Dynamic, *const Dynamic, *const Dynamic, *const Dynamic, *const Dynamic, *const Dynamic) -> $ret = unsafe { std::mem::transmute(ptr) };
+                    $drop_result(fn_ptr(*a, *b, *c, *d, *e, *f, *g));
+                }
+                [a, b, c, d, e, f, g, h] => {
+                    let fn_ptr: extern "C" fn(*const Dynamic, *const Dynamic, *const Dynamic, *const Dynamic, *const Dynamic, *const Dynamic, *const Dynamic, *const Dynamic) -> $ret = unsafe { std::mem::transmute(ptr) };
+                    $drop_result(fn_ptr(*a, *b, *c, *d, *e, *f, *g, *h));
+                }
+                _ => unreachable!(),
+            }
+        };
+    }
+
+    if ret_ty.is_bool() {
+        call_ret!(bool, |_| {});
+    } else if ret_ty.is_float() {
+        if ret_ty.is_f64() {
+            call_ret!(f64, |_| {});
+        } else {
+            call_ret!(f32, |_| {});
+        }
+    } else if ret_ty.is_int() || ret_ty.is_uint() {
+        match ret_ty {
+            Type::I8 => call_ret!(i8, |_| {}),
+            Type::U8 => call_ret!(u8, |_| {}),
+            Type::I16 => call_ret!(i16, |_| {}),
+            Type::U16 => call_ret!(u16, |_| {}),
+            Type::I32 => call_ret!(i32, |_| {}),
+            Type::U32 => call_ret!(u32, |_| {}),
+            Type::I64 => call_ret!(i64, |_| {}),
+            Type::U64 => call_ret!(u64, |_| {}),
+            _ => unreachable!(),
+        }
+    } else if ret_ty.is_struct() || ret_ty.is_array() || ret_ty.is_vec() {
+        call_ret!(*const u8, |_| {});
+    } else {
+        call_ret!(*const Dynamic, |ptr| drop(unsafe { take_dynamic_return(ptr) }));
+    }
+    Ok(())
 }
 
 extern "C" fn any_len(addr: *const Dynamic) -> i64 {

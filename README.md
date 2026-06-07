@@ -285,6 +285,7 @@ The standard functions are available without a module prefix:
 - `uuid()`: return a UUID string.
 - `rand(start, stop)`: return a random integer or float between `start` and `stop`.
 - `import(module, path)`: import another `.zs` file or a source object stored in `root`.
+- `spawn(target, args)`: start a detached OS thread and call `target`. `target` can be a function name string or a closure without captures. `args` is always a tuple argument pack: `spawn("job::run", ())` calls with no arguments, and `spawn(|x, y| { print(x + y); }, (10, 20))` calls with two arguments. The spawned function currently receives arguments through the dynamic `Any` boundary, and the return value is ignored.
 
 ### `Any`
 

@@ -591,6 +591,16 @@ mod tests {
     }
 
     #[test]
+    fn parses_empty_tuple_expression() {
+        let mut parser = Parser::new(b"()".to_vec());
+        let expr = parser.get_expr().unwrap();
+        let ExprKind::Tuple(items) = expr.kind else {
+            panic!("expected empty tuple, got {expr:?}");
+        };
+        assert!(items.is_empty());
+    }
+
+    #[test]
     fn parses_explicit_generic_function_call() {
         let mut parser = Parser::new(b"value::<4>()".to_vec());
         let expr = parser.get_expr().unwrap();

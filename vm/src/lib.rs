@@ -490,6 +490,26 @@ mod tests {
     }
 
     #[test]
+    fn build_context_set_var_fills_sparse_none_slots() -> anyhow::Result<()> {
+        use crate::context::{BuildContext, LocalVar};
+        use cranelift::codegen::ir::{Function, Signature, UserFuncName};
+        use cranelift::codegen::isa::CallConv;
+        use cranelift::prelude::{FunctionBuilder, FunctionBuilderContext};
+
+        let mut function = Function::with_name_signature(UserFuncName::user(0, 0), Signature::new(CallConv::Fast));
+        let mut function_ctx = FunctionBuilderContext::new();
+        let builder = FunctionBuilder::new(&mut function, &mut function_ctx);
+        let mut ctx = BuildContext::new(builder, &[], Type::Void)?;
+
+        ctx.set_var(33, LocalVar::None)?;
+
+        assert!(matches!(ctx.get_var(32)?, LocalVar::None));
+        assert!(matches!(ctx.get_var(33)?, LocalVar::None));
+        assert!(ctx.get_var(34).is_err());
+        Ok(())
+    }
+
+    #[test]
     fn vm_can_add_native_after_jit_creation() -> anyhow::Result<()> {
         let vm = Vm::new();
         vm.add_native_module_ptr("math", "double", &[Type::I64], Type::I64, math_double as *const u8)?;

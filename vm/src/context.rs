@@ -133,32 +133,23 @@ impl<'a> BuildContext<'a> {
     }
 
     pub fn set_var(&mut self, idx: u32, val: LocalVar) -> Result<()> {
-        if idx as usize == self.vars.len() {
-            if val.is_closure() {
-                self.vars.push(val);
-            } else if let Some(vt) = val.get(self) {
-                let v = LocalVar::new(self, vt.0, vt.1)?;
-                self.vars.push(v);
-            }
-        } else if (idx as usize) < self.vars.len() {
-            if val.is_closure() {
-                self.vars[idx as usize] = val;
-            } else if let Some(vt) = val.get(self) {
-                if matches!(self.vars[idx as usize], LocalVar::None | LocalVar::Value { .. }) {
-                    let v = LocalVar::new(self, vt.0, vt.1)?;
-                    self.vars[idx as usize] = v;
-                } else {
-                    let v = self.vars[idx as usize].clone();
-                    v.set(self, vt.0);
+        let idx = idx as usize;
+        if idx >= self.vars.len() {
+            self.vars.resize(idx + 1, LocalVar::None);
+        }
+
+        match val {
+            LocalVar::Closure { .. } | LocalVar::None => self.vars[idx] = val,
+            val => {
+                if let Some(vt) = val.get(self) {
+                    if matches!(self.vars[idx], LocalVar::None | LocalVar::Value { .. }) {
+                        let v = LocalVar::new(self, vt.0, vt.1)?;
+                        self.vars[idx] = v;
+                    } else {
+                        let v = self.vars[idx].clone();
+                        v.set(self, vt.0);
+                    }
                 }
-            }
-        } else {
-            self.vars.resize(idx as usize, LocalVar::None);
-            if val.is_closure() {
-                self.vars.push(val);
-            } else if let Some(vt) = val.get(self) {
-                let v = LocalVar::new(self, vt.0, vt.1)?;
-                self.vars.push(v);
             }
         }
         Ok(())

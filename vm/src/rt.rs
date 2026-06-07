@@ -901,8 +901,16 @@ impl JITRunTime {
     }
 
     fn closure_value(&self, ctx: &mut BuildContext, id: u32) -> Result<LocalVar> {
-        let captures = match self.compiler.symbols.get_symbol(id)?.1 {
-            Symbol::Fn { cap, .. } => cap.vars.iter().map(|idx| ctx.get_var(*idx as u32)?.get(ctx).ok_or_else(|| anyhow!("捕获变量 {} 没有值", idx))).collect::<Result<Vec<_>>>()?,
+        let (name, symbol) = self.compiler.symbols.get_symbol(id)?;
+        let captures = match symbol {
+            Symbol::Fn { cap, .. } => cap
+                .vars
+                .iter()
+                .map(|idx| {
+                    let var = ctx.get_var(*idx as u32).map_err(|err| anyhow!("闭包 {} 捕获变量失败: idx={}, cap.vars={:?}, {}", name, idx, cap.vars, err))?;
+                    var.get(ctx).ok_or_else(|| anyhow!("闭包 {} 捕获变量没有值: idx={}, cap.vars={:?}", name, idx, cap.vars))
+                })
+                .collect::<Result<Vec<_>>>()?,
             _ => Vec::new(),
         };
         Ok(LocalVar::Closure { id, captures })

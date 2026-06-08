@@ -1179,14 +1179,14 @@ impl Compiler {
                                     ty.add_field(fn_name.into(), Type::Symbol { id: fn_id, params: Vec::new() })?;
                                 }
                             } else {
-                                println!("impl 包含非函数语句 {:?}", f);
+                                log::debug!("impl 包含非函数语句 {:?}", f);
                             }
                         }
                     }
                 }
                 StmtKind::Expr(expr, _) if is_top_level_import_expr(&expr) => {}
                 _ => {
-                    println!("未知的顶层语句 {:?}", stmt);
+                    log::debug!("未知的顶层语句 {:?}", stmt);
                 }
             }
         }

@@ -231,7 +231,7 @@ impl SymbolTable {
                         }
                     }
                     (_, s) => {
-                        println!("s-> {:?}", s);
+                        log::debug!("s-> {:?}", s);
                         Ok(Type::Symbol { id: *id, params: params.clone() })
                     }
                 };

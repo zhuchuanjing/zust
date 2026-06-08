@@ -170,7 +170,7 @@ impl JITRunTime {
 
     fn declare_compiled_fn(&mut self, name_id: Option<&(SmolStr, u32)>, generic_args: &[Type], arg_tys: &[Type], ret_ty: Type) -> Result<FuncId> {
         let sig = self.get_sig(arg_tys, ret_ty.clone())?;
-        log::info!("{:?} {:?}", name_id, sig);
+        log::debug!("{:?} {:?}", name_id, sig);
         if let Some((name, id)) = name_id {
             let variant_idx = match self.fns.get(id) {
                 Some(FnVariant::Compiled(fns)) => fns.len(),
@@ -217,7 +217,7 @@ impl JITRunTime {
             }
         }
         self.module.define_function(fn_id, &mut ctx).with_context(|| name_id.map(|(name, _)| format!("define function {}", name)).unwrap_or_else(|| "define anonymous function".to_string()))?;
-        log::info!("{:?}", ctx.func);
+        log::debug!("{:?}", ctx.func);
         Ok(())
     }
 

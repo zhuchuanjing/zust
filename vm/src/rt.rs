@@ -733,7 +733,11 @@ impl JITRunTime {
             let val = assigned.get(ctx).ok_or(anyhow!("assigned variable has no value"))?;
             return Ok(val);
         } else if left.is_idx() {
-            let value = value.get(ctx).unwrap();
+            let value = match value {
+                LocalVar::Closure { id, captures } => self.callback_value(ctx, id, captures)?,
+                value => value,
+            };
+            let value = value.get(ctx).ok_or_else(|| anyhow!("idx assignment rhs has no value: left={:?}", left))?;
             let (left, _, right) = left.clone().binary().unwrap();
             let left = self.eval(ctx, &left)?.get(ctx).ok_or(anyhow!("未知局部变量 {:?}", left))?;
             if let Type::Struct { params: _, fields } = &left.1 {

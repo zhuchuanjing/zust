@@ -568,7 +568,9 @@ async fn poll_image_task(options: &Dynamic, task_id: &str) -> Result<Dynamic> {
     };
     let interval_ms = options.get_dynamic("task_poll_interval_ms").and_then(|v| v.as_int()).unwrap_or(2000).max(200) as u64;
     let max_polls = options.get_dynamic("task_poll_max").and_then(|v| v.as_int()).unwrap_or(180).max(1);
-    let client = reqwest::Client::new();
+    let client = reqwest::Client::builder()
+        .timeout(http_timeout(options))
+        .build()?;
 
     for _ in 0..max_polls {
         let mut req = client.get(&task_url);
@@ -600,6 +602,16 @@ async fn poll_image_task(options: &Dynamic, task_id: &str) -> Result<Dynamic> {
     }
 
     Err(anyhow!("图片任务超时: {}", task_id))
+}
+
+fn http_timeout(options: &Dynamic) -> std::time::Duration {
+    let timeout_ms = options
+        .get_dynamic("request_timeout_ms")
+        .or_else(|| options.get_dynamic("timeout_ms"))
+        .and_then(|v| v.as_int())
+        .unwrap_or(30000)
+        .max(1000) as u64;
+    std::time::Duration::from_millis(timeout_ms)
 }
 
 fn dashscope_task_url(url: &str, task_id: &str) -> String {

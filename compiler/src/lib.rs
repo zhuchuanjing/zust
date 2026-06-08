@@ -954,9 +954,9 @@ impl Compiler {
 
     fn import_code_with_base_dir(&mut self, name: &str, code: Vec<u8>, base_dir: Option<&Path>) -> Result<Vec<u32>> {
         let stmts = Self::parse_code(code.clone())?;
-        log::info!("func->{}", name);
+        log::debug!("func->{}", name);
         for s in stmts.iter() {
-            log::info!("{}", s);
+            log::debug!("{}", s);
         }
         self.resolve_imports(&stmts, base_dir).map_err(|err| Self::format_compile_error(&code, err))?;
         self.clear();
@@ -1192,7 +1192,7 @@ impl Compiler {
         }
         let mut fn_ids = Vec::new();
         for (name, id) in self.symbols.symbol(&mod_name) {
-            log::info!("compile symbol {:?}[{}]", name, id);
+            log::debug!("compile symbol {:?}[{}]", name, id);
             if let Some((_, Symbol::Fn { ty, generic_params, .. })) = self.symbols.get_symbol(id).ok() {
                 let resolved_ty = self.symbols.get_type(ty).unwrap_or_else(|_| ty.clone());
                 if has_unresolved_generic_param(&resolved_ty) || !generic_params.is_empty() {
@@ -1204,7 +1204,7 @@ impl Compiler {
                     if let Type::Fn { mut tys, ret } = ty {
                         let compiled = self.compile_fn(&args, &mut tys, body.as_ref().clone(), &mut cap)?;
                         for s in compiled.iter() {
-                            log::info!("{}", s);
+                            log::debug!("{}", s);
                         }
                         self.symbols.symbols[id as usize] = Symbol::Fn { ty: Type::Fn { tys, ret }, args, generic_params, cap, body: Arc::new(Stmt::new(StmtKind::Block(compiled), Span::default())), is_pub };
                         fn_ids.push(id);

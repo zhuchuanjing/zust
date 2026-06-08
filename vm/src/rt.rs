@@ -87,7 +87,7 @@ impl JITRunTime {
     }
 
     pub fn import_code(&mut self, name: &str, code: Vec<u8>) -> Result<()> {
-        log::info!("import {}", name);
+        log::debug!("import {}", name);
         let _ = self.compiler.import_code(name, code)?;
         Ok(())
     }

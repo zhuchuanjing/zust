@@ -78,9 +78,9 @@ extern "C" fn sqrt(value: f64) -> f64 {
 
 extern "C" fn log_any(addr: *const Dynamic) {
     if addr.is_null() {
-        log::info!("{:?}", Dynamic::Null);
+        log::debug!("{:?}", Dynamic::Null);
     } else {
-        log::info!("{:?}", unsafe { &*addr });
+        log::debug!("{:?}", unsafe { &*addr });
     }
 }
 

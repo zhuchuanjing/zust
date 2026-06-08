@@ -197,7 +197,7 @@ impl JITRunTime {
                     return self.call(ctx, self.get_method(&Type::Any, "to_f64")?, vec![vt.0]).map(|(v, _)| v);
                 }
             } else if let Type::Symbol { id: _, params: _ } = ty {
-                log::info!("convert {:?} -> {:?}", vt, ty);
+                log::debug!("convert {:?} -> {:?}", vt, ty);
                 return Ok(vt.0); //结构类型 可以看作 External 类型
             }
             if vt.1.is_bool() {

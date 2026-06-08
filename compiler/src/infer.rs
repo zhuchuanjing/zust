@@ -833,7 +833,7 @@ impl Compiler {
                 if let Some(e) = else_body {
                     let else_ty = self.infer_stmt(e)?;
                     if then_ty != else_ty {
-                        log::info!("then 和 else 有不同类型 {:?} {:?}", then_ty, else_ty);
+                        log::debug!("then 和 else 有不同类型 {:?} {:?}", then_ty, else_ty);
                         return Self::merge_return_type(stmt.span, Some(then_ty), else_ty);
                     }
                 }

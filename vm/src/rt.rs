@@ -959,11 +959,11 @@ impl JITRunTime {
             Symbol::Fn { ty: Type::Fn { tys, .. }, .. } => tys.len(),
             _ => 0,
         };
-        if explicit_arg_len > 8 {
-            return Err(anyhow!("native callback closure supports at most 8 explicit args"));
+        if explicit_arg_len > 16 {
+            return Err(anyhow!("native callback closure supports at most 16 explicit args"));
         }
-        if explicit_arg_len + captures.len() > 16 {
-            return Err(anyhow!("native callback closure supports at most 16 args including captures, got {}", explicit_arg_len + captures.len()));
+        if explicit_arg_len + captures.len() > 24 {
+            return Err(anyhow!("native callback closure supports at most 24 args including captures, got {}", explicit_arg_len + captures.len()));
         }
         let explicit_arg_tys = vec![Type::Any; explicit_arg_len];
         let capture_tys = vec![Type::Any; captures.len()];
@@ -987,8 +987,8 @@ impl JITRunTime {
             return Err(anyhow!("spawn closure does not support captures yet"));
         }
         let arg_len = self.spawn_arg_pack_len(args_expr).ok_or_else(|| anyhow!("spawn closure args must be a tuple argument pack"))?;
-        if arg_len > 8 {
-            return Err(anyhow!("spawn supports at most 8 args, got {}", arg_len));
+        if arg_len > 16 {
+            return Err(anyhow!("spawn supports at most 16 args, got {}", arg_len));
         }
         let arg_tys = vec![Type::Any; arg_len];
         let fn_info = self.gen_fn_with_params(Some(ctx), id, &arg_tys, &[])?;

@@ -14,10 +14,28 @@ impl ZustExtension {
     }
 
     fn local_repo_binary(&self, worktree: &zed::Worktree) -> Option<String> {
-        worktree
-            .read_text_file("zust-lsp/Cargo.toml")
-            .ok()
-            .map(|_| format!("{}/target/debug/{}", worktree.root_path(), Self::BINARY_NAME))
+        if worktree.read_text_file("zust-lsp/Cargo.toml").is_ok() {
+            return Some(format!("{}/target/debug/{}", worktree.root_path(), Self::BINARY_NAME));
+        }
+
+        let mut command = zed::process::Command::new("git").args([
+            "-C",
+            &worktree.root_path(),
+            "rev-parse",
+            "--show-toplevel",
+        ]);
+        let output = command.output().ok()?;
+        if output.status != Some(0) {
+            return None;
+        }
+
+        let repo_root = String::from_utf8(output.stdout).ok()?;
+        let repo_root = repo_root.trim();
+        if repo_root.is_empty() {
+            return None;
+        }
+
+        Some(format!("{}/target/debug/{}", repo_root, Self::BINARY_NAME))
     }
 }
 

@@ -12,7 +12,7 @@ pub use context::BuildContext;
 
 mod rt;
 use cranelift::prelude::types;
-use dynamic::Type;
+use dynamic::{Dynamic, Type};
 pub use rt::JITRunTime;
 use smol_str::SmolStr;
 mod db_module;
@@ -154,6 +154,10 @@ impl JITRunTime {
 
     pub fn pop_module(&mut self) {
         self.compiler.symbols.pop_module();
+    }
+
+    pub fn add_native_const(&mut self, name: &str, value: Dynamic, ty: Type, is_pub: bool) -> u32 {
+        self.compiler.add_symbol(name, Symbol::Const { value, ty, is_pub })
     }
 
     pub fn add_type(&mut self, name: &str, ty: Type, is_pub: bool) -> u32 {
@@ -1866,6 +1870,121 @@ mod tests {
         let sum_args = (1i64..=8).map(Dynamic::from).collect();
         assert_eq!(sum_callback.call(sum_args)?.as_bool(), Some(true));
         assert_eq!(root::get(sum_result)?.as_int(), Some(36));
+        Ok(())
+    }
+
+    #[test]
+    fn callback_with_16_explicit_args_and_captures() -> anyhow::Result<()> {
+        static SAVED_SUM16: Mutex<Option<ZustCallback>> = Mutex::new(None);
+
+        extern "C" fn save_sum16(callback: *const Dynamic) -> bool {
+            if callback.is_null() {
+                return false;
+            }
+            let Some(callback) = (unsafe { &*callback }).as_custom::<ZustCallback>().cloned() else {
+                return false;
+            };
+            *SAVED_SUM16.lock().unwrap() = Some(callback);
+            true
+        }
+
+        let sum16_path = "local/vm_callback/sum16";
+        let _ = root::remove(sum16_path);
+        *SAVED_SUM16.lock().unwrap() = None;
+
+        let vm = Vm::with_all()?;
+        vm.add_native_module_ptr("callback_test", "save_sum16", &[Type::Any], Type::Bool, save_sum16 as *const u8)?;
+        vm.import_code(
+            "vm_callback_16_args",
+            br#"
+            pub fn register_sum16() {
+                let prefix = "sum=";
+                callback_test::save_sum16(|a, b, c, d, e, f, g, h, i, j, k, l, m, n, o, p| {
+                    let total = a + b + c + d + e + f + g + h + i + j + k + l + m + n + o + p;
+                    root::add("local/vm_callback/sum16", prefix + total);
+                    true
+                })
+            }
+            "#
+            .to_vec(),
+        )?;
+
+        let register = vm.get_fn("vm_callback_16_args::register_sum16", &[])?;
+        let register: extern "C" fn() -> bool = unsafe { std::mem::transmute(register.ptr()) };
+        assert!(register());
+
+        let callback = SAVED_SUM16.lock().unwrap().clone().expect("sum16 callback saved");
+        let args: Vec<Dynamic> = (1i64..=16).map(Dynamic::from).collect();
+        assert_eq!(callback.call(args)?.as_bool(), Some(true));
+        assert_eq!(root::get(sum16_path)?.as_str(), "sum=136");
+        Ok(())
+    }
+
+    #[test]
+    fn spawn_closure_with_16_args() -> anyhow::Result<()> {
+        let spawn16_path = "local/vm_spawn/spawn16";
+        let _ = root::remove(spawn16_path);
+
+        let vm = Vm::with_all()?;
+        vm.import_code(
+            "vm_spawn_16_args",
+            br#"
+            pub fn start_spawn16() {
+                spawn(|a, b, c, d, e, f, g, h, i, j, k, l, m, n, o, p| {
+                    root::add("local/vm_spawn/spawn16", a + b + c + d + e + f + g + h + i + j + k + l + m + n + o + p);
+                }, (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16))
+            }
+            "#
+            .to_vec(),
+        )?;
+
+        let compiled = vm.get_fn("vm_spawn_16_args::start_spawn16", &[])?;
+        assert_eq!(compiled.ret_ty(), &Type::Bool);
+        let start: extern "C" fn() -> bool = unsafe { std::mem::transmute(compiled.ptr()) };
+        assert!(start());
+
+        for _ in 0..50 {
+            if root::get(spawn16_path).ok().and_then(|v| v.as_int()) == Some(136) {
+                return Ok(());
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        anyhow::bail!("spawned job did not write expected result");
+    }
+
+    #[test]
+    fn multi_level_nested_closure_captures() -> anyhow::Result<()> {
+        let vm = Vm::with_all()?;
+        vm.import_code(
+            "vm_multi_level_captures",
+            br#"
+            pub fn run() {
+                let level1 = "L1";
+                let level2 = "L2";
+                |path: string| {
+                    let level3 = "L3";
+                    let inner = |suffix: string| {
+                        let level4 = "L4";
+                        |flag: bool| {
+                            if flag {
+                                level1 + "." + level2 + "." + level3 + "." + level4 + "." + path + suffix
+                            } else {
+                                "off"
+                            }
+                        }(true)
+                    };
+                    inner(".ext")
+                }("file.txt")
+            }
+            "#
+            .to_vec(),
+        )?;
+
+        let compiled = vm.get_fn("vm_multi_level_captures::run", &[])?;
+        assert_eq!(compiled.ret_ty(), &Type::Any);
+        let run: extern "C" fn() -> *const Dynamic = unsafe { std::mem::transmute(compiled.ptr()) };
+        let result = unsafe { &*run() };
+        assert_eq!(result.as_str(), "L1.L2.L3.L4.file.txt.ext");
         Ok(())
     }
 

@@ -26,7 +26,10 @@
 
 1. `lsp.zust-lsp.binary.path`
 2. 当前工作区的 `target/debug/zust-lsp`
-3. `PATH` 里的 `zust-lsp`
+3. 当前工作区所在 Git 仓库根目录的 `target/debug/zust-lsp`
+4. `PATH` 里的 `zust-lsp`
+
+如果你在 Zed 里只打开了仓库子目录，例如 `zusts/`，第 3 步会通过 `git rev-parse --show-toplevel` 找回仓库根目录。
 
 如果你想显式指定路径，可以在 Zed 设置里写：
 

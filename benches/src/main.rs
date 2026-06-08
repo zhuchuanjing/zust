@@ -34,6 +34,7 @@ const BENCHMARKS: &[Bench] = &[
     Bench { name: "map_access", desc: "map bracket acc 200K   ", size: 200_000, is_generic: false },
     Bench { name: "struct_ops", desc: "struct field ops 20M   ", size: 20_000_000, is_generic: false },
     Bench { name: "closure_sum", desc: "closure sum 50M        ", size: 50_000_000, is_generic: false },
+    Bench { name: "closure_16args", desc: "closure 16args 10M     ", size: 10_000_000, is_generic: false },
     Bench { name: "vec_add", desc: "vec add 100x500K       ", size: 500_000, is_generic: false },
     Bench { name: "ackermann", desc: "ackermann(3,6)         ", size: 6, is_generic: false },
     Bench { name: "quicksort", desc: "quicksort 2K           ", size: 2000, is_generic: true },

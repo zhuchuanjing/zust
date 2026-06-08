@@ -102,9 +102,21 @@ extern "C" fn llm_image(openai: *const Dynamic, value: *const Dynamic, notifier:
     let notifier = unsafe { (&*notifier).clone() };
     let tx = llm_tx(&notifier);
     let id = start_llm_task(value.clone(), || async move {
-        let r = llm::image(openai, value, tx).await?;
-        let _ = notify_or_call(&notifier, r.clone());
-        Ok(r)
+        match llm::image(openai, value, tx).await {
+            Ok(r) => {
+                let _ = notify_or_call(&notifier, r.clone());
+                Ok(r)
+            }
+            Err(err) => {
+                let fail = dynamic::map!(
+                    "ok" => false,
+                    "error" => err.to_string(),
+                    "errorDebug" => format!("{err:?}")
+                );
+                let _ = notify_or_call(&notifier, fail.clone());
+                Err(err)
+            }
+        }
     });
     alloc_dynamic(id.into())
 }

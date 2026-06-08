@@ -52,8 +52,8 @@ pub fn bench<N>() {
     }
 
     let sum = 0i64;
-    for i in 0i64..N {
-        sum = sum + arr[i];
+    for idx in 0i64..N {
+        sum = sum + arr[idx];
     }
     sum
 }

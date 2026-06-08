@@ -537,8 +537,13 @@ fn push_dashscope_images(content: &mut Dynamic, images: Dynamic) {
 
 fn dashscope_image_parameters(msg: &Dynamic) -> Dynamic {
     let parameters = map!();
-    for key in ["size", "n", "watermark", "seed", "negative_prompt", "prompt_extend", "bbox_list"] {
+    for key in ["size", "n", "watermark", "seed", "negative_prompt", "prompt_extend", "image_size", "bbox_list"] {
         if let Some(value) = msg.get_dynamic(key) {
+            let value = if (key == "size" || key == "image_size") && value.is_str() {
+                Dynamic::from(value.as_str().replace('x', "*"))
+            } else {
+                value
+            };
             parameters.insert(key, value);
         }
     }

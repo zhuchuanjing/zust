@@ -1,4 +1,4 @@
-use std::fmt::Debug;
+use std::{collections::BTreeSet, fmt::Debug};
 
 use anyhow::{Result, anyhow};
 use dynamic::{ConstIntOp, Dynamic, Type};
@@ -38,6 +38,8 @@ pub struct Parser {
     pos: usize,   //当前解析的位置
     buf: Vec<u8>, //待解析的字符串
     spans: Vec<usize>,
+    decl_scopes: Vec<BTreeSet<SmolStr>>,
+    impl_depth: usize,
 }
 
 const NOT_IDENT: &[u8] = &[b' ', b'\t', b'\n', b'\r', b'/', b'*', b'+', b'-', b'=', b'(', b')', b'{', b'}', b'[', b']', b';', b':', b',', b'.', b'<', b'>', b'!', b'#', b'$', b'%', b'^', b'&', b'|', b'\\', b'"', b'\''];
@@ -84,10 +86,14 @@ macro_rules! parse_list {
 macro_rules! try_parse {
     ($self: ident, $method: expr) => {{
         let save_pos = $self.pos; //保存当前 pos
+        let save_decl_scopes = $self.decl_scopes.clone();
+        let save_impl_depth = $self.impl_depth;
         match $method {
             Ok(expr) => Ok(expr),
             Err(e) => {
                 $self.pos = save_pos;
+                $self.decl_scopes = save_decl_scopes;
+                $self.impl_depth = save_impl_depth;
                 Err(e)
             }
         }
@@ -114,11 +120,95 @@ pub enum ParserErr {
     NotString,
     #[error("非数字")]
     NotNumber,
+    #[error("符号 {0} 已经声明")]
+    DuplicateSymbol(SmolStr),
 }
 
 impl Parser {
     pub fn new(buf: Vec<u8>) -> Self {
-        Self { pos: 0, buf, spans: Vec::new() }
+        Self { pos: 0, buf, spans: Vec::new(), decl_scopes: vec![BTreeSet::new()], impl_depth: 0 }
+    }
+
+    fn push_decl_scope(&mut self) {
+        self.decl_scopes.push(BTreeSet::new());
+    }
+
+    fn pop_decl_scope(&mut self) {
+        if self.decl_scopes.len() > 1 {
+            self.decl_scopes.pop();
+        }
+    }
+
+    fn declare_symbol(&mut self, name: &SmolStr) -> Result<()> {
+        if name.is_empty() {
+            return Ok(());
+        }
+        if self.decl_scopes.iter().rev().any(|scope| scope.contains(name)) {
+            return Err(ParserErr::DuplicateSymbol(name.clone()).into());
+        }
+        self.decl_scopes.last_mut().expect("parser always has a declaration scope").insert(name.clone());
+        Ok(())
+    }
+
+    fn declare_symbol_in_current_scope(&mut self, name: &SmolStr) -> Result<()> {
+        if name.is_empty() {
+            return Ok(());
+        }
+        let scope = self.decl_scopes.last_mut().expect("parser always has a declaration scope");
+        if scope.contains(name) {
+            return Err(ParserErr::DuplicateSymbol(name.clone()).into());
+        }
+        scope.insert(name.clone());
+        Ok(())
+    }
+
+    fn declare_function_name(&mut self, name: &SmolStr) -> Result<()> {
+        if self.impl_depth > 0 { self.declare_symbol_in_current_scope(name) } else { self.declare_symbol(name) }
+    }
+
+    fn declare_args(&mut self, args: &[(SmolStr, Type)]) -> Result<()> {
+        for (name, _) in args {
+            self.declare_symbol(name)?;
+        }
+        Ok(())
+    }
+
+    fn declare_pattern_symbols(&mut self, pat: &Pattern) -> Result<()> {
+        match &pat.kind {
+            PatternKind::Ident { name, .. } => self.declare_symbol(name),
+            PatternKind::Tuple(items) => {
+                for item in items {
+                    self.declare_pattern_symbols(item)?;
+                }
+                Ok(())
+            }
+            PatternKind::List { elems, .. } => {
+                for item in elems {
+                    self.declare_pattern_symbols(item)?;
+                }
+                Ok(())
+            }
+            PatternKind::Wildcard | PatternKind::Var { .. } | PatternKind::Literal(_) | PatternKind::Member(_, _) | PatternKind::Idx(_, _) => Ok(()),
+        }
+    }
+
+    fn function_body(&mut self, args: &[(SmolStr, Type)]) -> Result<Stmt> {
+        self.push_decl_scope();
+        let result = (|| {
+            self.declare_args(args)?;
+            self.block()
+        })();
+        self.pop_decl_scope();
+        result
+    }
+
+    fn impl_body(&mut self) -> Result<Stmt> {
+        self.push_decl_scope();
+        self.impl_depth += 1;
+        let result = self.block();
+        self.impl_depth -= 1;
+        self.pop_decl_scope();
+        result
     }
 
     pub fn is_eof(&self) -> bool {
@@ -566,6 +656,80 @@ impl Parser {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn parse_all(code: &str) -> Result<Vec<Stmt>> {
+        let mut parser = Parser::new(code.as_bytes().to_vec());
+        let mut stmts = Vec::new();
+        loop {
+            match parser.stmt(false) {
+                Ok(stmt) => stmts.push(stmt),
+                Err(err) => {
+                    if parser.is_eof() {
+                        return Ok(stmts);
+                    }
+                    return Err(err);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn rejects_local_name_that_redeclares_prior_function() {
+        let err = parse_all(
+            r#"
+            fn chunk_id(x, y) {
+                x + y
+            }
+
+            fn open() {
+                let chunk_id = 1;
+                chunk_id
+            }
+            "#,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("符号 chunk_id 已经声明"));
+    }
+
+    #[test]
+    fn rejects_duplicate_function_args() {
+        let err = parse_all("fn open(value, value) { value }").unwrap_err();
+        assert!(err.to_string().contains("符号 value 已经声明"));
+    }
+
+    #[test]
+    fn rejects_duplicate_local_let_names() {
+        let err = parse_all(
+            r#"
+            fn open() {
+                let value = 1;
+                let value = 2;
+                value
+            }
+            "#,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("符号 value 已经声明"));
+    }
+
+    #[test]
+    fn allows_same_method_name_in_different_impl_blocks() {
+        parse_all(
+            r#"
+            struct A {}
+            struct B {}
+
+            impl A {
+                fn zero() { 0 }
+            }
+
+            impl B {
+                fn zero() { 0 }
+            }
+            "#,
+        )
+        .unwrap();
+    }
 
     #[test]
     fn parses_scientific_float_suffixes() {

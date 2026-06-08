@@ -539,11 +539,7 @@ fn dashscope_image_parameters(msg: &Dynamic) -> Dynamic {
     let parameters = map!();
     for key in ["size", "n", "watermark", "seed", "negative_prompt", "prompt_extend", "image_size", "bbox_list"] {
         if let Some(value) = msg.get_dynamic(key) {
-            let value = if (key == "size" || key == "image_size") && value.is_str() {
-                Dynamic::from(value.as_str().replace('x', "*"))
-            } else {
-                value
-            };
+            let value = if (key == "size" || key == "image_size") && value.is_str() { Dynamic::from(value.as_str().replace('x', "*")) } else { value };
             parameters.insert(key, value);
         }
     }
@@ -573,9 +569,7 @@ async fn poll_image_task(options: &Dynamic, task_id: &str) -> Result<Dynamic> {
     };
     let interval_ms = options.get_dynamic("task_poll_interval_ms").and_then(|v| v.as_int()).unwrap_or(2000).max(200) as u64;
     let max_polls = options.get_dynamic("task_poll_max").and_then(|v| v.as_int()).unwrap_or(180).max(1);
-    let client = reqwest::Client::builder()
-        .timeout(http_timeout(options))
-        .build()?;
+    let client = reqwest::Client::builder().timeout(http_timeout(options)).build()?;
 
     for _ in 0..max_polls {
         let mut req = client.get(&task_url);
@@ -610,12 +604,7 @@ async fn poll_image_task(options: &Dynamic, task_id: &str) -> Result<Dynamic> {
 }
 
 fn http_timeout(options: &Dynamic) -> std::time::Duration {
-    let timeout_ms = options
-        .get_dynamic("request_timeout_ms")
-        .or_else(|| options.get_dynamic("timeout_ms"))
-        .and_then(|v| v.as_int())
-        .unwrap_or(30000)
-        .max(1000) as u64;
+    let timeout_ms = options.get_dynamic("request_timeout_ms").or_else(|| options.get_dynamic("timeout_ms")).and_then(|v| v.as_int()).unwrap_or(30000).max(1000) as u64;
     std::time::Duration::from_millis(timeout_ms)
 }
 

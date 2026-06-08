@@ -785,7 +785,7 @@ impl Parser {
             let start = self.current_pos();
             self.pos += 1;
             let args = crate::parse_list!(self, Vec::new(), b'|', b',', self.ident_typed()?);
-            let body = Box::new(self.block()?);
+            let body = Box::new(self.function_body(&args)?);
             let expr = Expr::new(ExprKind::Closure { args, body }, Span::new(start, self.current_pos()));
             Ok((self.postfix_expr(start, expr)?, true))
         } else if let Some(this_op) = self.binary_op() {

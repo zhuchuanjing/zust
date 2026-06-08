@@ -215,6 +215,7 @@ impl Parser {
         let start = self.current_pos();
         let stmt = if self.keyword("let").is_ok() {
             let pat = self.pattern()?;
+            self.declare_pattern_symbols(&pat)?;
             self.until(b'=')?;
             self.whitespace()?;
             let stmt = if self.get()? == b'{' {
@@ -266,17 +267,25 @@ impl Parser {
             self.keyword("in")?;
             self.whitespace()?;
             let range = self.get_expr()?;
-            let body = Box::new(self.block()?);
-            Stmt::new(StmtKind::For { pat, range, body }, Span::new(start, self.current_pos()))
+            self.push_decl_scope();
+            let result: Result<Stmt> = (|| {
+                self.declare_pattern_symbols(&pat)?;
+                let body = Box::new(self.block()?);
+                Ok(Stmt::new(StmtKind::For { pat, range, body }, Span::new(start, self.current_pos())))
+            })();
+            self.pop_decl_scope();
+            result?
         } else if self.keyword("fn").is_ok() {
             self.whitespace()?;
             let (name, generic_params) = self.ident_generic()?;
+            self.declare_function_name(&name)?;
             self.until(b'(')?;
             let args = crate::parse_list!(self, Vec::new(), b')', b',', self.ident_typed()?);
-            let body = Box::new(self.block()?);
+            let body = Box::new(self.function_body(&args)?);
             Stmt::new(StmtKind::Fn { name, generic_params, args, body, is_pub }, Span::new(start, self.current_pos()))
         } else if self.keyword("struct").is_ok() {
             let (name, params) = self.ident_generic()?;
+            self.declare_symbol(&name)?;
             if self.until(b'{').is_ok() {
                 let fields = crate::parse_list!(self, Vec::new(), b'}', b',', self.ident_typed()?);
                 if let Some(f) = fields.iter().find(|f| f.1.is_any()) {
@@ -290,6 +299,7 @@ impl Parser {
         } else if self.keyword("const").is_ok() {
             self.whitespace()?;
             let (name, ty) = self.ident_typed()?;
+            self.declare_symbol(&name)?;
             self.until(b'=')?;
             let value = self.get_expr()?;
             self.until(b';')?;
@@ -297,6 +307,7 @@ impl Parser {
         } else if self.keyword("static").is_ok() {
             self.whitespace()?;
             let (name, ty) = self.ident_typed()?;
+            self.declare_symbol(&name)?;
             self.whitespace()?;
             if self.take(b'=').is_ok() {
                 let expr = self.get_expr()?;
@@ -309,7 +320,7 @@ impl Parser {
         } else if self.keyword("impl").is_ok() {
             self.whitespace()?;
             let target = self.get_type()?;
-            Stmt::new(StmtKind::Impl { target, body: Box::new(self.block()?) }, Span::new(start, self.current_pos()))
+            Stmt::new(StmtKind::Impl { target, body: Box::new(self.impl_body()?) }, Span::new(start, self.current_pos()))
         } else if self.keyword("pub").is_ok() {
             self.stmt(true)?
         } else {

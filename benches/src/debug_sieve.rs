@@ -7,11 +7,11 @@ fn main() -> Result<()> {
     let vm = vm::Vm::with_all()?;
     let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
 
-    vm.import("sieve", dir.join("zs/sieve.zs").to_str().unwrap())?;
+    vm.jit.write().unwrap().compiler.import_file("sieve", dir.join("zs/sieve.zs").to_str().unwrap())?;
 
-    let compiled = vm.get_fn("sieve::bench", &[Type::I64])?;
-    println!("return type: {:?}", compiled.ret_ty());
-    let f: extern "C" fn(i64) -> i64 = unsafe { std::mem::transmute(compiled.ptr()) };
+    let (ptr, ret) = vm.jit.write().unwrap().get_fn_ptr("sieve::bench", &[Type::I64])?;
+    println!("return type: {:?}", ret);
+    let f: extern "C" fn(i64) -> i64 = unsafe { std::mem::transmute(ptr) };
 
     for n in [10i64, 100, 1000, 10000, 100000] {
         let correct = count_primes(n);

@@ -23,13 +23,13 @@ pub struct GpuFieldLayout {
 }
 
 impl GpuStructLayout {
-    pub(crate) fn from_symbol_table(symbols: &SymbolTable, name: &str, params: &[Type]) -> Result<Self> {
+    pub fn from_symbol_table(symbols: &SymbolTable, name: &str, params: &[Type]) -> Result<Self> {
         let id = symbols.get_id(name)?;
         let ty = resolve_gpu_type(symbols, &Type::Symbol { id, params: params.to_vec() })?;
         Self::from_type(name.into(), ty)
     }
 
-    pub(crate) fn from_type(name: SmolStr, ty: Type) -> Result<Self> {
+    pub fn from_type(name: SmolStr, ty: Type) -> Result<Self> {
         let Type::Struct { fields, .. } = &ty else {
             bail!("{name} is not a struct type: {ty:?}");
         };

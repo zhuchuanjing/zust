@@ -243,6 +243,13 @@ impl SpirvCompiler {
             if ty.width() == value.ty.width() { self.builder.bitcast(ty_id, None, value.id)? } else { self.builder.s_convert(ty_id, None, value.id)? }
         } else if (ty.is_int() && value.ty.is_int()) || (ty.is_uint() && value.ty.is_uint()) {
             if value.ty.is_int() { self.builder.s_convert(ty_id, None, value.id)? } else { self.builder.u_convert(ty_id, None, value.id)? }
+        } else if ty.is_bool() {
+            return self.bool_value(value);
+        } else if value.ty.is_bool() {
+            let zero = self.const_zero(ty.clone())?;
+            let one = self.const_one(ty.clone())?;
+            let id = self.builder.select(ty_id, None, value.id, one.id, zero.id)?;
+            return Ok(Value { id, ty });
         } else {
             bail!("unsupported SPIR-V conversion {:?} -> {:?}", value.ty, ty);
         };

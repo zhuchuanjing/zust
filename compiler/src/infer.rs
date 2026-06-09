@@ -2,6 +2,7 @@ use super::{Compiler, FnInferRet, ListElemState, Symbol};
 use anyhow::Result;
 use dynamic::{Dynamic, Type};
 use parser::{BinaryOp, Expr, ExprKind, Pattern, PatternKind, Span, Stmt, StmtKind, UnaryOp};
+use smol_str::SmolStr;
 
 #[derive(Clone)]
 struct ReturnInfo {
@@ -44,6 +45,72 @@ impl Compiler {
         {
             let next = seed.take().map(|prev| prev + ty.clone()).unwrap_or_else(|| ty.clone());
             *seed = Some(next);
+        }
+    }
+
+    /// 扫描函数体，查找第一个非递归路径上的返回值类型（仅处理字面量）。
+    fn try_find_base_return_ty(&self, body: &Stmt) -> Option<Type> {
+        match &body.kind {
+            StmtKind::Block(stmts) => stmts.iter().find_map(|s| self.try_find_base_return_ty(s)),
+            StmtKind::If { then_body, else_body, .. } => self.try_find_base_return_ty(then_body)
+                .or_else(|| else_body.as_ref().and_then(|b| self.try_find_base_return_ty(b))),
+            StmtKind::Return(Some(expr)) => Self::try_literal_type(expr),
+            StmtKind::Expr(expr, false) => Self::try_literal_type(expr),
+            _ => None,
+        }
+    }
+
+    /// 带作用域的 base case 返回类型查找
+    fn try_find_base_return_ty_with_scope(&mut self, body: &Stmt, fn_id: u32, fn_name: &str, args: &[SmolStr], fn_tys: &[Type]) -> Option<Type> {
+        let saved_state = self.take_local_state();
+        self.frames.push(0);
+        for (arg, ty) in args.iter().zip(fn_tys.iter()) {
+            self.add_name(arg.clone());
+            self.add_ty(ty.clone());
+        }
+        let result = self.try_find_base_return_ty_with_scope_inner(body, fn_id, fn_name);
+        self.restore_local_state(saved_state);
+        result
+    }
+
+    fn try_find_base_return_ty_with_scope_inner(&mut self, body: &Stmt, fn_id: u32, fn_name: &str) -> Option<Type> {
+        match &body.kind {
+            StmtKind::Block(stmts) => stmts.iter().find_map(|s| self.try_find_base_return_ty_with_scope_inner(s, fn_id, fn_name)),
+            StmtKind::If { then_body, else_body, .. } => self.try_find_base_return_ty_with_scope_inner(then_body, fn_id, fn_name)
+                .or_else(|| else_body.as_ref().and_then(|b| self.try_find_base_return_ty_with_scope_inner(b, fn_id, fn_name))),
+            StmtKind::Return(Some(expr)) => {
+                if Self::expr_calls_fn(expr, fn_id, fn_name) { None }
+                else { self.infer_return_expr(expr).ok().map(|info| info.ty) }
+            }
+            StmtKind::Expr(expr, false) => {
+                if Self::expr_calls_fn(expr, fn_id, fn_name) { None }
+                else { self.infer_return_expr(expr).ok().map(|info| info.ty) }
+            }
+            _ => None,
+        }
+    }
+
+    fn expr_calls_fn(expr: &Expr, fn_id: u32, fn_name: &str) -> bool {
+        match &expr.kind {
+            ExprKind::Call { obj, params } => {
+                if let ExprKind::Id(id, _) = &obj.kind { return *id == fn_id; }
+                if let ExprKind::Ident(name) = &obj.kind {
+                    if name.as_str() == fn_name || fn_name.ends_with(&format!("::{}", name)) { return true; }
+                }
+                params.iter().any(|p| Self::expr_calls_fn(p, fn_id, fn_name))
+            }
+            ExprKind::Binary { left, op: _, right } => Self::expr_calls_fn(left, fn_id, fn_name) || Self::expr_calls_fn(right, fn_id, fn_name),
+            ExprKind::Unary { op: _, value } => Self::expr_calls_fn(value, fn_id, fn_name),
+            ExprKind::Typed { value, ty: _ } => Self::expr_calls_fn(value, fn_id, fn_name),
+            _ => false,
+        }
+    }
+
+    fn try_literal_type(expr: &Expr) -> Option<Type> {
+        match &expr.kind {
+            ExprKind::Value(v) => Some(v.get_type()),
+            ExprKind::Unary { op: UnaryOp::Neg, value } => Self::try_literal_type(value),
+            _ => None,
         }
     }
 
@@ -716,13 +783,34 @@ impl Compiler {
                         if f.0 == generic_args && f.1 == fn_tys {
                             return match &f.2 {
                                 FnInferRet::Done(ret_ty) => self.symbols.get_type(ret_ty),
-                                FnInferRet::Pending(seed) => seed.as_ref().map(|ty| self.symbols.get_type(ty)).unwrap_or(Ok(Type::Any)),
+                                FnInferRet::Pending(seed) => seed.as_ref().map(|ty| self.symbols.get_type(ty)).unwrap_or_else(|| {
+                                    // 递归自调用且种子为空：尝试从函数体 base case 查找返回类型
+                                    if self.infer_stack.iter().any(|(sid, sargs, _)| *sid == id && sargs == generic_args) {
+                                        if let Some(base_ty) = self.try_find_base_return_ty(&body) {
+                                            return self.symbols.get_type(&base_ty);
+                                        }
+                                    }
+                                    Ok(Type::Any)
+                                }),
                             };
                         }
                     }
                     fns.push((generic_args.to_vec(), fn_tys.clone(), FnInferRet::Pending(None)));
                 } else {
                     self.fns.insert(id, vec![(generic_args.to_vec(), fn_tys.clone(), FnInferRet::Pending(None))]);
+                }
+                // 递归函数：预扫描 base case 返回类型作为种子
+                if self.pending_return_seed(id, generic_args, &fn_tys).is_none() {
+                    if let Some(base_ty) = self.try_find_base_return_ty_with_scope(&body, id, &name, &args, &fn_tys) {
+                        if let Some(fns) = self.fns.get_mut(&id) {
+                            if let Some(item) = fns.iter_mut().find(|item| item.0 == generic_args && item.1 == fn_tys)
+                                && let FnInferRet::Pending(seed) = &mut item.2
+                                && seed.is_none()
+                            {
+                                *seed = Some(base_ty);
+                            }
+                        }
+                    }
                 }
                 let mut ret_ty = None;
                 let mut local_type_hints = Vec::new();

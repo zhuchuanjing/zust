@@ -14,7 +14,6 @@ mod rt;
 use cranelift::prelude::types;
 use dynamic::{Dynamic, Type};
 pub use rt::JITRunTime;
-use smol_str::SmolStr;
 mod db_module;
 mod gpu_layout;
 mod gpu_module;
@@ -24,7 +23,7 @@ mod oss_module;
 mod root_module;
 pub use gpu_layout::{GpuFieldLayout, GpuStructLayout};
 
-use std::sync::{Mutex, OnceLock, Weak};
+use std::sync::{OnceLock, RwLock, Weak};
 static PTR_TYPE: OnceLock<types::Type> = OnceLock::new();
 pub fn ptr_type() -> types::Type {
     PTR_TYPE.get().cloned().unwrap()
@@ -63,7 +62,7 @@ use std::sync::Arc;
 unsafe impl Send for JITRunTime {}
 unsafe impl Sync for JITRunTime {}
 
-pub(crate) fn with_vm_context<T>(context: *const Weak<Mutex<JITRunTime>>, f: impl FnOnce(&Vm) -> Result<T>) -> Result<T> {
+pub(crate) fn with_vm_context<T>(context: *const Weak<RwLock<JITRunTime>>, f: impl FnOnce(&Vm) -> Result<T>) -> Result<T> {
     if context.is_null() {
         return Err(anyhow!("VM context is null"));
     }
@@ -293,36 +292,15 @@ impl JITRunTime {
 
 #[derive(Clone)]
 pub struct Vm {
-    jit: Arc<Mutex<JITRunTime>>,
-}
-
-#[derive(Clone)]
-pub struct CompiledFn {
-    ptr: usize,
-    ret: Type,
-    owner: Vm,
-}
-
-impl CompiledFn {
-    pub fn ptr(&self) -> *const u8 {
-        self.ptr as *const u8
-    }
-
-    pub fn ret_ty(&self) -> &Type {
-        &self.ret
-    }
-
-    pub fn owner(&self) -> &Vm {
-        &self.owner
-    }
+    pub jit: Arc<RwLock<JITRunTime>>,
 }
 
 impl Vm {
     pub fn new() -> Self {
         dynamic::set_dynamic_return_handler(memory::take_dynamic_return);
-        let jit = Arc::new(Mutex::new(JITRunTime::new(|_| {})));
+        let jit = Arc::new(RwLock::new(JITRunTime::new(|_| {})));
         {
-            let mut guard = jit.lock().unwrap();
+            let mut guard = jit.write().unwrap();
             guard.set_owner(Arc::downgrade(&jit));
             guard.add_memory_runtime().expect("register VM memory runtime");
             guard.add_std().expect("register VM std runtime");
@@ -333,150 +311,22 @@ impl Vm {
 
     pub fn with_all() -> Result<Self> {
         let vm = Self::new();
-        vm.add_all()?;
+        vm.jit.write().unwrap().add_all()?;
         Ok(vm)
-    }
-
-    pub fn add_module(&self, name: &str) {
-        self.jit.lock().unwrap().add_module(name)
-    }
-
-    pub fn pop_module(&self) {
-        self.jit.lock().unwrap().pop_module()
-    }
-
-    pub fn add_native_const(&self, name: &str, value: impl Into<Dynamic>, ty: Type) -> u32 {
-        self.jit.lock().unwrap().add_native_const(name, value, ty)
-    }
-
-    pub fn add_type(&self, name: &str, ty: Type, is_pub: bool) -> u32 {
-        self.jit.lock().unwrap().add_type(name, ty, is_pub)
-    }
-
-    pub fn add_empty_type(&self, name: &str) -> Result<u32> {
-        self.jit.lock().unwrap().add_empty_type(name)
-    }
-
-    pub fn add_std(&self) -> Result<()> {
-        self.jit.lock().unwrap().add_std()
-    }
-
-    pub fn add_any(&self) -> Result<()> {
-        self.jit.lock().unwrap().add_any()
-    }
-
-    pub fn add_vec(&self) -> Result<()> {
-        self.jit.lock().unwrap().add_vec()
-    }
-
-    pub fn add_llm(&self) -> Result<()> {
-        self.jit.lock().unwrap().add_llm()
-    }
-
-    pub fn add_root(&self) -> Result<()> {
-        self.jit.lock().unwrap().add_root()
-    }
-
-    pub fn add_http(&self) -> Result<()> {
-        self.jit.lock().unwrap().add_http()
-    }
-
-    pub fn add_oss(&self) -> Result<()> {
-        self.jit.lock().unwrap().add_oss()
-    }
-
-    pub fn add_db(&self) -> Result<()> {
-        self.jit.lock().unwrap().add_db()
-    }
-
-    pub fn add_gpu(&self) -> Result<()> {
-        self.jit.lock().unwrap().add_gpu()
-    }
-
-    pub fn add_all(&self) -> Result<()> {
-        self.jit.lock().unwrap().add_all()
-    }
-
-    pub fn add_native_ptr(&self, full_name: &str, name: &str, arg_tys: &[Type], ret_ty: Type, fn_ptr: *const u8) -> Result<u32> {
-        self.jit.lock().unwrap().add_native_ptr(full_name, name, arg_tys, ret_ty, fn_ptr)
-    }
-
-    pub fn add_native_module_ptr(&self, module: &str, name: &str, arg_tys: &[Type], ret_ty: Type, fn_ptr: *const u8) -> Result<u32> {
-        self.jit.lock().unwrap().add_native_module_ptr(module, name, arg_tys, ret_ty, fn_ptr)
-    }
-
-    pub fn add_native_method_ptr(&self, def: &str, method: &str, arg_tys: &[Type], ret_ty: Type, fn_ptr: *const u8) -> Result<u32> {
-        self.jit.lock().unwrap().add_native_method_ptr(def, method, arg_tys, ret_ty, fn_ptr)
-    }
-
-    pub fn add_inline(&self, name: &str, args: Vec<Type>, ret: Type, f: fn(Option<&mut BuildContext>, Vec<Value>) -> Result<(Option<Value>, Type)>) -> Result<u32> {
-        self.jit.lock().unwrap().add_inline(name, args, ret, f)
-    }
-
-    pub fn import_code(&self, name: &str, code: Vec<u8>) -> Result<()> {
-        self.jit.lock().unwrap().import_code(name, code)
-    }
-
-    pub fn import_file(&self, name: &str, path: &str) -> Result<()> {
-        self.jit.lock().unwrap().compiler.import_file(name, path)?;
-        Ok(())
     }
 
     pub fn import(&self, name: &str, path: &str) -> Result<()> {
         if root::contains(path) {
             let code = root::get(path).unwrap();
             if code.is_str() {
-                self.import_code(name, code.as_str().as_bytes().to_vec())
+                self.jit.write().unwrap().import_code(name, code.as_str().as_bytes().to_vec())
             } else {
-                self.import_code(name, code.get_dynamic("code").ok_or(anyhow!("{:?} 没有 code 成员", code))?.as_str().as_bytes().to_vec())
+                self.jit.write().unwrap().import_code(name, code.get_dynamic("code").ok_or(anyhow!("{:?} 没有 code 成员", code))?.as_str().as_bytes().to_vec())
             }
         } else {
-            self.import_file(name, path)
+            self.jit.write().unwrap().compiler.import_file(name, path)?;
+            Ok(())
         }
-    }
-
-    pub fn infer(&self, name: &str, arg_tys: &[Type]) -> Result<Type> {
-        self.jit.lock().unwrap().get_type(name, arg_tys)
-    }
-
-    pub fn get_fn_ptr(&self, name: &str, arg_tys: &[Type]) -> Result<(*const u8, Type)> {
-        self.jit.lock().unwrap().get_fn_ptr(name, arg_tys)
-    }
-
-    pub fn get_fn_ptr_with_params(&self, name: &str, arg_tys: &[Type], generic_args: &[Type]) -> Result<(*const u8, Type)> {
-        self.jit.lock().unwrap().get_fn_ptr_with_params(name, arg_tys, generic_args)
-    }
-
-    pub fn get_fn(&self, name: &str, arg_tys: &[Type]) -> Result<CompiledFn> {
-        let (ptr, ret) = self.get_fn_ptr(name, arg_tys)?;
-        Ok(CompiledFn { ptr: ptr as usize, ret, owner: self.clone() })
-    }
-
-    pub fn get_fn_with_params(&self, name: &str, arg_tys: &[Type], generic_args: &[Type]) -> Result<CompiledFn> {
-        let (ptr, ret) = self.get_fn_ptr_with_params(name, arg_tys, generic_args)?;
-        Ok(CompiledFn { ptr: ptr as usize, ret, owner: self.clone() })
-    }
-
-    pub fn load(&self, code: Vec<u8>, arg_name: SmolStr) -> Result<(i64, Type)> {
-        self.jit.lock().unwrap().load(code, arg_name)
-    }
-
-    pub fn get_symbol(&self, name: &str, params: Vec<Type>) -> Result<Type> {
-        Ok(Type::Symbol { id: self.jit.lock().unwrap().get_id(name)?, params })
-    }
-
-    pub fn gpu_struct_layout(&self, name: &str, params: &[Type]) -> Result<GpuStructLayout> {
-        let jit = self.jit.lock().unwrap();
-        GpuStructLayout::from_symbol_table(&jit.compiler.symbols, name, params)
-    }
-
-    pub fn disassemble(&self, name: &str) -> Result<String> {
-        self.jit.lock().unwrap().compiler.symbols.disassemble(name)
-    }
-
-    #[cfg(feature = "ir-disassembly")]
-    pub fn disassemble_ir(&self, name: &str) -> Result<String> {
-        self.jit.lock().unwrap().disassemble_ir(name)
     }
 }
 
@@ -488,10 +338,83 @@ impl Default for Vm {
 
 #[cfg(test)]
 mod tests {
-    use super::{Vm, ZustCallback};
+    use super::{GpuStructLayout, Vm, ZustCallback};
     use dynamic::{CustomProperty, Dynamic, ToJson, Type};
     use std::collections::BTreeMap;
     use std::sync::{Mutex, RwLock};
+
+    /// Test-only wrapper for a compiled function pointer + return type.
+    struct TestFn {
+        ptr: *const u8,
+        ret: Type,
+    }
+
+    impl TestFn {
+        fn ptr(&self) -> *const u8 { self.ptr }
+        fn ret_ty(&self) -> &Type { &self.ret }
+    }
+
+    /// Test-only convenience wrapping `vm.jit.write().unwrap()` calls.
+    trait VmTestExt {
+        fn import_code(&self, name: &str, code: Vec<u8>) -> anyhow::Result<()>;
+        fn get_fn(&self, name: &str, arg_tys: &[Type]) -> anyhow::Result<TestFn>;
+        fn get_fn_with_params(&self, name: &str, arg_tys: &[Type], generic_args: &[Type]) -> anyhow::Result<TestFn>;
+        fn get_fn_ptr(&self, name: &str, arg_tys: &[Type]) -> anyhow::Result<(*const u8, Type)>;
+        fn infer(&self, name: &str, arg_tys: &[Type]) -> anyhow::Result<Type>;
+        fn add_native_module_ptr(&self, module: &str, name: &str, arg_tys: &[Type], ret_ty: Type, ptr: *const u8) -> anyhow::Result<u32>;
+        fn add_native_method_ptr(&self, def: &str, method: &str, arg_tys: &[Type], ret_ty: Type, ptr: *const u8) -> anyhow::Result<u32>;
+        fn add_empty_type(&self, name: &str) -> anyhow::Result<u32>;
+        fn add_std(&self) -> anyhow::Result<()>;
+        fn add_any(&self) -> anyhow::Result<()>;
+        fn get_symbol(&self, name: &str, params: Vec<Type>) -> anyhow::Result<Type>;
+        fn gpu_struct_layout(&self, name: &str, params: &[Type]) -> anyhow::Result<GpuStructLayout>;
+        fn load(&self, code: Vec<u8>, arg_name: smol_str::SmolStr) -> anyhow::Result<(i64, Type)>;
+    }
+
+    impl VmTestExt for Vm {
+        fn import_code(&self, name: &str, code: Vec<u8>) -> anyhow::Result<()> {
+            self.jit.write().unwrap().import_code(name, code)
+        }
+        fn get_fn(&self, name: &str, arg_tys: &[Type]) -> anyhow::Result<TestFn> {
+            let (ptr, ret) = self.jit.write().unwrap().get_fn_ptr(name, arg_tys)?;
+            Ok(TestFn { ptr, ret })
+        }
+        fn get_fn_with_params(&self, name: &str, arg_tys: &[Type], generic_args: &[Type]) -> anyhow::Result<TestFn> {
+            let (ptr, ret) = self.jit.write().unwrap().get_fn_ptr_with_params(name, arg_tys, generic_args)?;
+            Ok(TestFn { ptr, ret })
+        }
+        fn get_fn_ptr(&self, name: &str, arg_tys: &[Type]) -> anyhow::Result<(*const u8, Type)> {
+            self.jit.write().unwrap().get_fn_ptr(name, arg_tys)
+        }
+        fn infer(&self, name: &str, arg_tys: &[Type]) -> anyhow::Result<Type> {
+            self.jit.write().unwrap().get_type(name, arg_tys)
+        }
+        fn add_native_module_ptr(&self, module: &str, name: &str, arg_tys: &[Type], ret_ty: Type, ptr: *const u8) -> anyhow::Result<u32> {
+            self.jit.write().unwrap().add_native_module_ptr(module, name, arg_tys, ret_ty, ptr)
+        }
+        fn add_native_method_ptr(&self, def: &str, method: &str, arg_tys: &[Type], ret_ty: Type, ptr: *const u8) -> anyhow::Result<u32> {
+            self.jit.write().unwrap().add_native_method_ptr(def, method, arg_tys, ret_ty, ptr)
+        }
+        fn add_empty_type(&self, name: &str) -> anyhow::Result<u32> {
+            self.jit.write().unwrap().add_empty_type(name)
+        }
+        fn add_std(&self) -> anyhow::Result<()> {
+            self.jit.write().unwrap().add_std()
+        }
+        fn add_any(&self) -> anyhow::Result<()> {
+            self.jit.write().unwrap().add_any()
+        }
+        fn get_symbol(&self, name: &str, params: Vec<Type>) -> anyhow::Result<Type> {
+            Ok(Type::Symbol { id: self.jit.write().unwrap().get_id(name)?, params })
+        }
+        fn gpu_struct_layout(&self, name: &str, params: &[Type]) -> anyhow::Result<GpuStructLayout> {
+            let jit = self.jit.write().unwrap();
+            GpuStructLayout::from_symbol_table(&jit.compiler.symbols, name, params)
+        }
+        fn load(&self, code: Vec<u8>, arg_name: smol_str::SmolStr) -> anyhow::Result<(i64, Type)> {
+            self.jit.write().unwrap().load(code, arg_name)
+        }
+    }
 
     extern "C" fn math_double(value: i64) -> i64 {
         value * 2
@@ -1954,6 +1877,35 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
         anyhow::bail!("spawned job did not write expected result");
+    }
+
+    #[test]
+    fn spawn_native_closure_avoids_any_boxing() -> anyhow::Result<()> {
+        let nat_path = "local/vm_spawn_native/result";
+        let _ = root::remove(nat_path);
+        let vm = Vm::with_all()?;
+        vm.import_code(
+            "vm_spawn_native",
+            br#"
+            pub fn start() {
+                spawn(|x: i64, y: i64| {
+                    root::add("local/vm_spawn_native/result", x + y);
+                }, (10i64, 20i64))
+            }
+            "#
+            .to_vec(),
+        )?;
+        let compiled = vm.get_fn("vm_spawn_native::start", &[])?;
+        assert_eq!(compiled.ret_ty(), &Type::Bool);
+        let start: extern "C" fn() -> bool = unsafe { std::mem::transmute(compiled.ptr()) };
+        assert!(start());
+        for _ in 0..50 {
+            if root::get(nat_path).ok().and_then(|v| v.as_int()) == Some(30) {
+                return Ok(());
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        anyhow::bail!("spawned native closure did not write expected result");
     }
 
     #[test]
@@ -3818,8 +3770,8 @@ mod tests {
         )?;
 
         let compiled = vm.get_fn("vm_dynamic_index_sum::sum_list", &[Type::I64])?;
-        let sum_list_id = vm.jit.lock().unwrap().compiler.symbols.get_id("vm_dynamic_index_sum::sum_list")?;
-        let hints = vm.jit.lock().unwrap().compiler.inferred_local_type_hints(sum_list_id, &[], &[Type::I64]);
+        let sum_list_id = vm.jit.write().unwrap().compiler.symbols.get_id("vm_dynamic_index_sum::sum_list")?;
+        let hints = vm.jit.write().unwrap().compiler.inferred_local_type_hints(sum_list_id, &[], &[Type::I64]);
         assert!(hints.iter().any(|ty| matches!(ty, Some(Type::List(elem)) if elem.as_ref() == &Type::I64)), "local type hints: {:?}", hints);
         assert_eq!(compiled.ret_ty(), &Type::I64);
         let sum_list: extern "C" fn(i64) -> i64 = unsafe { std::mem::transmute(compiled.ptr()) };
@@ -3904,40 +3856,40 @@ mod tests {
         )?;
 
         let compiled = vm.get_fn("vm_inferred_list_shortcuts::second_bool", &[])?;
-        let second_bool_id = vm.jit.lock().unwrap().compiler.symbols.get_id("vm_inferred_list_shortcuts::second_bool")?;
-        let hints = vm.jit.lock().unwrap().compiler.inferred_local_type_hints(second_bool_id, &[], &[]);
+        let second_bool_id = vm.jit.write().unwrap().compiler.symbols.get_id("vm_inferred_list_shortcuts::second_bool")?;
+        let hints = vm.jit.write().unwrap().compiler.inferred_local_type_hints(second_bool_id, &[], &[]);
         assert!(hints.iter().any(|ty| matches!(ty, Some(Type::List(elem)) if elem.as_ref() == &Type::Bool)), "bool local type hints: {:?}", hints);
         assert_eq!(compiled.ret_ty(), &Type::Bool);
         let second_bool: extern "C" fn() -> bool = unsafe { std::mem::transmute(compiled.ptr()) };
         assert!(!second_bool());
 
         let compiled = vm.get_fn("vm_inferred_list_shortcuts::first_u8", &[])?;
-        let first_u8_id = vm.jit.lock().unwrap().compiler.symbols.get_id("vm_inferred_list_shortcuts::first_u8")?;
-        let hints = vm.jit.lock().unwrap().compiler.inferred_local_type_hints(first_u8_id, &[], &[]);
+        let first_u8_id = vm.jit.write().unwrap().compiler.symbols.get_id("vm_inferred_list_shortcuts::first_u8")?;
+        let hints = vm.jit.write().unwrap().compiler.inferred_local_type_hints(first_u8_id, &[], &[]);
         assert!(hints.iter().any(|ty| matches!(ty, Some(Type::List(elem)) if elem.as_ref() == &Type::U8)), "u8 local type hints: {:?}", hints);
         assert_eq!(compiled.ret_ty(), &Type::U8);
         let first_u8: extern "C" fn() -> u8 = unsafe { std::mem::transmute(compiled.ptr()) };
         assert_eq!(first_u8(), 7);
 
         let compiled = vm.get_fn("vm_inferred_list_shortcuts::sum_i32", &[Type::I64])?;
-        let sum_i32_id = vm.jit.lock().unwrap().compiler.symbols.get_id("vm_inferred_list_shortcuts::sum_i32")?;
-        let hints = vm.jit.lock().unwrap().compiler.inferred_local_type_hints(sum_i32_id, &[], &[Type::I64]);
+        let sum_i32_id = vm.jit.write().unwrap().compiler.symbols.get_id("vm_inferred_list_shortcuts::sum_i32")?;
+        let hints = vm.jit.write().unwrap().compiler.inferred_local_type_hints(sum_i32_id, &[], &[Type::I64]);
         assert!(hints.iter().any(|ty| matches!(ty, Some(Type::List(elem)) if elem.as_ref() == &Type::I32)), "i32 local type hints: {:?}", hints);
         assert_eq!(compiled.ret_ty(), &Type::I32);
         let sum_i32: extern "C" fn(i64) -> i32 = unsafe { std::mem::transmute(compiled.ptr()) };
         assert_eq!(sum_i32(100), 4950);
 
         let compiled = vm.get_fn("vm_inferred_list_shortcuts::sum_f32", &[Type::I64])?;
-        let sum_f32_id = vm.jit.lock().unwrap().compiler.symbols.get_id("vm_inferred_list_shortcuts::sum_f32")?;
-        let hints = vm.jit.lock().unwrap().compiler.inferred_local_type_hints(sum_f32_id, &[], &[Type::I64]);
+        let sum_f32_id = vm.jit.write().unwrap().compiler.symbols.get_id("vm_inferred_list_shortcuts::sum_f32")?;
+        let hints = vm.jit.write().unwrap().compiler.inferred_local_type_hints(sum_f32_id, &[], &[Type::I64]);
         assert!(hints.iter().any(|ty| matches!(ty, Some(Type::List(elem)) if elem.as_ref() == &Type::F32)), "f32 local type hints: {:?}", hints);
         assert_eq!(compiled.ret_ty(), &Type::F32);
         let sum_f32: extern "C" fn(i64) -> f32 = unsafe { std::mem::transmute(compiled.ptr()) };
         assert_eq!(sum_f32(10), 45.0);
 
         let compiled = vm.get_fn("vm_inferred_list_shortcuts::second_str", &[])?;
-        let second_str_id = vm.jit.lock().unwrap().compiler.symbols.get_id("vm_inferred_list_shortcuts::second_str")?;
-        let hints = vm.jit.lock().unwrap().compiler.inferred_local_type_hints(second_str_id, &[], &[]);
+        let second_str_id = vm.jit.write().unwrap().compiler.symbols.get_id("vm_inferred_list_shortcuts::second_str")?;
+        let hints = vm.jit.write().unwrap().compiler.inferred_local_type_hints(second_str_id, &[], &[]);
         assert!(hints.iter().any(|ty| matches!(ty, Some(Type::List(elem)) if elem.as_ref() == &Type::Str)), "str local type hints: {:?}", hints);
         assert_eq!(compiled.ret_ty(), &Type::Str);
         let second_str: extern "C" fn() -> *const Dynamic = unsafe { std::mem::transmute(compiled.ptr()) };

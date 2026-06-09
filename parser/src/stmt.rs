@@ -100,24 +100,22 @@ impl Stmt {
                     for (idx, p) in list.into_iter().enumerate() {
                         match p.expr() {
                             Ok(p) => stmts.push(Self::get_idx_assign(p, idx, expr.clone())),
-                            Err(e) => {
-                                println!("{:?}", e);
-                            }
+                            Err(e) => return Err(e),
                         }
                     }
                     Self::new(StmtKind::Block(stmts), self.span)
                 }
-                p => panic!("{:?}", p),
+                p => return Err(anyhow!("不支持的模式绑定: {:?}", p)),
             };
             let _ = std::mem::replace(self, stmt);
         } else {
             match &mut self.kind {
                 StmtKind::Block(stmts) => {
-                    stmts.last_mut().map(|stmt| stmt.bind_pattern(pat));
+                    if let Some(stmt) = stmts.last_mut() { stmt.bind_pattern(pat)?; }
                 }
                 StmtKind::If { then_body, else_body, .. } => {
-                    let _ = then_body.bind_pattern(pat.clone());
-                    else_body.as_mut().map(|e| e.bind_pattern(pat));
+                    then_body.bind_pattern(pat.clone())?;
+                    if let Some(e) = else_body { e.bind_pattern(pat)?; }
                 }
                 _ => {}
             }
@@ -157,7 +155,7 @@ impl fmt::Display for Stmt {
                 write!(f, "{}", body)?;
             }
             _ => {
-                panic!("无效语句 {:?}", self)
+                write!(f, "(todo display: {:?})", self.kind)?
             }
         }
         fmt::Result::Ok(())
@@ -189,7 +187,13 @@ impl Parser {
         let start = self.current_pos();
         if self.get()? == b'{' {
             self.pos += 1;
-            Ok(Stmt::new(StmtKind::Block(crate::parse_list!(self, Vec::new(), b'}', 0, self.stmt(false)?)), self.span_from(start)))
+            self.push_decl_scope();
+            let result = (|| -> Result<Stmt> {
+                let body = crate::parse_list!(self, Vec::new(), b'}', 0, self.stmt(false)?);
+                Ok(Stmt::new(StmtKind::Block(body), self.span_from(start)))
+            })();
+            self.pop_decl_scope();
+            result
         } else {
             Err(anyhow!("not code block"))
         }
@@ -218,24 +222,18 @@ impl Parser {
             self.declare_pattern_symbols(&pat)?;
             self.until(b'=')?;
             self.whitespace()?;
-            let stmt = if self.get()? == b'{' {
+            let value = if self.get()? == b'{' {
                 if self.looks_like_dict() {
-                    let expr = self.get_expr()?;
-                    self.whitespace()?;
-                    if self.get()? == b';' {
-                        self.pos += 1;
-                    }
-                    Stmt::new(StmtKind::Expr(expr, true), Span::new(start, self.current_pos()))
+                    self.get_expr()?
                 } else {
                     return Err(anyhow!("代码块不能直接作为表达式，请使用 || {{ ... }} 包装为匿名函数"));
                 }
             } else {
-                let stmt = self.stmt(false)?;
-                if stmt.expr().is_none() {
-                    self.until(b';')?;
-                }
-                stmt
+                self.get_expr()?
             };
+            self.whitespace()?;
+            let close = self.take(b';').is_ok();
+            let stmt = Stmt::new(StmtKind::Expr(value, close), Span::new(start, self.current_pos()));
             Stmt::new(StmtKind::Let { pat, value: Box::new(stmt) }, Span::new(start, self.current_pos()))
         } else if self.keyword("break").is_ok() {
             self.until(b';')?;

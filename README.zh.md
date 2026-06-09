@@ -4,7 +4,7 @@ Zust 是一个用 Rust 编写的类 Rust 脚本语言和运行时。它保留了
 
 官方网站：[www.zust-lang.com](https://www.zust-lang.com)
 
-项目已经接近成熟的开源版本。当前 workspace 内各 crate 独立发版：VM crate 为 `0.9.35`，dynamic crate 为 `0.9.8`，compiler 为 `0.9.15`，parser 为 `0.9.8`，编辑器相关包为 `0.9.2`。
+项目已经接近成熟的开源版本。当前 workspace 内各 crate 独立发版：VM crate 为 `0.9.68`，dynamic crate 为 `0.9.12`，compiler 为 `0.9.30`，parser 为 `0.9.11`，SPIR-V 后端为 `0.9.7`，Metal 后端为 `0.9.8`，编辑器相关包为 `0.9.2`。
 
 English: [README.md](README.md)
 
@@ -23,6 +23,12 @@ VM 托管临时内存的工作已经完成。VM 创建的 `Any`/`Dynamic` 值和
 - 嵌套结构体参数返回结构体时，调用点可以正常做静态字段访问。
 - `std::log(value)` 会用 Rust log 以 debug 格式记录动态值。
 - VM 内部内存和结构体 helper 由运行时直接注册，不再暴露到脚本符号表。
+- 嵌套闭包捕获正确解析——闭包内部定义的闭包能正确捕获外层变量。
+- 支持字符串到数字的类型转换：`"123" as i32`、`"3.14" as f64`。
+- parser 在同一 scope 内拒绝重复声明。
+- dict shorthand 字段：`{name}` 等价于 `{name: name}`。
+- `std::sqrt(value)` 计算 `f64` 的平方根。
+- `std::spawn(target, args)` 启动独立 OS 线程；回调闭包支持最多 24 个参数。
 
 ## 设计思路
 
@@ -44,9 +50,13 @@ Zust 的设计围绕几个现实目标展开：
 - `let` 绑定支持标识符、tuple、list、通配符和带类型标注的模式。
 - `const`、`static`、公开项、函数、泛型函数、结构体、泛型结构体、`impl`、方法和关联调用。
 - 代码块、表达式形式的 `if`/`else`、`for`、`while`、`loop`、`break`、`continue` 和 `return`。
-- 带类型参数并能捕获外部值的闭包。
+- 带类型参数并能捕获外部值的闭包，包括嵌套闭包捕获。
 - 算术、比较、逻辑、位运算、索引、range、类型转换、赋值和复合赋值表达式。
+- 字符串到数字的类型转换：`"123" as i32`、`"3.14" as f64`。
+- dict shorthand 字段：`{name}` 等价于 `{name: name}`。
+- 空 tuple `()` 作为合法表达式。
 - 跨 `.zs` 文件导入；单参数 `import` 会默认补全 `.zs` 后缀。
+- 同一 scope 内拒绝重复声明。
 
 Zust 的目标不是完整兼容 Rust，而是保留 Rust 的结构感并服务脚本场景：没有借用检查，变量不需要显式 `mut`，宿主模块边界默认使用动态值。
 
@@ -80,12 +90,19 @@ let nothing = null;
 let list = [1, 2, 3];
 let object = {name: "Zust", version: 0.9};
 let pair = (1i32, 2i32);
+let empty = ();
 let repeated: [u32; 3] = [0u32; 1 + 2];
+
+// dict shorthand: {name} 等价于 {name: name}
+let version = 0.9;
+let short = {name, version};
 ```
 
 数字字面量可以带显式后缀，例如 `1i32`、`8u64`、`3.14f32`；整数字面量支持 `0x`、`0o` 和 `0b` 前缀。
 
 字符串拼接会在运行时使用动态字符串转换，因此支持 `"" + idx`、`"" + level + "级"`、`"" + map.value` 这类写法。
+
+字符串到数字的类型转换通过 `as` 完成：`"123" as i32` 得到 `123`，`"3.14" as f64` 得到 `3.14`。无效数字转为 `0`。
 
 ### 常量和静态值
 
@@ -227,6 +244,17 @@ pub fn demo_closure() {
     add_base(identity(5i32))
 }
 
+// 嵌套闭包正确捕获外层变量：
+pub fn demo_nested_closure() {
+    let label = "test";
+    |path: string| {
+        let done = |ok: bool| {
+            if ok { label + ":" + path } else { "missing" }
+        };
+        done(true)
+    }("file.png")
+}
+
 // 闭包可以立即调用：
 pub fn immediate_closure() {
     let r = || { 1i32 + 2i32 }();
@@ -267,6 +295,7 @@ pub struct BigFloat<N> {
 
 - `print(value)`：打印动态值。
 - `log(value)`：用 Rust log 以 debug 格式记录动态值。
+- `sqrt(value)`：返回 `f64` 的平方根。
 - `uuid()`：返回 UUID 字符串。
 - `rand(start, stop)`：返回 `start` 到 `stop` 之间的随机整数或浮点数。
 - `import(module, path)`：导入另一个 `.zs` 文件，或导入存放在 `root` 中的源码对象。
@@ -618,10 +647,10 @@ let checked = gpu::spirv_check({
 
 ## 最小 VM 示例
 
-最小宿主流程是：
+`Vm` 是 JIT 运行时的薄封装。`jit` 字段是 `pub` 的，宿主代码直接访问编译器和 JIT：
 
 1. 把 Zust 源码导入 VM。
-2. 向 VM 请求已编译的函数指针。
+2. 向 JIT 请求已编译的函数指针。
 3. 将函数指针转换成 `extern "C"` 函数并调用。
 
 ```rust
@@ -631,7 +660,7 @@ use dynamic::Type;
 fn main() -> Result<()> {
     let vm = vm::Vm::with_all()?;
 
-    vm.import_code(
+    vm.jit.write().unwrap().import_code(
         "demo",
         br#"
         pub fn add(a: i64, b: i64) {
@@ -641,10 +670,10 @@ fn main() -> Result<()> {
         .to_vec(),
     )?;
 
-    let compiled = vm.get_fn("demo::add", &[Type::I64, Type::I64])?;
-    assert_eq!(compiled.ret_ty(), &Type::I64);
+    let (ptr, ret) = vm.jit.write().unwrap().get_fn_ptr("demo::add", &[Type::I64, Type::I64])?;
+    assert_eq!(ret, Type::I64);
 
-    let add: extern "C" fn(i64, i64) -> i64 = unsafe { std::mem::transmute(compiled.ptr()) };
+    let add: extern "C" fn(i64, i64) -> i64 = unsafe { std::mem::transmute(ptr) };
     println!("40 + 2 = {}", add(40, 2));
 
     Ok(())
@@ -656,19 +685,6 @@ fn main() -> Result<()> {
 ```bash
 cargo run -p vm --example minimal_vm
 ```
-
-## GPU VM 模块
-
-`Vm::with_all()` 会注册 `gpu` 模块，把现有 GPU 后端整理成三条入口：
-
-- `gpu::spirv_compile(options)` / `gpu::spirv_check(options)`：编译或检查 `Zust -> SPIR-V`。
-- `gpu::metal_compile(options)` / `gpu::metal_check(options)`：在 macOS 上编译或检查 `Zust -> Metal`。
-- `gpu::vulkan_run(options)`：加载 SPIR-V、绑定 buffer，并通过 Vulkan dispatch。
-- `gpu::metal_run(options)`：在 macOS 上加载 Metal shader 或从 Zust 编译后 dispatch。
-
-编译 shader 不需要 VM 的执行后端。只有调用 `gpu::vulkan_run` 时才需要打开 `zust-vm` 的 `vulkan` feature；只有调用 `gpu::metal_run` 时才需要打开 `metal` feature。
-
-`options` 是普通动态 map，常用字段包括 `source` 或 `path`、`module`、`fn`、`workgroup_size`、`groups` 和 `args`。运行参数支持标量输入、typed vector buffer，以及用于结构体 ABI 参数的原始 `bytes` buffer。
 
 ## 目录结构
 

@@ -937,7 +937,7 @@ mod tests {
         root::add_value("local/db_module_postgres_vm_tx", url)?;
 
         let vm = Vm::with_all()?;
-        vm.import_code(
+        vm.jit.write().unwrap().import_code(
             "db_transaction_vm",
             br#"
             pub fn run() {
@@ -952,9 +952,9 @@ mod tests {
             .to_vec(),
         )?;
 
-        let compiled = vm.get_fn("db_transaction_vm::run", &[])?;
-        assert_eq!(compiled.ret_ty(), &Type::I64);
-        let run: extern "C" fn() -> i64 = unsafe { std::mem::transmute(compiled.ptr()) };
+        let (ptr, ret) = vm.jit.write().unwrap().get_fn_ptr("db_transaction_vm::run", &[])?;
+        assert_eq!(ret, Type::I64);
+        let run: extern "C" fn() -> i64 = unsafe { std::mem::transmute(ptr) };
         assert_eq!(run(), 2);
 
         root::block_on_async(|| {

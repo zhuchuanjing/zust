@@ -1,6 +1,6 @@
 [package]
 name = "zust-compiler"
-version = "0.9.30"
+version = "0.9.31"
 edition = "2024"
 rust-version = "1.85"
 description = "Compiler front-end and semantic lowering for the Zust scripting language."

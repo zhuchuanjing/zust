@@ -4,7 +4,7 @@ Zust is a Rust-like scripting language and runtime written in Rust. It keeps the
 
 Official website: [www.zust-lang.com](https://www.zust-lang.com)
 
-The project is close to a mature open-source release. The workspace now contains separately versioned crates, with the VM crate at `0.9.36`, the dynamic crate at `0.9.8`, the compiler at `0.9.15`, the parser at `0.9.8`, and the editor-facing packages at `0.9.2`.
+The project is close to a mature open-source release. The workspace now contains separately versioned crates, with the VM crate at `0.9.68`, the dynamic crate at `0.9.12`, the compiler at `0.9.30`, the parser at `0.9.11`, the SPIR-V backend at `0.9.7`, the Metal backend at `0.9.8`, and the editor-facing packages at `0.9.2`.
 
 中文文档: [README.zh.md](README.zh.md)
 
@@ -23,6 +23,12 @@ Recent compiler/runtime fixes also include:
 - Nested struct parameters returning structs support static field access at the call site.
 - `std::log(value)` records a dynamic value through Rust logging with debug formatting.
 - VM-internal memory and struct helper imports are registered directly by the runtime instead of being exposed through the script symbol table.
+- Nested closure captures are now correctly resolved — closures defined inside closures properly capture outer scope variables.
+- String-to-number casts are supported: `"123" as i32`, `"3.14" as f64`.
+- The parser rejects duplicate declarations within the same scope (function args, local lets).
+- Dict shorthand fields: `{name}` is equivalent to `{name: name}`.
+- `std::sqrt(value)` computes the square root of an `f64`.
+- `std::spawn(target, args)` starts a detached OS thread; callback closures support up to 24 arguments.
 
 ## Additional Documentation
 
@@ -51,9 +57,13 @@ The checked-in syntax suite covers the core language surface now implemented by 
 - `let` bindings with identifier, tuple, list, wildcard, and typed patterns.
 - `const`, `static`, public items, functions, generic functions, structs, generic structs, `impl` blocks, methods, and associated calls.
 - Blocks, expression-oriented `if`/`else`, `for`, `while`, `loop`, `break`, `continue`, and `return`.
-- Closures with typed parameters and captured values.
+- Closures with typed parameters and captured values, including nested closure captures.
 - Arithmetic, comparison, logical, bitwise, indexing, range, cast, assignment, and compound-assignment expressions.
+- String-to-number casts via `as`: `"123" as i32`, `"3.14" as f64`.
+- Dict shorthand fields: `{name}` expands to `{name: name}`.
+- Empty tuple `()` as a valid expression.
 - Imports across `.zs` files, including default `.zs` suffix inference for single-argument imports.
+- Duplicate symbol rejection within the same scope.
 
 The language is intentionally pragmatic rather than fully Rust-compatible: there is no borrow checker, variables do not need explicit `mut`, and dynamic values remain the default boundary type for host modules.
 
@@ -87,12 +97,19 @@ let nothing = null;
 let list = [1, 2, 3];
 let object = {name: "Zust", version: 0.9};
 let pair = (1i32, 2i32);
+let empty = ();
 let repeated: [u32; 3] = [0u32; 1 + 2];
+
+// dict shorthand: {name} is equivalent to {name: name}
+let version = 0.9;
+let short = {name, version};
 ```
 
 Numeric literals may use explicit suffixes such as `1i32`, `8u64`, or `3.14f32`, and integer literals support `0x`, `0o`, and `0b` prefixes.
 
 String concatenation uses dynamic string conversion at runtime, so expressions such as `"" + idx`, `"" + level + " level"`, and `"" + map.value` are supported.
+
+String-to-number casts are supported via `as`: `"123" as i32` yields `123`, and `"3.14" as f64` yields `3.14`. Invalid numbers cast to `0`.
 
 ### Constants And Statics
 
@@ -238,6 +255,17 @@ pub fn demo_closure() {
     add_base(identity(5i32))
 }
 
+// nested closures capture correctly:
+pub fn demo_nested_closure() {
+    let label = "test";
+    |path: string| {
+        let done = |ok: bool| {
+            if ok { label + ":" + path } else { "missing" }
+        };
+        done(true)
+    }("file.png")
+}
+
 pub fn demo_const_generic() {
     const_value::<4>()
 }
@@ -282,6 +310,7 @@ The standard functions are available without a module prefix:
 
 - `print(value)`: print a dynamic value.
 - `log(value)`: write a dynamic value to Rust logs using debug formatting.
+- `sqrt(value)`: return the square root of an `f64` value.
 - `uuid()`: return a UUID string.
 - `rand(start, stop)`: return a random integer or float between `start` and `stop`.
 - `import(module, path)`: import another `.zs` file or a source object stored in `root`.
@@ -289,7 +318,7 @@ The standard functions are available without a module prefix:
 
 ### Native Callbacks
 
-When a closure is passed to a native function through an `Any` argument, the VM packages it as `Dynamic::Custom(ZustCallback)`. Rust native code can downcast and save it, then call it later with `callback.call0()`, `callback.call1(value)`, or `callback.call(vec![...])`. Callback closures support up to 8 explicit dynamic arguments, such as `button.on_pressed(|| { label.set_text("clicked!"); })` and `dialog.on_file_selected(|path| { label.set_text(path); })`. Captures are deep-cloned as dynamic values, so scalar values and native custom objects can be used after the original Zust call returns.
+When a closure is passed to a native function through an `Any` argument, the VM packages it as `Dynamic::Custom(ZustCallback)`. Rust native code can downcast and save it, then call it later with `callback.call0()`, `callback.call1(value)`, or `callback.call(vec![...])`. Callback closures support up to 24 explicit dynamic arguments, such as `button.on_pressed(|| { label.set_text("clicked!"); })` and `dialog.on_file_selected(|path| { label.set_text(path); })`. Captures are deep-cloned as dynamic values, so scalar values and native custom objects can be used after the original Zust call returns.
 
 ### `Any`
 
@@ -613,10 +642,10 @@ See the GPU examples under [zusts/gpu](zusts/gpu).
 
 ## Minimal VM Example
 
-The smallest host-side flow is:
+`Vm` is a thin wrapper around the JIT runtime. The `jit` field is `pub`, so host code accesses the compiler and JIT directly:
 
 1. Import Zust source code into the VM.
-2. Ask the VM for a compiled function pointer.
+2. Ask the JIT for a compiled function pointer.
 3. Cast the pointer to an `extern "C"` function and call it.
 
 ```rust
@@ -626,7 +655,7 @@ use dynamic::Type;
 fn main() -> Result<()> {
     let vm = vm::Vm::with_all()?;
 
-    vm.import_code(
+    vm.jit.write().unwrap().import_code(
         "demo",
         br#"
         pub fn add(a: i64, b: i64) {
@@ -636,10 +665,10 @@ fn main() -> Result<()> {
         .to_vec(),
     )?;
 
-    let compiled = vm.get_fn("demo::add", &[Type::I64, Type::I64])?;
-    assert_eq!(compiled.ret_ty(), &Type::I64);
+    let (ptr, ret) = vm.jit.write().unwrap().get_fn_ptr("demo::add", &[Type::I64, Type::I64])?;
+    assert_eq!(ret, Type::I64);
 
-    let add: extern "C" fn(i64, i64) -> i64 = unsafe { std::mem::transmute(compiled.ptr()) };
+    let add: extern "C" fn(i64, i64) -> i64 = unsafe { std::mem::transmute(ptr) };
     println!("40 + 2 = {}", add(40, 2));
 
     Ok(())

@@ -3,7 +3,7 @@ use dynamic::Type;
 
 fn main() -> Result<()> {
     let vm = vm::Vm::with_all()?;
-    vm.import_code(
+    vm.jit.write().unwrap().import_code(
         "vm_bug_repro",
         br#"
         pub struct Inner {
@@ -88,9 +88,9 @@ fn main() -> Result<()> {
     run_i64(&vm, "read_team_winner_direct", &[])?;
     run_i64(&vm, "read_team_winner_bound", &[])?;
 
-    let team_ty = vm.infer("vm_bug_repro::read_team_winner_direct_arg", &[]).unwrap_or(Type::Any);
+    let team_ty = vm.jit.write().unwrap().get_type("vm_bug_repro::read_team_winner_direct_arg", &[]).unwrap_or(Type::Any);
     println!("read_team_winner_direct_arg infer with no args: {team_ty:?}");
-    let team_ty = vm.get_symbol("TeamMini", Vec::new())?;
+    let team_ty = vm.jit.write().unwrap().get_type("TeamMini", &[])?;
     compile_only(&vm, "read_team_winner_direct_arg", &[team_ty.clone()]);
     compile_only(&vm, "read_team_winner_bound_arg", &[team_ty]);
 
@@ -100,11 +100,11 @@ fn main() -> Result<()> {
 fn run_i64(vm: &vm::Vm, name: &str, arg_tys: &[Type]) -> Result<()> {
     let full = format!("vm_bug_repro::{name}");
     print!("{name:<34}");
-    match vm.get_fn(&full, arg_tys) {
-        Ok(compiled) => {
-            println!("compiled ret={:?}", compiled.ret_ty());
-            if compiled.ret_ty() == &Type::I64 {
-                let run: extern "C" fn() -> i64 = unsafe { std::mem::transmute(compiled.ptr()) };
+    match vm.jit.write().unwrap().get_fn_ptr(&full, arg_tys) {
+        Ok((ptr, ret)) => {
+            println!("compiled ret={:?}", ret);
+            if ret == Type::I64 {
+                let run: extern "C" fn() -> i64 = unsafe { std::mem::transmute(ptr) };
                 println!("{name:<34}result={}", run());
             }
         }
@@ -118,9 +118,9 @@ fn run_i64(vm: &vm::Vm, name: &str, arg_tys: &[Type]) -> Result<()> {
 fn compile_only(vm: &vm::Vm, name: &str, arg_tys: &[Type]) {
     let full = format!("vm_bug_repro::{name}");
     print!("{name:<34}");
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| vm.get_fn(&full, arg_tys)));
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| vm.jit.write().unwrap().get_fn_ptr(&full, arg_tys)));
     match result {
-        Ok(Ok(compiled)) => println!("compiled ret={:?}", compiled.ret_ty()),
+        Ok(Ok((_ptr, ret))) => println!("compiled ret={:?}", ret),
         Ok(Err(err)) => println!("FAILED: {err:#}"),
         Err(panic) => {
             if let Some(message) = panic.downcast_ref::<String>() {

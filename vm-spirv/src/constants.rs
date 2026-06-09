@@ -15,6 +15,17 @@ impl SpirvCompiler {
         self.const_dynamic(value).and_then(|v| self.convert(v, ty))
     }
 
+    pub(crate) fn const_one(&mut self, ty: Type) -> Result<Value> {
+        let value = if ty.is_float() {
+            if ty.is_f64() { Dynamic::F64(1.0) } else { Dynamic::F32(1.0) }
+        } else if ty.is_uint() {
+            Dynamic::U32(1)
+        } else {
+            Dynamic::I32(1)
+        };
+        self.const_dynamic(value).and_then(|v| self.convert(v, ty))
+    }
+
     pub(crate) fn const_u32(&mut self, value: u32) -> u32 {
         self.const_dynamic(Dynamic::U32(value)).expect("u32 constants are supported").id
     }

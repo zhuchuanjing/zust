@@ -778,12 +778,20 @@ impl Compiler {
         if let Some(idx) = left.var()
             && (idx as usize) < arg_count
         {
-            let op = match op {
+            let base_op = match op {
                 BinaryOp::AddAssign => Some(BinaryOp::Add),
                 BinaryOp::SubAssign => Some(BinaryOp::Sub),
+                BinaryOp::MulAssign => Some(BinaryOp::Mul),
+                BinaryOp::DivAssign => Some(BinaryOp::Div),
+                BinaryOp::ModAssign => Some(BinaryOp::Mod),
+                BinaryOp::ShlAssign => Some(BinaryOp::Shl),
+                BinaryOp::ShrAssign => Some(BinaryOp::Shr),
+                BinaryOp::BitAndAssign => Some(BinaryOp::BitAnd),
+                BinaryOp::BitOrAssign => Some(BinaryOp::BitOr),
+                BinaryOp::BitXorAssign => Some(BinaryOp::BitXor),
                 _ => None,
             };
-            if let Some(op) = op {
+            if let Some(op) = base_op {
                 let right = Expr::new(ExprKind::Binary { left: Box::new(left.clone()), op, right: Box::new(right) }, span);
                 return Expr::new(ExprKind::Binary { left: Box::new(left), op: BinaryOp::Assign, right: Box::new(right) }, span);
             }
@@ -794,12 +802,20 @@ impl Compiler {
             && let ExprKind::Binary { left: rhs_left, op: rhs_op, right: rhs_right } = &right.kind
             && rhs_left.var() == Some(idx)
         {
-            let op = match rhs_op {
+            let compound_op = match rhs_op {
                 BinaryOp::Add => Some(BinaryOp::AddAssign),
                 BinaryOp::Sub => Some(BinaryOp::SubAssign),
+                BinaryOp::Mul => Some(BinaryOp::MulAssign),
+                BinaryOp::Div => Some(BinaryOp::DivAssign),
+                BinaryOp::Mod => Some(BinaryOp::ModAssign),
+                BinaryOp::Shl => Some(BinaryOp::ShlAssign),
+                BinaryOp::Shr => Some(BinaryOp::ShrAssign),
+                BinaryOp::BitAnd => Some(BinaryOp::BitAndAssign),
+                BinaryOp::BitOr => Some(BinaryOp::BitOrAssign),
+                BinaryOp::BitXor => Some(BinaryOp::BitXorAssign),
                 _ => None,
             };
-            if let Some(op) = op {
+            if let Some(op) = compound_op {
                 return Expr::new(ExprKind::Binary { left: Box::new(left), op, right: Box::new((**rhs_right).clone()) }, span);
             }
         }

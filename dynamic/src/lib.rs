@@ -360,8 +360,10 @@ impl Ord for Dynamic {
             self.as_int().unwrap_or(0).cmp(&other.as_int().unwrap_or(0))
         } else if self.is_uint() || other.is_uint() {
             self.as_uint().unwrap_or(0).cmp(&other.as_uint().unwrap_or(0))
-        } else if (self.is_true() && other.is_false()) || (self.is_false() && other.is_true()) {
-            Ordering::Less
+        } else if self.is_false() && other.is_true() {
+            Ordering::Less    // false < true
+        } else if self.is_true() && other.is_false() {
+            Ordering::Greater // true > false
         } else if self.is_null() && other.is_null() {
             Ordering::Equal
         } else if self.is_str() && other.is_str() {
@@ -1371,6 +1373,25 @@ impl Dynamic {
     }
 
     pub fn next(&mut self) -> Option<Self> {
+        if let Self::Iter { idx, keys, value } = self {
+            if !keys.is_empty() {
+                if *idx < keys.len() {
+                    let k = keys[*idx].clone();
+                    let v = value.get_dynamic(k.as_str()).unwrap();
+                    *idx += 1;
+                    return Some(v);
+                }
+            } else {
+                if let Some(v) = value.get_idx(*idx) {
+                    *idx += 1;
+                    return Some(v);
+                }
+            }
+        }
+        None
+    }
+
+    pub fn next_pair(&mut self) -> Option<Self> {
         if let Self::Iter { idx, keys, value } = self {
             if !keys.is_empty() {
                 if *idx < keys.len() {

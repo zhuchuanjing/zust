@@ -24,7 +24,7 @@ fn main() -> Result<()> {
     }
 
     let vm = vm::Vm::with_all()?;
-    vm.import_code(
+    vm.jit.write().unwrap().import_code(
         "memory_probe",
         br#"
         pub fn setup() {
@@ -75,16 +75,16 @@ fn main() -> Result<()> {
         .to_vec(),
     )?;
 
-    let setup = vm.get_fn("memory_probe::setup", &[])?;
-    let setup: extern "C" fn() -> bool = unsafe { std::mem::transmute(setup.ptr()) };
+    let (ptr, _) = vm.jit.write().unwrap().get_fn_ptr("memory_probe::setup", &[])?;
+    let setup: extern "C" fn() -> bool = unsafe { std::mem::transmute(ptr) };
     anyhow::ensure!(setup(), "setup failed");
 
-    let scalar = vm.get_fn("memory_probe::scalar_loop", &[Type::I64])?;
-    let scalar: extern "C" fn(i64) -> i64 = unsafe { std::mem::transmute(scalar.ptr()) };
-    let root_get = vm.get_fn("memory_probe::root_get_loop", &[Type::I64])?;
-    let root_get: extern "C" fn(i64) -> i64 = unsafe { std::mem::transmute(root_get.ptr()) };
-    let index = vm.get_fn("memory_probe::index_loop", &[Type::I64])?;
-    let index: extern "C" fn(i64) -> i64 = unsafe { std::mem::transmute(index.ptr()) };
+    let (ptr, _) = vm.jit.write().unwrap().get_fn_ptr("memory_probe::scalar_loop", &[Type::I64])?;
+    let scalar: extern "C" fn(i64) -> i64 = unsafe { std::mem::transmute(ptr) };
+    let (ptr, _) = vm.jit.write().unwrap().get_fn_ptr("memory_probe::root_get_loop", &[Type::I64])?;
+    let root_get: extern "C" fn(i64) -> i64 = unsafe { std::mem::transmute(ptr) };
+    let (ptr, _) = vm.jit.write().unwrap().get_fn_ptr("memory_probe::index_loop", &[Type::I64])?;
+    let index: extern "C" fn(i64) -> i64 = unsafe { std::mem::transmute(ptr) };
 
     let iterations = std::env::args().nth(1).and_then(|arg| arg.parse::<i64>().ok()).unwrap_or(100_000);
     let rounds = std::env::args().nth(2).and_then(|arg| arg.parse::<usize>().ok()).unwrap_or(5);
@@ -124,7 +124,7 @@ fn drop_vm_probe() -> Result<()> {
     let base = print_rss("start", 0)?;
     {
         let vm = vm::Vm::with_all()?;
-        vm.import_code(
+        vm.jit.write().unwrap().import_code(
             "drop_probe",
             br#"
             pub fn setup() {
@@ -150,12 +150,12 @@ fn drop_vm_probe() -> Result<()> {
             .to_vec(),
         )?;
 
-        let setup = vm.get_fn("drop_probe::setup", &[])?;
-        let setup: extern "C" fn() -> bool = unsafe { std::mem::transmute(setup.ptr()) };
+        let (ptr, _) = vm.jit.write().unwrap().get_fn_ptr("drop_probe::setup", &[])?;
+        let setup: extern "C" fn() -> bool = unsafe { std::mem::transmute(ptr) };
         anyhow::ensure!(setup(), "setup failed");
 
-        let root_get = vm.get_fn("drop_probe::root_get_loop", &[Type::I64])?;
-        let root_get: extern "C" fn(i64) -> i64 = unsafe { std::mem::transmute(root_get.ptr()) };
+        let (ptr, _) = vm.jit.write().unwrap().get_fn_ptr("drop_probe::root_get_loop", &[Type::I64])?;
+        let root_get: extern "C" fn(i64) -> i64 = unsafe { std::mem::transmute(ptr) };
         print_rss("after compile", base)?;
         for round in 1..=rounds {
             let before = rss_kb()?;
@@ -183,7 +183,7 @@ fn drop_vm_thread_probe() -> Result<()> {
         let before = rss_kb()?;
         let handle = std::thread::spawn(move || -> Result<()> {
             let vm = vm::Vm::with_all()?;
-            vm.import_code(
+            vm.jit.write().unwrap().import_code(
                 "thread_drop_probe",
                 br#"
                 pub fn setup() {
@@ -208,11 +208,11 @@ fn drop_vm_thread_probe() -> Result<()> {
                 "#
                 .to_vec(),
             )?;
-            let setup = vm.get_fn("thread_drop_probe::setup", &[])?;
-            let setup: extern "C" fn() -> bool = unsafe { std::mem::transmute(setup.ptr()) };
+            let (ptr, _) = vm.jit.write().unwrap().get_fn_ptr("thread_drop_probe::setup", &[])?;
+            let setup: extern "C" fn() -> bool = unsafe { std::mem::transmute(ptr) };
             anyhow::ensure!(setup(), "setup failed");
-            let root_get = vm.get_fn("thread_drop_probe::root_get_loop", &[Type::I64])?;
-            let root_get: extern "C" fn(i64) -> i64 = unsafe { std::mem::transmute(root_get.ptr()) };
+            let (ptr, _) = vm.jit.write().unwrap().get_fn_ptr("thread_drop_probe::root_get_loop", &[Type::I64])?;
+            let root_get: extern "C" fn(i64) -> i64 = unsafe { std::mem::transmute(ptr) };
             for _ in 0..rounds {
                 let _ = root_get(iterations);
             }

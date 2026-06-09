@@ -12,14 +12,14 @@ use cranelift_module::{FuncId, Module};
 
 use anyhow::{Result, anyhow};
 use smol_str::SmolStr;
-use std::sync::{Arc, Mutex, RwLock, Weak};
+use std::sync::{Arc, RwLock, Weak};
 
 pub struct JITRunTime {
     pub compiler: Compiler,
     pub fns: BTreeMap<u32, FnVariant>,
     pub sigs: Vec<(Vec<Type>, Signature, Type)>,
     pub native_symbols: Arc<RwLock<HashMap<String, usize>>>,
-    pub(crate) owner: Weak<Mutex<JITRunTime>>,
+    pub(crate) owner: Weak<RwLock<JITRunTime>>,
     pub(crate) pending_fns: VecDeque<PendingFn>,
     pub(crate) compile_depth: usize,
     #[cfg(feature = "ir-disassembly")]
@@ -217,12 +217,12 @@ impl JITRunTime {
         }
     }
 
-    pub(crate) fn set_owner(&mut self, owner: Weak<Mutex<JITRunTime>>) {
+    pub(crate) fn set_owner(&mut self, owner: Weak<RwLock<JITRunTime>>) {
         self.owner = owner;
     }
 
     pub(crate) fn owner_context_ptr(&self) -> usize {
-        &self.owner as *const Weak<Mutex<JITRunTime>> as usize
+        &self.owner as *const Weak<RwLock<JITRunTime>> as usize
     }
 
     fn unary(ctx: &mut BuildContext, left: (Value, Type), op: UnaryOp) -> Result<(Value, Type)> {
@@ -1477,11 +1477,11 @@ impl JITRunTime {
                     if vt.1.is_any() && pats.len() == 2 {
                         //暂时只处理 kv
                         let iter = self.call(ctx, self.get_method(&vt.1, "iter")?, vec![vt.0])?;
-                        let next = self.get_method(&vt.1, "next")?;
-                        let next_id = next.get_id()?;
+                        let next_pair = self.get_method(&vt.1, "next_pair")?;
+                        let next_id = next_pair.get_id()?;
                         let get_idx = self.get_method(&vt.1, "get_idx")?.get_id()?;
 
-                        let start = self.call(ctx, next, vec![iter.0])?;
+                        let start = self.call(ctx, next_pair, vec![iter.0])?;
                         let key_idx = ctx.builder.ins().iconst(types::I64, 0);
                         let key = self.call(ctx, self.get_method(&start.1, "get_idx")?, vec![start.0, key_idx])?;
                         let value_idx = ctx.builder.ins().iconst(types::I64, 1);

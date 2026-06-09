@@ -191,7 +191,7 @@ impl Shl for Dynamic {
             U16(i) => U16(i << shift),
             U32(i) => U32(i << shift),
             U64(i) => U64(i << shift),
-            _ => panic!("Cannot shift non-integer types"),
+            _ => Dynamic::I64(0),
         }
     }
 }
@@ -210,7 +210,7 @@ impl Shr for Dynamic {
             U16(i) => U16(i >> shift),
             U32(i) => U32(i >> shift),
             U64(i) => U64(i >> shift),
-            _ => panic!("Cannot shift non-integer types"),
+            _ => Dynamic::I64(0),
         }
     }
 }

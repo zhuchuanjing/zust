@@ -66,7 +66,7 @@ fn main() -> Result<()> {
     for b in &selected {
         let path = benches_dir.join("zs").join(format!("{}.zs", b.name));
         let t0 = Instant::now();
-        vm.import(b.name, path.to_str().context("invalid path")?).with_context(|| format!("import {}.zs", b.name))?;
+        vm.jit.write().unwrap().compiler.import_file(b.name, path.to_str().context("invalid path")?).with_context(|| format!("import {}.zs", b.name))?;
         println!("  compiled {}.zs ({:.0}ms)", b.name, t0.elapsed().as_secs_f64() * 1000.0);
     }
 
@@ -94,11 +94,11 @@ fn main() -> Result<()> {
 fn run_zust(vm: &vm::Vm, b: &Bench) -> LangResult {
     if b.is_generic {
         let fn_name = format!("{}::bench", b.name);
-        let compiled = match vm.get_fn_with_params(&fn_name, &[], &[Type::ConstInt(b.size)]) {
-            Ok(c) => c,
+        let (ptr, _ret) = match vm.jit.write().unwrap().get_fn_ptr_with_params(&fn_name, &[], &[Type::ConstInt(b.size)]) {
+            Ok(r) => r,
             Err(e) => return LangResult { exec_ms: 0.0, result: None, error: Some(format!("compile: {e}")) },
         };
-        let bench_fn: extern "C" fn() -> i64 = unsafe { std::mem::transmute(compiled.ptr()) };
+        let bench_fn: extern "C" fn() -> i64 = unsafe { std::mem::transmute(ptr) };
 
         bench_fn();
 
@@ -109,11 +109,11 @@ fn run_zust(vm: &vm::Vm, b: &Bench) -> LangResult {
         LangResult { exec_ms, result: Some(result), error: None }
     } else {
         let fn_name = format!("{}::bench", b.name);
-        let compiled = match vm.get_fn(&fn_name, &[Type::I64]) {
-            Ok(c) => c,
+        let (ptr, _ret) = match vm.jit.write().unwrap().get_fn_ptr(&fn_name, &[Type::I64]) {
+            Ok(r) => r,
             Err(e) => return LangResult { exec_ms: 0.0, result: None, error: Some(format!("compile: {e}")) },
         };
-        let bench_fn: extern "C" fn(i64) -> i64 = unsafe { std::mem::transmute(compiled.ptr()) };
+        let bench_fn: extern "C" fn(i64) -> i64 = unsafe { std::mem::transmute(ptr) };
 
         bench_fn(1);
 

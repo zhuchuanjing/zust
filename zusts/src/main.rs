@@ -12,6 +12,10 @@ const SYNTAX_BOOL_TESTS: &[&str] = &[
     "syntax_suite::test_patterns_lists_dicts_and_fields",
     "syntax_suite::test_structs_impls_generics_and_assoc",
     "syntax_suite::test_closures_arrays_ranges_and_calls",
+    "syntax_suite::test_sqrt_builtin",
+    "syntax_suite::test_string_numeric_casts",
+    "syntax_suite::test_nested_closure_captures",
+    "syntax_suite::test_dict_shorthand",
 ];
 
 const SYNTAX_EDGE_BOOL_TESTS: &[&str] = &[
@@ -29,6 +33,11 @@ const SYNTAX_EDGE_BOOL_TESTS: &[&str] = &[
     "syntax_edge::test_compound_assign_all_ops",
     "syntax_edge::test_array_index_assign",
     "syntax_edge::test_string_concat_all_types",
+    "syntax_edge::test_chain_reassign",
+    "syntax_edge::test_nested_struct_field_access",
+    "syntax_edge::test_mixed_type_list",
+    "syntax_edge::test_map_iteration",
+    "syntax_edge::test_void_null_in_bool_context",
 ];
 
 fn main() -> Result<()> {
@@ -75,13 +84,19 @@ fn zusts_path(path: &str) -> PathBuf {
 }
 
 fn vm_import_file(vm: &vm::Vm, name: &str, path: &str) -> Result<()> {
-    vm.import(name, zusts_path(path).to_str().expect("zust test path is valid utf-8")).with_context(|| format!("import {path} as {name}"))
+    vm.jit
+        .write()
+        .unwrap()
+        .compiler
+        .import_file(name, zusts_path(path).to_str().expect("zust test path is valid utf-8"))
+        .map(|_| ())
+        .with_context(|| format!("import {path} as {name}"))
 }
 
 fn run_test(vm: &vm::Vm, fn_name: &str, tys: &[Type]) -> Result<()> {
-    match vm.get_fn(fn_name, tys) {
-        Ok(compiled) => {
-            let test_fn: extern "C" fn() -> *mut Dynamic = unsafe { std::mem::transmute(compiled.ptr()) };
+    match vm.jit.write().unwrap().get_fn_ptr(fn_name, tys) {
+        Ok((ptr, _ret)) => {
+            let test_fn: extern "C" fn() -> *mut Dynamic = unsafe { std::mem::transmute(ptr) };
             let result = unsafe { Box::from_raw(test_fn()) };
             println!("[{}] 结果: {:?}", fn_name, result);
             Ok(())
@@ -94,9 +109,9 @@ fn run_test(vm: &vm::Vm, fn_name: &str, tys: &[Type]) -> Result<()> {
 }
 
 fn run_bool_test(vm: &vm::Vm, fn_name: &str) -> Result<()> {
-    let compiled = vm.get_fn(fn_name, &[])?;
-    anyhow::ensure!(compiled.ret_ty() == &Type::Bool, "{fn_name} should return bool, got {:?}", compiled.ret_ty());
-    let test_fn: extern "C" fn() -> bool = unsafe { std::mem::transmute(compiled.ptr()) };
+    let (ptr, ret) = vm.jit.write().unwrap().get_fn_ptr(fn_name, &[])?;
+    anyhow::ensure!(ret == Type::Bool, "{fn_name} should return bool, got {:?}", ret);
+    let test_fn: extern "C" fn() -> bool = unsafe { std::mem::transmute(ptr) };
     let result = test_fn();
     anyhow::ensure!(result, "{fn_name} returned false");
     println!("[{}] 结果: true", fn_name);

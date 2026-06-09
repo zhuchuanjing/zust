@@ -10,7 +10,7 @@ use rand::RngExt;
 use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
-use std::sync::{Mutex, Weak};
+use std::sync::{RwLock, Weak};
 
 #[derive(Clone, Debug)]
 pub struct ZustCallback {
@@ -297,14 +297,18 @@ fn write_dynamic_to_ptr(dst: *mut u8, value: &Dynamic, ty: &Type) {
     }
 }
 
-pub(crate) extern "C" fn import_with_vm(context: *const Weak<Mutex<JITRunTime>>, addr: *const Dynamic, path: *const Dynamic) -> bool {
+pub(crate) extern "C" fn import_with_vm(context: *const Weak<RwLock<JITRunTime>>, addr: *const Dynamic, path: *const Dynamic) -> bool {
     if addr.is_null() || path.is_null() {
         return false;
     }
-    super::with_vm_context(context, |vm| vm.import(unsafe { &*addr }.as_str(), unsafe { &*path }.as_str())).map_err(|e| println!("import {:?}", e)).is_ok()
+    super::with_vm_context(context, |jit| {
+        let name = unsafe { &*addr }.as_str();
+        let path = unsafe { &*path }.as_str();
+        jit.import(name, path)
+    }).map_err(|e| log::error!("import failed: {e:#}")).is_ok()
 }
 
-pub(crate) extern "C" fn spawn_with_vm(context: *const Weak<Mutex<JITRunTime>>, fn_name: *const Dynamic, args: *const Dynamic) -> bool {
+pub(crate) extern "C" fn spawn_with_vm(context: *const Weak<RwLock<JITRunTime>>, fn_name: *const Dynamic, args: *const Dynamic) -> bool {
     if context.is_null() || fn_name.is_null() {
         return false;
     }
@@ -332,13 +336,13 @@ fn spawn_args(args: Dynamic) -> Vec<Dynamic> {
     }
 }
 
-fn spawn_run(context: Weak<Mutex<JITRunTime>>, fn_name: &str, args: Dynamic) -> Result<()> {
+fn spawn_run(context: Weak<RwLock<JITRunTime>>, fn_name: &str, args: Dynamic) -> Result<()> {
     let args = spawn_args(args);
     if args.len() > 16 {
         anyhow::bail!("spawn supports at most 16 args, got {}", args.len());
     }
     let arg_tys = vec![Type::Any; args.len()];
-    let (ptr, ret_ty) = super::with_vm_context(&context as *const Weak<Mutex<JITRunTime>>, |vm| vm.get_fn_ptr(fn_name, &arg_tys))?;
+    let (ptr, ret_ty) = super::with_vm_context(&context as *const Weak<RwLock<JITRunTime>>, |vm| vm.jit.write().unwrap().get_fn_ptr(fn_name, &arg_tys))?;
     let args: Vec<Box<Dynamic>> = args.into_iter().map(Box::new).collect();
     let ptrs: Vec<*const Dynamic> = args.iter().map(|arg| arg.as_ref() as *const Dynamic).collect();
     unsafe {
@@ -682,6 +686,10 @@ extern "C" fn any_next(addr: *mut Dynamic) -> *const Dynamic {
     alloc_dynamic(unsafe { (*addr).next().unwrap_or(Dynamic::Null) })
 }
 
+extern "C" fn any_next_pair(addr: *mut Dynamic) -> *const Dynamic {
+    alloc_dynamic(unsafe { (*addr).next_pair().unwrap_or(Dynamic::Null) })
+}
+
 extern "C" fn any_push(addr: *mut Dynamic, value: *mut Dynamic) {
     if !addr.is_null() && !value.is_null() {
         unsafe {
@@ -984,6 +992,10 @@ extern "C" fn any_from_i64(v: i64) -> *const Dynamic {
     alloc_dynamic(Dynamic::I64(v))
 }
 
+extern "C" fn any_from_u64(v: u64) -> *const Dynamic {
+    alloc_dynamic(Dynamic::U64(v))
+}
+
 extern "C" fn any_from_bool(v: bool) -> *const Dynamic {
     alloc_dynamic(Dynamic::Bool(v))
 }
@@ -1098,7 +1110,7 @@ pub const STD: [(&str, &[Type], Type, *const u8); 5] = [
     ("rand", &[Type::Any, Type::Any], Type::Any, random as *const u8),
 ];
 
-pub const ANY: [(&str, &[Type], Type, *const u8); 66] = [
+pub const ANY: [(&str, &[Type], Type, *const u8); 68] = [
     ("Any::null", &[], Type::Any, any_null as *const u8),
     ("Any::is_map", &[Type::Any], Type::Bool, any_is_map as *const u8),
     ("Any::is_list", &[Type::Any], Type::Bool, any_is_list as *const u8),
@@ -1155,6 +1167,7 @@ pub const ANY: [(&str, &[Type], Type, *const u8); 66] = [
     ("Any::set_idx", &[Type::Any, Type::I64, Type::Any], Type::Void, set_idx as *const u8),
     ("Any::set_key", &[Type::Any, Type::Any, Type::Any], Type::Void, set_key as *const u8),
     ("Any::from_i64", &[Type::I64], Type::Any, any_from_i64 as *const u8),
+    ("Any::from_u64", &[Type::U64], Type::Any, any_from_u64 as *const u8),
     ("Any::from_bool", &[Type::Bool], Type::Any, any_from_bool as *const u8),
     ("Any::to_i64", &[Type::Any], Type::I64, any_to_i64 as *const u8),
     ("Any::to_bool", &[Type::Any], Type::Bool, any_to_bool as *const u8),
@@ -1165,6 +1178,7 @@ pub const ANY: [(&str, &[Type], Type, *const u8); 66] = [
     ("Any::logic", &[Type::Any, Type::I32, Type::Any], Type::Bool, any_logic as *const u8),
     ("Any::iter", &[Type::Any], Type::Any, any_iter as *const u8),
     ("Any::next", &[Type::Any], Type::Any, any_next as *const u8),
+    ("Any::next_pair", &[Type::Any], Type::Any, any_next_pair as *const u8),
 ];
 
 use std::rc::Rc;

@@ -251,3 +251,39 @@ pub fn test_closures_arrays_ranges_and_calls() {
         && open_sum == 3i32
         && closed_sum == 6i32
 }
+
+pub fn test_sqrt_builtin() {
+    let a: f64 = sqrt(9.0f64);
+    a == 3.0f64
+}
+
+pub fn test_string_numeric_casts() {
+    let i = "123" as i32;
+    let l = "42" as i64;
+    let f = "3.5" as f64;
+
+    i == 123i32
+        && l == 42i64
+        && f == 3.5f64
+}
+
+pub fn test_nested_closure_captures() {
+    let outer = 10i32;
+    let middle = |x: i32| {
+        let inner = |y: i32| {
+            outer + x + y
+        };
+        let r: i32 = inner(3i32);
+        r
+    };
+    let result: i32 = middle(5i32);
+    result == 18i32
+}
+
+pub fn test_dict_shorthand() {
+    let name = "zust";
+    let version = 1i32;
+    let obj = {name, version};
+    obj.name == "zust"
+        && obj.version == 1i32
+}

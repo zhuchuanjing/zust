@@ -175,7 +175,7 @@ impl Parser {
 
     fn declare_pattern_symbols(&mut self, pat: &Pattern) -> Result<()> {
         match &pat.kind {
-            PatternKind::Ident { name, .. } => self.declare_symbol(name),
+            PatternKind::Ident { name, .. } => self.declare_symbol_in_current_scope(name),
             PatternKind::Tuple(items) => {
                 for item in items {
                     self.declare_pattern_symbols(item)?;
@@ -460,65 +460,67 @@ impl Parser {
     }
 
     pub fn string(&mut self) -> Result<SmolStr> {
-        if self.buf[self.pos] == b'"' {
-            self.pos += 1;
-            let mut text_buf = Vec::new();
-            while self.pos < self.buf.len() {
-                if self.buf[self.pos] == b'\\' {
-                    //转义字符
-                    self.pos += 1;
-                    match self.buf[self.pos] {
-                        ch @ (b'n' | b'r' | b't' | b'\\' | b'"') => {
-                            text_buf.push(ch);
-                            self.pos += 1;
-                        }
-                        b'u' => {
-                            self.pos += 1;
-                            let unicode = if self.take(b'{').is_ok() {
-                                let code = self.hex()?;
-                                self.pos += 1;
-                                code
-                            } else {
-                                self.hex()?
-                            };
-                            let ch = char::from_u32(unicode as u32).ok_or(anyhow!("非法 unicode {}", unicode))?;
-                            let mut utf8_buf = [0u8; 4];
-                            let s = ch.encode_utf8(&mut utf8_buf);
-                            text_buf.extend_from_slice(s.as_bytes());
-                        }
-                        b'x' => {
-                            self.pos += 1;
-                            if self.pos + 2 < self.buf.len() {
-                                let start = self.pos;
-                                self.pos += 2;
-                                let hex = &self.buf[start..self.pos];
-                                let code = u32::from_str_radix(String::from_utf8_lossy(hex).as_ref(), 16)?;
-                                text_buf.push(code as u8);
-                            }
-                        }
-                        other => {
-                            return Err(anyhow!("invalid escape character: {}", other as char));
-                        }
-                    }
-                } else {
-                    if self.buf[self.pos] == b'"' {
-                        self.pos += 1;
-                        return Ok(String::from_utf8(text_buf)?.into());
-                    }
-                    text_buf.push(self.buf[self.pos]);
-                    self.pos += 1;
-                }
-            }
-            Err(ParserErr::UnclosedString.into())
-        } else {
-            Err(ParserErr::NotString.into())
+        if self.get()? != b'"' {
+            return Err(ParserErr::NotString.into());
         }
+        self.pos += 1;
+        let mut text_buf = Vec::new();
+        while self.pos < self.buf.len() {
+            if self.buf[self.pos] == b'\\' {
+                //转义字符
+                self.pos += 1;
+                match self.buf[self.pos] {
+                    b'n' => { text_buf.push(b'\n'); self.pos += 1; }
+                    b'r' => { text_buf.push(b'\r'); self.pos += 1; }
+                    b't' => { text_buf.push(b'\t'); self.pos += 1; }
+                    ch @ (b'\\' | b'"') => {
+                        text_buf.push(ch);
+                        self.pos += 1;
+                    }
+                    b'u' => {
+                        self.pos += 1;
+                        let unicode = if self.take(b'{').is_ok() {
+                            let code = self.hex()?;
+                            self.pos += 1;
+                            code
+                        } else {
+                            self.hex()?
+                        };
+                        let ch = char::from_u32(unicode as u32).ok_or(anyhow!("非法 unicode {}", unicode))?;
+                        let mut utf8_buf = [0u8; 4];
+                        let s = ch.encode_utf8(&mut utf8_buf);
+                        text_buf.extend_from_slice(s.as_bytes());
+                    }
+                    b'x' => {
+                        self.pos += 1;
+                        if self.pos + 2 < self.buf.len() {
+                            let start = self.pos;
+                            self.pos += 2;
+                            let hex = &self.buf[start..self.pos];
+                            let code = u32::from_str_radix(String::from_utf8_lossy(hex).as_ref(), 16)?;
+                            text_buf.push(code as u8);
+                        }
+                    }
+                    other => {
+                        return Err(anyhow!("invalid escape character: {}", other as char));
+                    }
+                }
+            } else {
+                if self.buf[self.pos] == b'"' {
+                    self.pos += 1;
+                    return Ok(String::from_utf8(text_buf)?.into());
+                }
+                text_buf.push(self.buf[self.pos]);
+                self.pos += 1;
+            }
+        }
+        Err(ParserErr::UnclosedString.into())
     }
 
     pub fn text(&mut self) -> Result<SmolStr> {
         if self.get()? == b'r' && [b'#', b'"'].contains(&self.ahead()?) {
             self.pos += 1;
-            let mut end = String::new();
+            let mut end = String::from("\"");
             while self.buf[self.pos] == b'#' {
                 end.push('#');
                 self.pos += 1;
@@ -674,8 +676,8 @@ mod tests {
     }
 
     #[test]
-    fn rejects_local_name_that_redeclares_prior_function() {
-        let err = parse_all(
+    fn allows_local_name_to_shadow_prior_function() {
+        parse_all(
             r#"
             fn chunk_id(x, y) {
                 x + y
@@ -687,8 +689,7 @@ mod tests {
             }
             "#,
         )
-        .unwrap_err();
-        assert!(err.to_string().contains("符号 chunk_id 已经声明"));
+        .unwrap();
     }
 
     #[test]
@@ -777,5 +778,65 @@ mod tests {
         };
         assert!(matches!(obj.kind, ExprKind::Ident(name) if name.as_str() == "value"));
         assert!(matches!(params.as_slice(), [Type::ConstInt(4)]));
+    }
+
+    #[test]
+    fn parses_bigfloat_cmp_context_segment() {
+        let code = r#"
+            struct BigFloat<N> { data: [u32; N], exp: i32, sign: bool }
+
+            impl BigFloat<N> {
+                fn abs_cmp(self: BigFloat<N>, rhs: BigFloat<N>) {
+                    let self_high = self.exp + ((N - 1) as i32);
+                    let rhs_high = rhs.exp + ((N - 1) as i32);
+                    let high = if self_high >= rhs_high { self_high } else { rhs_high };
+                    let low = if self.exp <= rhs.exp { self.exp } else { rhs.exp };
+                    let result = 0i32;
+                    let power = high;
+
+                    while power >= low && result == 0i32 {
+                        let a_idx = power - self.exp;
+                        let b_idx = power - rhs.exp;
+                        let a_limb = 0u32;
+                        let b_limb = 0u32;
+
+                        if a_idx >= 0i32 && a_idx < (N as i32) {
+                            a_limb = self.data[a_idx as u32];
+                        }
+                        if b_idx >= 0i32 && b_idx < (N as i32) {
+                            b_limb = rhs.data[b_idx as u32];
+                        }
+
+                        if a_limb > b_limb {
+                            result = 1i32;
+                        } else if a_limb < b_limb {
+                            result = -1i32;
+                        }
+
+                        power -= 1i32;
+                    }
+
+                    result
+                }
+
+                pub fn cmp(self: BigFloat<N>, rhs: BigFloat<N>) {
+                    if self.is_zero() && rhs.is_zero() {
+                        0i32
+                    } else if self.sign != rhs.sign {
+                        if self.sign { -1i32 } else { 1i32 }
+                    } else {
+                        let cmp = self.abs_cmp(rhs);
+                        if self.sign { -cmp } else { cmp }
+                    }
+                }
+            }
+            "#;
+        parse_all(code).unwrap();
+    }
+
+    #[test]
+    fn parses_bigfloat_file() {
+        let code = include_str!("../../zusts/bigfloat.zs");
+        parse_all(code).unwrap();
     }
 }

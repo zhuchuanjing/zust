@@ -67,6 +67,8 @@ impl JITRunTime {
     pub(crate) fn bool_value(&mut self, ctx: &mut BuildContext, vt: (Value, Type)) -> Result<Value> {
         if vt.1.is_bool() {
             Ok(vt.0)
+        } else if vt.1.is_void() {
+            Ok(ctx.builder.ins().iconst(types::I8, 0))
         } else if vt.1.is_any() {
             self.call(ctx, self.get_method(&Type::Any, "to_bool")?, vec![vt.0]).map(|(v, _)| v)
         } else if vt.1.is_int() || vt.1.is_uint() {
@@ -100,7 +102,11 @@ impl JITRunTime {
                 } else if vt.1.is_bool() {
                     return self.call(ctx, self.get_method(&Type::Any, "from_bool")?, vec![vt.0]).map(|(v, _)| v);
                 } else if vt.1.is_uint() {
-                    let v = if vt.1.width() < 8 { ctx.builder.ins().uextend(types::I64, vt.0) } else { vt.0 };
+                    if vt.1.width() == 8 {
+                        // u64 → Any：必须用 from_u64 保留无符号语义，from_i64 会在 >i64::MAX 时产生负数
+                        return self.call(ctx, self.get_method(&Type::Any, "from_u64")?, vec![vt.0]).map(|(v, _)| v);
+                    }
+                    let v = ctx.builder.ins().uextend(types::I64, vt.0);
                     return self.call(ctx, self.get_method(&Type::Any, "from_i64")?, vec![v]).map(|(v, _)| v);
                 } else if vt.1.is_int() {
                     let v = if vt.1.width() < 8 { ctx.builder.ins().sextend(types::I64, vt.0) } else { vt.0 };
@@ -394,7 +400,15 @@ impl JITRunTime {
             }
             _ => {}
         }
-        panic!("未实现 {:?} {:?} {:?} {:?}", left, op, right, ty)
+        // 回退到动态分发，避免因未知类型组合导致进程崩溃
+        log::debug!("binary_with_expected fallback to dynamic: {:?} {:?} {:?}", ty, op, right);
+        let left_any = self.convert(ctx, (left, ty.clone()), Type::Any)?;
+        let right_any = self.convert(ctx, (right, ty.clone()), Type::Any)?;
+        if op.is_logic() {
+            self.any_logic(ctx, left_any, op, right_any)
+        } else {
+            self.any_binary(ctx, left_any, op, right_any)
+        }
     }
 
     pub(crate) fn binary_imm<'a>(&mut self, ctx: &'a mut BuildContext, left: (Value, Type), op: BinaryOp, right: Dynamic) -> Result<(Value, Type)> {
@@ -570,9 +584,32 @@ impl JITRunTime {
                 }
             }
             exp => {
-                panic!("不支持的操作 {:?}", exp)
+                // 回退到动态分发，避免因未知操作导致进程崩溃
+                log::debug!("binary_imm fallback to dynamic (unsupported op): {:?} {:?}", ty, exp);
+                let left_any = self.convert(ctx, (left, ty.clone()), Type::Any)?;
+                let right_vt = ctx.get_const(&right).or_else(|_| {
+                    let idx = self.compiler.get_const(right.clone());
+                    self.get_const_value(ctx, idx)
+                })?;
+                let right_any = self.convert(ctx, right_vt, Type::Any)?;
+                if exp.is_logic() {
+                    return self.any_logic(ctx, left_any, exp, right_any);
+                }
+                return self.any_binary(ctx, left_any, exp, right_any);
             }
         }
-        panic!("未实现 {:?} {:?} {:?}", ty, op, right.get_type())
+        // 回退到动态分发，避免因未知类型组合导致进程崩溃
+        log::debug!("binary_imm fallback to dynamic (unsupported type combo): {:?} {:?} {:?}", ty, op, right.get_type());
+        let left_any = self.convert(ctx, (left, ty.clone()), Type::Any)?;
+        let right_vt = ctx.get_const(&right).or_else(|_| {
+            let idx = self.compiler.get_const(right.clone());
+            self.get_const_value(ctx, idx)
+        })?;
+        let right_any = self.convert(ctx, right_vt, Type::Any)?;
+        if op.is_logic() {
+            self.any_logic(ctx, left_any, op, right_any)
+        } else {
+            self.any_binary(ctx, left_any, op, right_any)
+        }
     }
 }

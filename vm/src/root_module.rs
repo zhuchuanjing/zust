@@ -4,7 +4,7 @@ use dynamic::{Dynamic, Type};
 use crate::JITRunTime;
 use crate::memory::alloc_dynamic;
 use root::{Object, get_mount};
-use std::sync::{Mutex, Weak};
+use std::sync::{RwLock, Weak};
 extern "C" fn root_add(name: *const Dynamic, value: *const Dynamic) -> bool {
     unsafe {
         let obj = Object::Value((*value).clone());
@@ -80,7 +80,9 @@ extern "C" fn root_remove_idx(name: *const Dynamic, idx: i64) -> *const Dynamic 
 
 extern "C" fn root_insert(name: *const Dynamic, key: *const Dynamic, value: *const Dynamic) {
     unsafe {
-        let _ = root::insert(&(*name).as_str(), &(*key).as_str(), (*value).clone());
+        if let Err(err) = root::insert(&(*name).as_str(), &(*key).as_str(), (*value).clone()) {
+            log::error!("root::insert failed: {err}");
+        }
     }
 }
 
@@ -88,10 +90,10 @@ extern "C" fn root_get_key(name: *const Dynamic, key: *const Dynamic) -> *const 
     unsafe { alloc_dynamic(if let Ok((m, name)) = get_mount(&(*name).as_str()) { m.get_key(name, &(*key).as_str(), |v| v.value()).unwrap_or(Dynamic::Null) } else { Dynamic::Null }) }
 }
 
-pub(crate) extern "C" fn root_add_fn_with_vm(context: *const Weak<Mutex<JITRunTime>>, name: *const Dynamic, fn_name: *const Dynamic) -> bool {
+pub(crate) extern "C" fn root_add_fn_with_vm(context: *const Weak<RwLock<JITRunTime>>, name: *const Dynamic, fn_name: *const Dynamic) -> bool {
     let name = unsafe { (*name).clone() };
     let fn_name = unsafe { (*fn_name).clone() };
-    match crate::with_vm_context(context, |vm| vm.get_fn_ptr(fn_name.as_str(), &[Type::Any])) {
+    match crate::with_vm_context(context, |vm| vm.jit.write().unwrap().get_fn_ptr(fn_name.as_str(), &[Type::Any])) {
         Ok((fn_ptr, ty)) => {
             if let Ok((m, name)) = get_mount(name.as_str()) {
                 return m.add(name, Object::Func(fn_ptr as i64, ty.clone()));

@@ -40,7 +40,7 @@ impl Parser {
     pub fn pattern(&mut self) -> Result<Pattern> {
         self.whitespace()?;
         let start = self.current_pos();
-        if self.just("_").is_ok() {
+        if self.keyword("_").is_ok() {
             Ok(Pattern::new(PatternKind::Wildcard, self.span_from(start)))
         } else if self.just("(").is_ok() {
             Ok(Pattern::new(PatternKind::Tuple(crate::parse_list!(self, Vec::new(), b')', b',', self.pattern()?)), self.span_from(start)))

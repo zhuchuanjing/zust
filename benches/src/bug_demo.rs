@@ -8,13 +8,13 @@ fn main() -> Result<()> {
 
     println!("=== Bug 1: 递归函数类型推断错误 ===\n");
 
-    vm.import("rec_demo", dir.join("zs/rec_bug_demo.zs").to_str().unwrap())?;
+    vm.jit.write().unwrap().compiler.import_file("rec_demo", dir.join("zs/rec_bug_demo.zs").to_str().unwrap())?;
 
-    let compiled = vm.get_fn("rec_demo::bench", &[Type::I64])?;
-    println!("编译器推断的返回类型: {:?}", compiled.ret_ty());
+    let (ptr, ret) = vm.jit.write().unwrap().get_fn_ptr("rec_demo::bench", &[Type::I64])?;
+    println!("编译器推断的返回类型: {:?}", ret);
     println!("期望返回类型: I64\n");
 
-    let f: extern "C" fn(i64) -> i64 = unsafe { std::mem::transmute(compiled.ptr()) };
+    let f: extern "C" fn(i64) -> i64 = unsafe { std::mem::transmute(ptr) };
 
     println!("factorial(5) 正确值 = 120");
     let result = f(5);
@@ -26,10 +26,10 @@ fn main() -> Result<()> {
 
     println!("=== Bug 2: 动态列表 JIT 性能/正确性 ===\n");
 
-    vm.import("dynlist_demo", dir.join("zs/dynlist_bug_demo.zs").to_str().unwrap())?;
+    vm.jit.write().unwrap().compiler.import_file("dynlist_demo", dir.join("zs/dynlist_bug_demo.zs").to_str().unwrap())?;
 
-    let compiled = vm.get_fn("dynlist_demo::bench", &[Type::I64])?;
-    let f: extern "C" fn(i64) -> i64 = unsafe { std::mem::transmute(compiled.ptr()) };
+    let (ptr, _ret) = vm.jit.write().unwrap().get_fn_ptr("dynlist_demo::bench", &[Type::I64])?;
+    let f: extern "C" fn(i64) -> i64 = unsafe { std::mem::transmute(ptr) };
 
     let n = 100000i64;
 

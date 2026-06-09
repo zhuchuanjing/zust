@@ -130,3 +130,60 @@ pub fn test_string_concat_all_types() {
     let float_str = "" + float_val;
     int_str.len() > 0 && float_str.len() > 0
 }
+
+pub fn test_chain_reassign() {
+    let x = 1i32;
+    x = 2i32;
+    x = 3i32;
+    x = x + 1i32;
+    x == 4i32
+}
+
+pub fn test_nested_struct_field_access() {
+    let data = {
+        a: {
+            b: {
+                c: {
+                    value: 42i32,
+                },
+            },
+        },
+    };
+    data.a.b.c.value == 42i32
+}
+
+pub fn test_mixed_type_list() {
+    let items = [1i32, "hello", 3.14f64, true];
+    let ok1 = items.len() == 4;
+    items.push(42i64);
+    let ok2 = items.len() == 5;
+    items.pop();
+    let ok3 = items.len() == 4;
+    ok1 && ok2 && ok3
+}
+
+pub fn test_map_iteration() {
+    let data = {x: 1i64, y: 2i64, z: 3i64};
+    let keys = data.keys();
+    let total = 0i64;
+    for value in data {
+        total += value;
+    }
+    keys.len() == 3 && total == 6i64
+}
+
+pub fn test_void_null_in_bool_context() {
+    let items = [1i32, 2i32];
+
+    // void expression (push) treated as false in &&
+    let ok1 = !(items.push(3i32) && false);
+
+    // null treated as false
+    let ok2 = !(null && true);
+    let ok3 = null || true;
+
+    // void/null in ||
+    let ok4 = null || items.len() == 3;
+
+    ok1 && ok2 && ok3 && ok4
+}

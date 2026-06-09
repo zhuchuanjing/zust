@@ -6,7 +6,7 @@ fn main() -> Result<()> {
     let vm = vm::Vm::with_all()?;
     let dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
 
-    println!("=== Bug 1: 递归函数类型推断错误 ===\n");
+    println!("=== Bug 1: 递归函数类型推断错误 (已修复) ===\n");
 
     vm.jit.write().unwrap().compiler.import_file("rec_demo", dir.join("zs/rec_bug_demo.zs").to_str().unwrap())?;
 
@@ -18,13 +18,12 @@ fn main() -> Result<()> {
 
     println!("factorial(5) 正确值 = 120");
     let result = f(5);
-    println!("Zust JIT 返回值  = {}  ← 错误! (垃圾指针值)\n", result);
+    let status1 = if result == 120 { "✓ 已修复" } else { "✗ 仍然错误" };
+    println!("Zust JIT 返回值  = {result}  {status1}\n");
 
-    println!("原因: 编译器中递归调用 factorial(n-1) 时，类型推断占位符未解析，");
-    println!("函数返回类型被推断为 Any/Dynamic 而非 i64。");
-    println!("JIT 返回的是堆上 Dynamic 对象的指针，被错误解释为 i64。\n");
+    println!("修复: 预扫描 base case 返回类型作为种子，避免递归调用时种子为空返回 Any。\n");
 
-    println!("=== Bug 2: 动态列表 JIT 性能/正确性 ===\n");
+    println!("=== Bug 2: 动态列表 JIT 正确性 (已修复) ===\n");
 
     vm.jit.write().unwrap().compiler.import_file("dynlist_demo", dir.join("zs/dynlist_bug_demo.zs").to_str().unwrap())?;
 
@@ -40,11 +39,9 @@ fn main() -> Result<()> {
     let result = f(n);
     let elapsed = t0.elapsed();
 
-    println!("Zust JIT 返回值  = {result}  ← 错误!");
+    let status2 = if result == correct { "✓ 已修复" } else { "✗ 仍然错误" };
+    println!("Zust JIT 返回值  = {result}  {status2}");
     println!("耗时            = {:.0}ms (正确值 {correct})", elapsed.as_secs_f64() * 1000.0);
-
-    println!("\n原因: 动态列表 [] 在 JIT 中每次 get_idx 都走运行时分发，");
-    println!("且类型擦除导致 sum + Any 产生类型混乱，累积错误。\n");
 
     // Verify with a Lua equivalent for timing comparison
     use std::process::Command;

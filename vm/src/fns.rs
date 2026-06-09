@@ -359,6 +359,16 @@ impl JITRunTime {
             };
             return Ok(FnInfo::Call { fn_id, arg_tys: arg_tys.to_vec(), caps: cap.vars.clone(), ret: ret_ty, context: None });
         }
+        if let Symbol::Native(f) = s {
+            let ret_ty = if let Type::Fn { ret, .. } = &f { ret.as_ref().clone() } else { Type::Any };
+            if let Some(FnVariant::Native { ty: _, fn_id, context }) = self.fns.get(&id) {
+                return Ok(FnInfo::Call { fn_id: *fn_id, arg_tys: arg_tys.to_vec(), caps: Vec::new(), ret: ret_ty, context: *context });
+            }
+            let sig = self.get_sig(&arg_tys, ret_ty.clone())?;
+            let fn_id = self.module.declare_function(&name, Linkage::Import, &sig)?;
+            self.fns.insert(id, FnVariant::Native { ty: f, fn_id, context: None });
+            return Ok(FnInfo::Call { fn_id, arg_tys: arg_tys.to_vec(), caps: Vec::new(), ret: ret_ty, context: None });
+        }
         Err(anyhow!("生成函数 {}({}) 失败: symbol 不是函数: {:?}", id, name, s))
     }
 }

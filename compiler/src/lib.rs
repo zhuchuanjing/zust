@@ -1535,15 +1535,17 @@ impl Compiler {
                     Ok(Expr::new(ExprKind::Typed { value: Box::new(self.eval(value, stmts, cap)?), ty }, expr.span))
                 }
             }
-            ExprKind::Ident(ident) => match self.get_ident(ident, expr.span) {
-                Ok(id) => Ok(id),
-                Err(_) => {
-                    if let Some(idx) = cap.get(ident) {
-                        Ok(Expr::new(ExprKind::Capture(idx as u32), expr.span))
-                    } else {
-                        Err(Self::semantic_error(expr.span, format!("未找到标识符 {}", ident)))
+            ExprKind::Ident(ident) => {
+                // 局部变量 → 捕获变量 → 全局符号
+                for idx in (self.top()..self.names.len()).rev() {
+                    if self.names[idx].eq(ident) {
+                        return Ok(Expr::new(ExprKind::Var((idx - self.top()) as u32), expr.span));
                     }
                 }
+                if let Some(idx) = cap.get(ident) {
+                    return Ok(Expr::new(ExprKind::Capture(idx as u32), expr.span));
+                }
+                self.get_ident(ident, expr.span)
             },
             ExprKind::Generic { obj, params } => {
                 let obj = self.eval(obj, stmts, cap)?;

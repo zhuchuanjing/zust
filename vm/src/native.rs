@@ -478,6 +478,7 @@ unsafe fn call_callback(ptr: *const u8, ret_ty: &Type, args: &[*const Dynamic]) 
             _ => unreachable!(),
         }
     } else if ret_ty.is_struct() || ret_ty.is_array() || ret_ty.is_vec() {
+        log::warn!("callback returns {ret_ty:?} — not supported, discarding");
         call_ret!(*const u8, |_| Ok(Dynamic::Null))
     } else {
         call_ret!(*const Dynamic, |ptr| unsafe { Ok((*take_dynamic_return(ptr)).deep_clone()) })
@@ -650,6 +651,7 @@ unsafe fn call_spawned(ptr: *const u8, ret_ty: &Type, args: &[*const Dynamic]) -
             _ => unreachable!(),
         }
     } else if ret_ty.is_struct() || ret_ty.is_array() || ret_ty.is_vec() {
+        log::warn!("spawned fn returns {ret_ty:?} — not supported, discarding");
         call_ret!(*const u8, |_| {});
     } else {
         call_ret!(*const Dynamic, |ptr| drop(unsafe { take_dynamic_return(ptr) }));

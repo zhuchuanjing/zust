@@ -156,8 +156,8 @@ impl JITRunTime {
         self.compiler.symbols.pop_module();
     }
 
-    pub fn add_native_const(&mut self, name: &str, value: Dynamic, ty: Type, is_pub: bool) -> u32 {
-        self.compiler.add_symbol(name, Symbol::Const { value, ty, is_pub })
+    pub fn add_native_const(&mut self, name: &str, value: impl Into<Dynamic>, ty: Type) -> u32 {
+        self.compiler.add_symbol(name, Symbol::Const { value: value.into(), ty, is_pub: true })
     }
 
     pub fn add_type(&mut self, name: &str, ty: Type, is_pub: bool) -> u32 {
@@ -343,6 +343,10 @@ impl Vm {
 
     pub fn pop_module(&self) {
         self.jit.lock().unwrap().pop_module()
+    }
+
+    pub fn add_native_const(&self, name: &str, value: impl Into<Dynamic>, ty: Type) -> u32 {
+        self.jit.lock().unwrap().add_native_const(name, value, ty)
     }
 
     pub fn add_type(&self, name: &str, ty: Type, is_pub: bool) -> u32 {

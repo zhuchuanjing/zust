@@ -619,12 +619,11 @@ impl JITRunTime {
         let Type::Struct { params: _, fields } = ty else {
             return Err(anyhow!("not a struct type: {:?}", ty));
         };
-        if items.len() != fields.len() {
-            return Err(anyhow!("struct initializer has {} fields but type expects {}", items.len(), fields.len()));
-        }
         let base = self.struct_alloc(ctx, ty)?;
         for (idx, item) in items.iter().enumerate() {
-            let (_, field_ty) = &fields[idx];
+            let Some((_, field_ty)) = fields.get(idx) else {
+                return Err(anyhow!("struct initializer has too many fields (field index {} out of bounds, type has {} fields)", idx, fields.len()));
+            };
             let value = self.eval(ctx, item)?.get(ctx).ok_or(anyhow!("struct field has no value"))?;
             self.store_struct_field(ctx, base, idx, field_ty, value, ty)?;
         }

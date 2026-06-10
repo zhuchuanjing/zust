@@ -682,12 +682,12 @@ extern "C" fn any_iter(addr: *const Dynamic) -> *const Dynamic {
     if addr.is_null() { any_null() } else { alloc_dynamic(unsafe { (*addr).clone().into_iter() }) }
 }
 
-extern "C" fn any_next(addr: *mut Dynamic) -> *const Dynamic {
-    alloc_dynamic(unsafe { (*addr).next().unwrap_or(Dynamic::Null) })
+extern "C" fn any_next(addr: *const Dynamic) -> *const Dynamic {
+    if addr.is_null() { any_null() } else { alloc_dynamic(unsafe { (&mut *(addr as *mut Dynamic)).next().unwrap_or(Dynamic::Null) }) }
 }
 
-extern "C" fn any_next_pair(addr: *mut Dynamic) -> *const Dynamic {
-    alloc_dynamic(unsafe { (*addr).next_pair().unwrap_or(Dynamic::Null) })
+extern "C" fn any_next_pair(addr: *const Dynamic) -> *const Dynamic {
+    if addr.is_null() { any_null() } else { alloc_dynamic(unsafe { (&mut *(addr as *mut Dynamic)).next_pair().unwrap_or(Dynamic::Null) }) }
 }
 
 extern "C" fn any_push(addr: *mut Dynamic, value: *mut Dynamic) {
@@ -1075,7 +1075,7 @@ extern "C" fn any_binary(left: *const Dynamic, op: i32, right: *const Dynamic) -
     if right.is_null() {
         return alloc_dynamic(unsafe { (&*left).clone() });
     }
-    let op = BinaryOp::try_from(op).unwrap();
+    let op = BinaryOp::try_from(op).unwrap_or(BinaryOp::Unknow);
     if op == BinaryOp::Add {
         let (left_value, right_value) = unsafe { (&*left, &*right) };
         if left_value.is_str() || right_value.is_str() {
@@ -1092,7 +1092,7 @@ extern "C" fn any_binary(left: *const Dynamic, op: i32, right: *const Dynamic) -
 }
 
 extern "C" fn any_logic(left: *const Dynamic, op: i32, right: *const Dynamic) -> i32 {
-    let op = BinaryOp::try_from(op).unwrap();
+    let op = BinaryOp::try_from(op).unwrap_or(BinaryOp::Unknow);
     unsafe {
         let expr = Expr::new(
             ExprKind::Binary { left: Box::new(Expr::new(ExprKind::Value((&*left).clone()), Span::default())), op, right: Box::new(Expr::new(ExprKind::Value((&*right).clone()), Span::default())) },

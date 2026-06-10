@@ -619,11 +619,12 @@ impl JITRunTime {
         let Type::Struct { params: _, fields } = ty else {
             return Err(anyhow!("not a struct type: {:?}", ty));
         };
+        if items.len() != fields.len() {
+            return Err(anyhow!("struct initializer has {} fields but type expects {}", items.len(), fields.len()));
+        }
         let base = self.struct_alloc(ctx, ty)?;
         for (idx, item) in items.iter().enumerate() {
-            let Some((_, field_ty)) = fields.get(idx) else {
-                break;
-            };
+            let (_, field_ty) = &fields[idx];
             let value = self.eval(ctx, item)?.get(ctx).ok_or(anyhow!("struct field has no value"))?;
             self.store_struct_field(ctx, base, idx, field_ty, value, ty)?;
         }
@@ -810,7 +811,7 @@ impl JITRunTime {
             }
             return Ok(value);
         } else {
-            panic!("赋值给 {:?} {:?}", left, value)
+            anyhow::bail!("赋值给不支持的目标: {:?} {:?}", left, value)
         }
     }
 
@@ -1245,7 +1246,7 @@ impl JITRunTime {
                         if let LocalVar::Closure { id, captures } = val {
                             return self.call_fn_with_capture_values(ctx, id, &[], None, params, Some(captures));
                         }
-                        panic!("暂未实现 {:?}", val)
+                        anyhow::bail!("暂未实现: {:?}", val)
                     }
                 }
             }
@@ -1288,7 +1289,7 @@ impl JITRunTime {
                     Ok(vt.into())
                 }
             }
-            ExprKind::List(_) => Err(anyhow!("未实现 {:?}", expr)),
+            ExprKind::List(_) => anyhow::bail!("未实现: {:?}", expr),
             ExprKind::Repeat { value, len } => {
                 let value = self.eval(ctx, value)?.get(ctx).ok_or(anyhow!("repeat value has no value"))?;
                 let Type::ConstInt(len) = len else {
@@ -1302,7 +1303,7 @@ impl JITRunTime {
             ExprKind::AssocId { id, .. } => self.closure_value(ctx, *id),
             expr => {
                 //结构就是一块固定大小 的内存(或者是动态大小 最后一个数据成员可扩展 跟 C 结构一样)
-                panic!("未实现 {:?}", expr)
+                anyhow::bail!("未实现: {:?}", expr)
             }
         }
     }
@@ -1439,12 +1440,12 @@ impl JITRunTime {
                             body,
                             Some(|ctx: &mut BuildContext| {
                                 let v = ctx.get_var(*idx).unwrap().get(ctx).unwrap();
-                                let step = if v.1 == Type::I64 {
-                                    ctx.builder.ins().iconst(types::I64, 1)
-                                } else if v.1 == Type::I32 {
-                                    ctx.builder.ins().iconst(types::I32, 1)
-                                } else {
-                                    panic!("{:?} 不能作为增量", v.1)
+                                let step = match &v.1 {
+                                    Type::I64 | Type::U64 => ctx.builder.ins().iconst(types::I64, 1),
+                                    Type::I32 | Type::U32 => ctx.builder.ins().iconst(types::I32, 1),
+                                    Type::I16 | Type::U16 => ctx.builder.ins().iconst(types::I16, 1),
+                                    Type::I8 | Type::U8 => ctx.builder.ins().iconst(types::I8, 1),
+                                    _ => ctx.builder.ins().iconst(types::I64, 1),
                                 };
                                 let vt = (ctx.builder.ins().iadd(v.0, step), v.1).into();
                                 let _ = ctx.set_var(*idx, vt);
@@ -1512,7 +1513,7 @@ impl JITRunTime {
                 }
             }
             _ => {
-                panic!("未实现 {:?}", stmt)
+                anyhow::bail!("未实现: {:?}", stmt)
             }
         }
         Ok(false)

@@ -29,7 +29,7 @@ parser = { package = "zust-parser", version = "0.9.13", path = "../parser" }
 smol_str = "0.3.6"
 
 [dev-dependencies]
-vm = { package = "zust-vm", version = "0.9.70", path = "../vm" }
+vm = { package = "zust-vm", version = "0.9.69", path = "../vm" }
 
 [[example]]
 name = "vm_metal_bitonic"

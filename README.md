@@ -105,9 +105,9 @@ let version = 0.9;
 let short = {name, version};
 ```
 
-Numeric literals may use explicit suffixes such as `1i32`, `8u64`, or `3.14f32`, and integer literals support `0x`, `0o`, and `0b` prefixes.
+Numeric literals may use explicit suffixes such as `1i32`, `8u64`, or `3.14f32`, and integer literals support `0x`, `0o`, and `0b` prefixes. Float literals support scientific notation: `1e-3f32`, `1.797e308f64`.
 
-String concatenation uses dynamic string conversion at runtime, so expressions such as `"" + idx`, `"" + level + " level"`, and `"" + map.value` are supported.
+String concatenation uses dynamic string conversion at runtime, so expressions such as `"" + idx`, `"" + level + " level"`, and `"" + map.value` are supported. Raw strings allow embedded quotes and backslashes: `r#"hello "Zust""#` or `r##"raw with "# inside"##`.
 
 String-to-number casts are supported via `as`: `"123" as i32` yields `123`, and `"3.14" as f64` yields `3.14`. Invalid numbers cast to `0`.
 
@@ -144,6 +144,17 @@ data.extra = second;
 
 Variables and fields can be reassigned directly. Compound assignment operators such as `+=`, `-=`, `*=`, `/=`, `%=`, `&=`, `|=`, `^=`, `<<=`, and `>>=` are supported.
 
+Multi-assignment (destructuring without `let`) is also supported for tuples and lists:
+
+```zust
+let a = 1i32;
+let b = 2i32;
+(a, b) = (b, a);   // swap values
+
+let arr = [10i32, 20i32, 30i32];
+[arr[0], arr[2]] = [arr[2], arr[0]];  // swap via indices
+```
+
 ### Control Flow
 
 ```zust
@@ -155,8 +166,12 @@ for i in 0..10 {
 }
 
 // for can iterate dynamic lists and maps directly:
-for item in some_list { ... }
-for value in some_map { ... }
+for item in [1, 2, 3] {
+    print(item);
+}
+for value in {"a": 1, "b": 2} {
+    print(value);    // prints values: 1, 2
+}
 
 let label = if list.len() > 0 { "non-empty" } else { "empty" };
 
@@ -170,7 +185,16 @@ loop {
 }
 ```
 
-`for in` iterates values directly over dynamic lists and maps. To iterate map keys, use `.keys()`. **`for in` does not iterate strings** (no character-level traversal).
+`for in` iterates values directly over dynamic lists and maps. To iterate map keys, use `.keys()`:
+
+```zust
+let map = {"a": 1, "b": 2};
+for key in map.keys() {
+    print(key);   // prints keys: "a", "b"
+}
+```
+
+**`for in` does not iterate strings** (no character-level traversal).
 
 ### Language Limitations
 
@@ -314,7 +338,21 @@ The standard functions are available without a module prefix:
 - `uuid()`: return a UUID string.
 - `rand(start, stop)`: return a random integer or float between `start` and `stop`.
 - `import(module, path)`: import another `.zs` file or a source object stored in `root`.
-- `spawn(target, args)`: start a detached OS thread and call `target`. `target` can be a function name string or a closure without captures. `args` is always a tuple argument pack: `spawn("job::run", ())` calls with no arguments, and `spawn(|x, y| { print(x + y); }, (10, 20))` calls with two arguments. The spawned function currently receives arguments through the dynamic `Any` boundary, and the return value is ignored.
+- `spawn(target, args)`: start a detached OS thread and call `target`. `target` can be a function name string or a closure without captures. `args` is always a tuple argument pack: `spawn("job::run", ())` calls with no arguments, and `spawn(|x, y| { print(x + y); }, (10, 20))` calls with two arguments. The spawned function receives arguments through the dynamic `Any` boundary (up to 16 args), and the return value is ignored.
+
+Example usage:
+
+```zust
+print({ok: true});
+let id = uuid();
+let n = rand(1, 100);
+import("world", "scripts/world.zs");
+
+spawn("job::run", ());
+spawn(|x, y| {
+    root::add("local/result", x + y);
+}, (10, 20));
+```
 
 ### Native Callbacks
 
@@ -334,6 +372,21 @@ Dynamic values expose common methods:
 Most normal script syntax, such as `list[idx]`, `map.key`, `value.len()`, and dynamic arithmetic, is lowered through these helpers.
 
 Native custom values can opt into property forwarding with `Dynamic::custom_with_properties(...)`. Then Zust field syntax such as `dialog.file_mode = 3` and `dialog.file_mode` goes through `Any::set_key/get_key`, and the custom Rust value receives the property name and dynamic value.
+
+```zust
+let data = {name: "zust", tags: ["vm", "native"]};
+
+if data.is_map() && data.contains("name") {
+    print(data.get_key("name"));
+}
+
+data.tags.push("script");
+let count = data.tags.len();
+
+let items = data.keys();       // get map keys
+let s = data.to_string();      // string representation
+let first = data.tags.get_idx(0);
+```
 
 ### `Vec`
 
@@ -558,10 +611,17 @@ Functions:
 `db` uses `sqlx::AnyPool` and currently enables PostgreSQL and MySQL. Connection URLs are stored in `root`, usually under `local`.
 
 ```zust
+// Connection as a URL string:
 root::add("local/db", "postgres://user@127.0.0.1/postgres");
+
+// Connection as a config map:
+root::add("local/db", {
+    url: "mysql://user:pass@127.0.0.1:3306/app",
+    max_connections: 10,
+});
 ```
 
-When a database path is resolved, `db` first checks the complete path. If the complete path stores a URL, that path is the database connection name. If not, it walks upward until it finds a URL; the remaining suffix is the table name. For example, `local/db/user` uses the connection at `local/db` and table `user`.
+When a database path is resolved, `db` first checks the complete path. If the complete path stores a URL or config map, that path is the database connection name. If not, it walks upward until it finds a connection; the remaining suffix is the table name. For example, `local/db/user` uses the connection at `local/db` and table `user`.
 
 Create and drop tables:
 
@@ -628,6 +688,23 @@ let changed = db::transaction("local/db", [
 Shader compilation stays available without VM runtime execution backends. Enable `zust-vm` feature `vulkan` only when calling `gpu::vulkan_run`, and feature `metal` only when calling `gpu::metal_run`.
 
 The compile options are dynamic maps with `source` or `path`, `module`, `fn`, `workgroup_size`, and optional `generic_args`. Runtime argument descriptors support scalar inputs, typed vector buffers, and raw `bytes` buffers for ABI-packed structs.
+
+```zust
+let checked = gpu::spirv_check({
+    path: "zusts/gpu/mandelbrot.zs",
+    module: "mandelbrot",
+    fn: "main",
+    workgroup_size: [8, 8, 1],
+});
+
+let compiled = gpu::spirv_compile({
+    source: "pub fn main() { ... }",
+    module: "kernel",
+    fn: "main",
+    workgroup_size: [16, 16, 1],
+    generic_args: [32u32],
+});
+```
 
 ### `spirv`
 

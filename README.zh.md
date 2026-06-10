@@ -98,9 +98,9 @@ let version = 0.9;
 let short = {name, version};
 ```
 
-数字字面量可以带显式后缀，例如 `1i32`、`8u64`、`3.14f32`；整数字面量支持 `0x`、`0o` 和 `0b` 前缀。
+数字字面量可以带显式后缀，例如 `1i32`、`8u64`、`3.14f32`；整数字面量支持 `0x`、`0o` 和 `0b` 前缀。浮点数字面量支持科学计数法：`1e-3f32`、`1.797e308f64`。
 
-字符串拼接会在运行时使用动态字符串转换，因此支持 `"" + idx`、`"" + level + "级"`、`"" + map.value` 这类写法。
+字符串拼接会在运行时使用动态字符串转换，因此支持 `"" + idx`、`"" + level + "级"`、`"" + map.value` 这类写法。原始字符串允许内嵌引号和反斜杠：`r#"hello "Zust""#` 或 `r##"内含 "# 的文本"##`。
 
 字符串到数字的类型转换通过 `as` 完成：`"123" as i32` 得到 `123`，`"3.14" as f64` 得到 `3.14`。无效数字转为 `0`。
 
@@ -137,6 +137,17 @@ data.extra = second;
 
 变量和字段可以直接重新赋值。语言也支持 `+=`、`-=`、`*=`、`/=`、`%=`、`&=`、`|=`、`^=`、`<<=`、`>>=` 等复合赋值运算符。
 
+多重赋值（不带 `let` 的解构）也支持 tuple 和 list：
+
+```zust
+let a = 1i32;
+let b = 2i32;
+(a, b) = (b, a);   // 交换值
+
+let arr = [10i32, 20i32, 30i32];
+[arr[0], arr[2]] = [arr[2], arr[0]];  // 通过索引交换
+```
+
 ### 控制流
 
 ```zust
@@ -148,8 +159,12 @@ for i in 0..10 {
 }
 
 // for 可以直接迭代动态 list 和 map 的值：
-for item in some_list { ... }
-for value in some_map { ... }
+for item in [1, 2, 3] {
+    print(item);
+}
+for value in {"a": 1, "b": 2} {
+    print(value);    // 打印值：1, 2
+}
 
 let label = if list.len() > 0 { "non-empty" } else { "empty" };
 
@@ -163,7 +178,16 @@ loop {
 }
 ```
 
-`for in` 在动态 list/map 上直接迭代值；迭代 map 的 key 请用 `.keys()`。**`for in` 不迭代字符串**（不会按字符遍历）。
+`for in` 在动态 list/map 上直接迭代值；迭代 map 的 key 请用 `.keys()`：
+
+```zust
+let map = {"a": 1, "b": 2};
+for key in map.keys() {
+    print(key);   // 打印键："a", "b"
+}
+```
+
+**`for in` 不迭代字符串**（不会按字符遍历）。
 
 ### 语言限制
 
@@ -235,6 +259,10 @@ fn identity<T>(value: T) {
     value
 }
 
+fn const_value<N>() {
+    N
+}
+
 pub fn demo_closure() {
     let base = 10i32;
     let add_base = |value: i32| {
@@ -253,6 +281,10 @@ pub fn demo_nested_closure() {
         };
         done(true)
     }("file.png")
+}
+
+pub fn demo_const_generic() {
+    const_value::<4>()
 }
 
 // 闭包可以立即调用：
@@ -299,13 +331,23 @@ pub struct BigFloat<N> {
 - `uuid()`：返回 UUID 字符串。
 - `rand(start, stop)`：返回 `start` 到 `stop` 之间的随机整数或浮点数。
 - `import(module, path)`：导入另一个 `.zs` 文件，或导入存放在 `root` 中的源码对象。
+- `spawn(target, args)`：启动独立 OS 线程并调用 `target`。`target` 可以是函数名字符串或无捕获的闭包。`args` 始终是 tuple 参数包：`spawn("job::run", ())` 无参调用，`spawn(|x, y| { print(x + y); }, (10, 20))` 带两个参数调用。spawn 函数通过动态 `Any` 边界接收参数（最多 16 个），返回值被忽略。
 
 ```zust
 print({ok: true});
 let id = uuid();
 let n = rand(1, 100);
 import("world", "scripts/world.zs");
+
+spawn("job::run", ());
+spawn(|x, y| {
+    root::add("local/result", x + y);
+}, (10, 20));
 ```
+
+### Native 回调
+
+当闭包通过 `Any` 参数传递给 native 函数时，VM 会将其封装为 `Dynamic::Custom(ZustCallback)`。Rust native 代码可以 downcast 并保存它，之后通过 `callback.call0()`、`callback.call1(value)` 或 `callback.call(vec![...])` 调用。回调闭包最多支持 24 个显式动态参数，例如 `button.on_pressed(|| { label.set_text("clicked!"); })` 和 `dialog.on_file_selected(|path| { label.set_text(path); })`。捕获变量会 deep clone 为动态值，因此标量和 native custom 对象在原 Zust 调用返回后仍可使用。
 
 ### Any 动态值方法
 
@@ -321,14 +363,18 @@ import("world", "scripts/world.zs");
 普通脚本语法，例如 `list[idx]`、`map.key`、`value.len()` 和动态算术，都会降到这些辅助方法上。
 
 ```zust
-let data = {name: "zust", tags: ["vm"]};
+let data = {name: "zust", tags: ["vm", "native"]};
 
 if data.is_map() && data.contains("name") {
     print(data.get_key("name"));
 }
 
-data.tags.push("native");
+data.tags.push("script");
 let count = data.tags.len();
+
+let items = data.keys();       // 获取 map 所有键
+let s = data.to_string();      // 字符串表示
+let first = data.tags.get_idx(0);
 ```
 
 ### Vec 辅助类型
@@ -642,6 +688,14 @@ let checked = gpu::spirv_check({
     module: "mandelbrot",
     fn: "main",
     workgroup_size: [8, 8, 1],
+});
+
+let compiled = gpu::spirv_compile({
+    source: "pub fn main() { ... }",
+    module: "kernel",
+    fn: "main",
+    workgroup_size: [16, 16, 1],
+    generic_args: [32u32],
 });
 ```
 

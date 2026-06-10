@@ -4,7 +4,7 @@ Zust 是一个用 Rust 编写的类 Rust 脚本语言和运行时。它保留了
 
 官方网站：[www.zust-lang.com](https://www.zust-lang.com)
 
-项目已经接近成熟的开源版本。当前 workspace 内各 crate 独立发版：VM crate 为 `0.9.68`，dynamic crate 为 `0.9.12`，compiler 为 `0.9.30`，parser 为 `0.9.11`，SPIR-V 后端为 `0.9.7`，Metal 后端为 `0.9.8`，编辑器相关包为 `0.9.2`。
+项目已经接近成熟的开源版本。当前 workspace 内各 crate 独立发版：VM crate 为 `0.9.70`，dynamic crate 为 `0.9.14`，compiler 为 `0.9.32`，parser 为 `0.9.13`，SPIR-V 后端为 `0.9.8`，Metal 后端为 `0.9.9`，编辑器相关包为 `0.9.2`。
 
 English: [README.md](README.md)
 

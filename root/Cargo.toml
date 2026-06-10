@@ -14,7 +14,7 @@ categories = ["data-structures"]
 name = "root"
 
 [dependencies]
-dynamic = { package = "zust-dynamic", version = "0.9.7", path = "../dynamic" }
+dynamic = { package = "zust-dynamic", version = "0.9.14", path = "../dynamic" }
 
 anyhow = "1.0.102"
 thiserror = "2.0.18"

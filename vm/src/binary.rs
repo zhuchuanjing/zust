@@ -271,6 +271,33 @@ impl JITRunTime {
         Ok(ctx.builder.block_params(merge_block)[0])
     }
 
+    /// 立即数除法/取余:除数在编译期已知,据此选最省的代码:
+    /// - 非零常量(无符号任意非零;有符号且非 -1):不可能 trap,直接 `*_imm`,无守卫;
+    /// - 除数为 0:编译期已知会出错,记 fault 并返回 0,不发 trap;
+    /// - 有符号 `/ -1` 或 `% -1`:可能 `INT_MIN/-1` 溢出 trap,回退到运行期守卫。
+    ///
+    /// 这避免了对 `x / 2`、`x % 1000000007` 这类常量除法附加无谓的判零分支
+    /// (除零守卫只在真正可能 trap 时才生成)。
+    fn idiv_imm(&mut self, ctx: &mut BuildContext, left: Value, divisor: i64, signed: bool, is_rem: bool) -> Result<Value> {
+        let int_ty = ctx.builder.func.dfg.value_type(left);
+        if divisor == 0 {
+            let fault_fn = self.arith_fault_fn.ok_or_else(|| anyhow!("VM arith fault runtime is not registered"))?;
+            let fault_ref = self.get_fn_ref(ctx, fault_fn);
+            ctx.builder.ins().call(fault_ref, &[]);
+            return Ok(ctx.builder.ins().iconst(int_ty, 0));
+        }
+        if signed && divisor == -1 {
+            let rv = ctx.builder.ins().iconst(int_ty, -1);
+            return self.guarded_idiv(ctx, left, rv, true, is_rem);
+        }
+        Ok(match (signed, is_rem) {
+            (true, false) => ctx.builder.ins().sdiv_imm(left, divisor),
+            (false, false) => ctx.builder.ins().udiv_imm(left, divisor),
+            (true, true) => ctx.builder.ins().srem_imm(left, divisor),
+            (false, true) => ctx.builder.ins().urem_imm(left, divisor),
+        })
+    }
+
     pub(crate) fn binary_with_expected(&mut self, ctx: &mut BuildContext, left: (Value, Type), op: BinaryOp, right: &Expr, expected: Option<&Type>) -> Result<(Value, Type)> {
         //处理可以计算的简单情形
         if matches!(op, BinaryOp::And | BinaryOp::Or) {
@@ -548,9 +575,8 @@ impl JITRunTime {
             }
             BinaryOp::Div | BinaryOp::DivAssign => {
                 if ty.is_int() || ty.is_uint() {
-                    let int_ty = ctx.builder.func.dfg.value_type(left);
-                    let rv = ctx.builder.ins().iconst(int_ty, right.as_int().ok_or(anyhow!("非整数"))?);
-                    return Ok((self.guarded_idiv(ctx, left, rv, ty.is_int(), false)?, ty));
+                    let divisor = right.as_int().ok_or(anyhow!("非整数"))?;
+                    return Ok((self.idiv_imm(ctx, left, divisor, ty.is_int(), false)?, ty));
                 } else if ty.is_float() {
                     return Ok((ctx.builder.ins().fdiv(left, right_float.unwrap()), ty));
                 }
@@ -632,9 +658,8 @@ impl JITRunTime {
             }
             BinaryOp::Mod | BinaryOp::ModAssign => {
                 if ty.is_int() || ty.is_uint() {
-                    let int_ty = ctx.builder.func.dfg.value_type(left);
-                    let rv = ctx.builder.ins().iconst(int_ty, right.as_int().ok_or(anyhow!("非整数"))?);
-                    return Ok((self.guarded_idiv(ctx, left, rv, ty.is_int(), true)?, ty));
+                    let divisor = right.as_int().ok_or(anyhow!("非整数"))?;
+                    return Ok((self.idiv_imm(ctx, left, divisor, ty.is_int(), true)?, ty));
                 }
             }
             exp => {

@@ -698,6 +698,34 @@ mod tests {
     }
 
     #[test]
+    fn constant_divide_by_zero_does_not_crash() -> anyhow::Result<()> {
+        let vm = Vm::with_all()?;
+        vm.import_code(
+            "vm_const_div_zero",
+            br#"
+            pub fn divz(a: i64) { a / 0 }
+            pub fn modz(a: i64) { a % 0 }
+            pub fn divc(a: i64) { a / 7 }
+            "#
+            .to_vec(),
+        )?;
+        let divz: extern "C" fn(i64) -> i64 = unsafe { std::mem::transmute(vm.get_fn("vm_const_div_zero::divz", &[Type::I64])?.ptr()) };
+        let modz: extern "C" fn(i64) -> i64 = unsafe { std::mem::transmute(vm.get_fn("vm_const_div_zero::modz", &[Type::I64])?.ptr()) };
+        let divc: extern "C" fn(i64) -> i64 = unsafe { std::mem::transmute(vm.get_fn("vm_const_div_zero::divc", &[Type::I64])?.ptr()) };
+
+        let _ = dynamic::take_fault();
+        // 常量除零:编译期判定 → 返回 0 + 置 fault,不 trap
+        assert_eq!(divz(42), 0);
+        assert!(dynamic::take_fault().is_some());
+        assert_eq!(modz(42), 0);
+        assert!(dynamic::take_fault().is_some());
+        // 非零常量除数:正常计算,不置 fault(走无守卫快路径)
+        assert_eq!(divc(42), 6);
+        assert!(dynamic::take_fault().is_none());
+        Ok(())
+    }
+
+    #[test]
     fn dynamic_divide_by_zero_returns_null() -> anyhow::Result<()> {
         let vm = Vm::with_all()?;
         vm.import_code(

@@ -13,4 +13,6 @@
         "zust-lsp",
         "benches",
     ]
+    # fuzz 是独立 workspace(需 nightly + cargo-fuzz),不纳入常规构建/测试。
+    exclude = ["fuzz"]
     resolver = "2"

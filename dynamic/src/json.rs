@@ -82,11 +82,9 @@ pub trait ToJson {
     fn to_json(&self, buf: &mut String);
 }
 
+use indexmap::IndexMap;
 use smol_str::SmolStr;
-use std::{
-    collections::BTreeMap,
-    sync::{Arc, RwLock},
-};
+use std::sync::{Arc, RwLock};
 
 impl FromJson for Dynamic {
     fn from_json(buf: &[u8]) -> Result<(Self, usize)> {
@@ -109,7 +107,7 @@ impl FromJson for Dynamic {
         } else if buf[pos] == b'{' {
             pos += 1;
             pos += skip_white(&buf[pos..])?;
-            let mut map = BTreeMap::new();
+            let mut map = IndexMap::new();
             while buf[pos] != b'}' {
                 assert_err!(buf[pos] != b'"', anyhow!("need a string key {:?}", String::from_utf8_lossy(&buf[pos..])));
                 let (key, size) = Self::get_string(&buf[pos..])?;

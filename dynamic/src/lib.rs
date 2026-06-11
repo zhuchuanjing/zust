@@ -1,5 +1,6 @@
 use bytemuck::{AnyBitPattern, NoUninit, cast_slice, cast_slice_mut};
 use smol_str::SmolStr;
+use indexmap::IndexMap;
 use std::any::Any;
 use std::collections::BTreeMap;
 use std::mem;
@@ -259,7 +260,7 @@ pub enum Dynamic {
     VecI64(Vec<i64>),
     VecF64(Vec<f64>),
     List(Arc<RwLock<Vec<Dynamic>>>),
-    Map(Arc<RwLock<BTreeMap<SmolStr, Dynamic>>>),
+    Map(Arc<RwLock<IndexMap<SmolStr, Dynamic>>>),
     Struct {
         addr: usize,
         ty: Type,
@@ -1145,10 +1146,12 @@ impl Dynamic {
     }
 
     pub fn map(m: BTreeMap<SmolStr, Dynamic>) -> Self {
-        Dynamic::Map(Arc::new(RwLock::new(m)))
+        // 入参保持 BTreeMap 以兼容已有调用点;底层用 IndexMap(O(1) 访问)。
+        // BTreeMap 已按 key 排序,转入后即为初始(有序)插入序。
+        Dynamic::Map(Arc::new(RwLock::new(m.into_iter().collect())))
     }
 
-    pub fn into_map(self) -> Option<BTreeMap<SmolStr, Dynamic>> {
+    pub fn into_map(self) -> Option<IndexMap<SmolStr, Dynamic>> {
         if let Self::Map(map) = self { Arc::try_unwrap(map).ok().and_then(|m| m.into_inner().ok()) } else { None }
     }
 
@@ -1337,7 +1340,8 @@ impl Dynamic {
     }
 
     pub fn remove_dynamic(&self, key: &str) -> Option<Dynamic> {
-        if let Self::Map(map) = self { map.write().unwrap().remove(key) } else { None }
+        // shift_remove 保留插入顺序(swap_remove 会打乱),与原 BTreeMap 删除后仍有序的语义最接近
+        if let Self::Map(map) = self { map.write().unwrap().shift_remove(key) } else { None }
     }
 
     pub fn get_idx(&self, idx: usize) -> Option<Self> {
@@ -1635,6 +1639,6 @@ macro_rules! map {
     ($($k:expr => $v:expr), *) => {{
         let mut obj = std::collections::BTreeMap::new();
         $( let _ = obj.insert(smol_str::SmolStr::from($k), Dynamic::from($v)); )*
-        Dynamic::Map(std::sync::Arc::new(std::sync::RwLock::new(obj)))
+        Dynamic::map(obj)
     }};
 }

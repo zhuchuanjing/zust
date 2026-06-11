@@ -2,7 +2,7 @@ pub trait MsgPack {
     fn encode(&self, buf: &mut Vec<u8>);
 }
 
-use std::collections::BTreeMap;
+use indexmap::IndexMap;
 
 use byteorder::{BigEndian, WriteBytesExt};
 use smol_str::SmolStr;
@@ -243,7 +243,7 @@ pub(crate) fn read_64(raw: &[u8]) -> u64 {
 }
 
 fn vec_to_map(kvs: Vec<Dynamic>) -> Result<Dynamic> {
-    let mut map: BTreeMap<SmolStr, Dynamic> = BTreeMap::new();
+    let mut map: IndexMap<SmolStr, Dynamic> = IndexMap::new();
     let mut key: Option<Dynamic> = None;
     for kv in kvs {
         if let Some(k) = key.take() {

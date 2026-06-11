@@ -171,9 +171,11 @@ impl Compiler {
             stop_ty
         } else if stop_ty.is_any() {
             start_ty
-        } else if start_ty == Type::I32 && stop_ty.is_uint() {
+        // 无后缀整数字面量(默认 I32/I64)在 range 里向另一端的具体无符号类型靠拢,
+        // 这样 `0..n`(n: u32)仍是 u32 range,而不是被默认 I64 拖宽成 i64(会拆穿 GPU 后端)。
+        } else if matches!(start_ty, Type::I32 | Type::I64) && stop_ty.is_uint() {
             stop_ty
-        } else if stop_ty == Type::I32 && start_ty.is_uint() {
+        } else if matches!(stop_ty, Type::I32 | Type::I64) && start_ty.is_uint() {
             start_ty
         } else {
             start_ty + stop_ty

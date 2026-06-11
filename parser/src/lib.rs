@@ -817,6 +817,82 @@ mod tests {
         assert_eq!(parse_literal("0xFFFFFFFFu32").unwrap(), Dynamic::U32(u32::MAX));
     }
 
+    // 把表达式 AST 渲染成 S 表达式,用来锁定优先级/结合性(expr.rs 手写树旋转逻辑)。
+    fn shape(code: &str) -> String {
+        let mut parser = Parser::new(code.as_bytes().to_vec());
+        let expr = parser.get_expr().expect("parse");
+        fmt_shape(&expr)
+    }
+
+    fn binop_sym(op: &crate::BinaryOp) -> &'static str {
+        use crate::BinaryOp::*;
+        match op {
+            Add => "+", Sub => "-", Mul => "*", Div => "/", Mod => "%",
+            Shl => "<<", Shr => ">>", BitAnd => "&", BitOr => "|", BitXor => "^",
+            Assign => "=", AddAssign => "+=", Eq => "==", Ne => "!=", Lt => "<", Gt => ">",
+            Le => "<=", Ge => ">=", And => "&&", Or => "||", Idx => "idx",
+            other => {
+                let _ = other;
+                "?"
+            }
+        }
+    }
+
+    fn fmt_shape(expr: &crate::Expr) -> String {
+        use crate::ExprKind::*;
+        match &expr.kind {
+            Value(v) => format!("{:?}", v).replace("I64(", "").replace("I32(", "").trim_end_matches(')').to_string(),
+            Ident(name) => name.to_string(),
+            Unary { op, value } => {
+                let s = if matches!(op, crate::UnaryOp::Neg) { "-" } else { "!" };
+                format!("({} {})", s, fmt_shape(value))
+            }
+            Binary { left, op, right } => format!("({} {} {})", binop_sym(op), fmt_shape(left), fmt_shape(right)),
+            Range { start, stop, inclusive } => format!("({} {} {})", if *inclusive { "..=" } else { ".." }, fmt_shape(start), fmt_shape(stop)),
+            Typed { value, ty } => format!("(as {} {:?})", fmt_shape(value), ty),
+            other => format!("{:?}", other),
+        }
+    }
+
+    #[test]
+    fn precedence_and_associativity_golden() {
+        // 乘法高于加法
+        assert_eq!(shape("1 + 2 * 3"), "(+ 1 (* 2 3))");
+        assert_eq!(shape("1 * 2 + 3"), "(+ (* 1 2) 3)");
+        // 同级左结合
+        assert_eq!(shape("1 - 2 - 3"), "(- (- 1 2) 3)");
+        assert_eq!(shape("8 / 4 / 2"), "(/ (/ 8 4) 2)");
+        // 移位低于加法
+        assert_eq!(shape("2 + 3 << 4"), "(<< (+ 2 3) 4)");
+        // 位运算优先级:& 高于 ^ 高于 |
+        assert_eq!(shape("1 | 2 ^ 3 & 4"), "(| 1 (^ 2 (& 3 4)))");
+        // 比较低于算术
+        assert_eq!(shape("1 + 2 == 3"), "(== (+ 1 2) 3)");
+        // 逻辑:&& 高于 ||
+        assert_eq!(shape("a && b || c"), "(|| (&& a b) c)");
+        // 一元高于乘法
+        assert_eq!(shape("-a * b"), "(* (- a) b)");
+        assert_eq!(shape("!a == b"), "(== (! a) b)");
+    }
+
+    #[test]
+    fn assignment_range_and_as_precedence_golden() {
+        // 赋值最低优先级
+        assert_eq!(shape("a = b + c"), "(= a (+ b c))");
+        // 已知限制:链式赋值当前为左结合 (= (= a b) c),理想应为右结合。
+        // 由于外层 = 的左侧不是 lvalue,这会在编译期报错而非静默误算;
+        // 锁定现状以防回归,正确的右结合修复见后续独立任务。
+        assert_eq!(shape("a = b = c"), "(= (= a b) c)");
+        // 复合赋值
+        assert_eq!(shape("a += b * c"), "(+= a (* b c))");
+        // range 边界是完整算术表达式(已修复:上界按完整子表达式解析)
+        assert_eq!(shape("1 + 1 .. n * 2"), "(.. (+ 1 1) (* n 2))");
+        assert_eq!(shape("0 ..= n - 1"), "(..= 0 (- n 1))");
+        // 已知限制:as 当前绑定整个左侧表达式 (as (+ a b) T),Rust 语义应为 (+ a (as b T))。
+        // 现有代码依赖此松绑定,改动有破坏风险;锁定现状,正确优先级见后续独立任务。
+        assert_eq!(shape("a + b as i64"), "(as (+ a b) I64)");
+    }
+
     #[test]
     fn allows_local_name_to_shadow_prior_function() {
         parse_all(

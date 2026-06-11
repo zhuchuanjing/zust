@@ -814,6 +814,15 @@ impl Parser {
                 self.pos = start;
                 return Ok((left, close));
             }
+            // range 的上界要按完整子表达式解析(优先级降到 range 之上),
+            // 否则 `0 .. n * 2` 只会把 `n` 当上界,`* 2` 反而套在整个 range 外面。
+            if matches!(this_op, BinaryOp::RangeOpen | BinaryOp::RangeClose) {
+                let stop = self.expr_with_min_weight(None, None, this_op.weight() + 1, allow_struct_literal)?.0;
+                let span = left.span.merge(stop.span);
+                let inclusive = this_op == BinaryOp::RangeClose;
+                let range = Expr::new(ExprKind::Range { start: Box::new(left), stop: Box::new(stop), inclusive }, span);
+                return self.expr_with_min_weight(Some((range, false)), None, min_weight, allow_struct_literal);
+            }
             if left_op.is_some() {
                 return Err(anyhow!("unexpected binary op {:?}", this_op));
             }

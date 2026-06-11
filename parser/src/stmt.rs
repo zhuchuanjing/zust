@@ -183,16 +183,19 @@ impl Parser {
     }
 
     pub fn block(&mut self) -> Result<Stmt> {
+        self.check_fatal()?;
         self.whitespace()?;
         let start = self.current_pos();
         if self.get()? == b'{' {
             self.pos += 1;
+            self.enter_depth()?;
             self.push_decl_scope();
             let result = (|| -> Result<Stmt> {
                 let body = crate::parse_list!(self, Vec::new(), b'}', 0, self.stmt(false)?);
                 Ok(Stmt::new(StmtKind::Block(body), self.span_from(start)))
             })();
             self.pop_decl_scope();
+            self.exit_depth();
             result
         } else {
             Err(anyhow!("not code block"))
@@ -214,6 +217,7 @@ impl Parser {
     }
 
     pub fn stmt(&mut self, is_pub: bool) -> Result<Stmt> {
+        self.check_fatal()?;
         self.whitespace()?;
         self.spans.push(self.pos);
         let start = self.current_pos();

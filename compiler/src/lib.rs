@@ -178,7 +178,8 @@ mod tests {
         assert_eq!(compiler.infer_fn(no_value_return, &[Type::Bool])?, Type::Void);
 
         let tail_if = compiler.symbols.get_id("compiler_return_check_args::tail_if")?;
-        assert_eq!(compiler.infer_fn(tail_if, &[Type::Bool])?, Type::I32);
+        // 无后缀整数字面量默认 I64
+        assert_eq!(compiler.infer_fn(tail_if, &[Type::Bool])?, Type::I64);
 
         let loop_index = compiler.symbols.get_id("compiler_return_check_args::loop_index")?;
         assert_eq!(compiler.infer_fn(loop_index, &[Type::I64, Type::I64])?, Type::I64);

@@ -231,13 +231,14 @@ impl JITRunTime {
         match op {
             UnaryOp::Neg => {
                 if left.1.is_int() || left.1.is_uint() {
-                    if left.1.width() == 8 {
-                        let zero = ctx.builder.ins().iconst(types::I64, 0);
-                        return Ok((ctx.builder.ins().isub(zero, left.0), Type::I64));
-                    } else if left.1.width() == 4 {
-                        let zero = ctx.builder.ins().iconst(types::I32, 0);
-                        return Ok((ctx.builder.ins().isub(zero, left.0), Type::I32));
-                    }
+                    let (int_ty, result_ty) = match left.1.width() {
+                        8 => (types::I64, Type::I64),
+                        4 => (types::I32, Type::I32),
+                        2 => (types::I16, Type::I16),
+                        _ => (types::I8, Type::I8),
+                    };
+                    let zero = ctx.builder.ins().iconst(int_ty, 0);
+                    return Ok((ctx.builder.ins().isub(zero, left.0), result_ty));
                 } else if left.1.is_float() {
                     return Ok((ctx.builder.ins().fneg(left.0), left.1));
                 }

@@ -634,6 +634,32 @@ mod tests {
     }
 
     #[test]
+    fn negate_narrow_integers() -> anyhow::Result<()> {
+        let vm = Vm::with_all()?;
+        vm.import_code(
+            "vm_neg_narrow",
+            br#"
+            pub fn neg_i8(a: i8) { -a }
+            pub fn neg_i16(a: i16) { -a }
+            "#
+            .to_vec(),
+        )?;
+
+        let neg_i8 = vm.get_fn("vm_neg_narrow::neg_i8", &[Type::I8])?;
+        assert_eq!(neg_i8.ret_ty(), &Type::I8);
+        let neg_i8: extern "C" fn(i8) -> i8 = unsafe { std::mem::transmute(neg_i8.ptr()) };
+        assert_eq!(neg_i8(5), -5);
+        assert_eq!(neg_i8(-7), 7);
+
+        let neg_i16 = vm.get_fn("vm_neg_narrow::neg_i16", &[Type::I16])?;
+        assert_eq!(neg_i16.ret_ty(), &Type::I16);
+        let neg_i16: extern "C" fn(i16) -> i16 = unsafe { std::mem::transmute(neg_i16.ptr()) };
+        assert_eq!(neg_i16(5), -5);
+        assert_eq!(neg_i16(-300), 300);
+        Ok(())
+    }
+
+    #[test]
     fn integer_divide_by_zero_does_not_crash() -> anyhow::Result<()> {
         let vm = Vm::with_all()?;
         vm.import_code(
@@ -1387,7 +1413,7 @@ mod tests {
 
         assert_eq!(vm.infer("root::contains", &[Type::Any])?, Type::Bool);
         let compiled = vm.get_fn("vm_root_contains_condition::exists", &[Type::Any])?;
-        assert_eq!(compiled.ret_ty(), &Type::I32);
+        assert_eq!(compiled.ret_ty(), &Type::I64);
         Ok(())
     }
 
@@ -1451,7 +1477,7 @@ mod tests {
         )?;
 
         let compiled = vm.get_fn("vm_unary_not_any_loop_var::count_missing", &[Type::Any])?;
-        assert_eq!(compiled.ret_ty(), &Type::I32);
+        assert_eq!(compiled.ret_ty(), &Type::I64);
         Ok(())
     }
 
@@ -3308,14 +3334,15 @@ mod tests {
             .to_vec(),
         )?;
 
+        // 无后缀 range 字面量(0..0 / 5..=5)默认 I64,累加器随复合赋值提升为 I64
         let compiled = vm.get_fn("vm_empty_for_range::empty_exclusive", &[])?;
-        assert_eq!(compiled.ret_ty(), &Type::I32);
-        let empty_exclusive: extern "C" fn() -> i32 = unsafe { std::mem::transmute(compiled.ptr()) };
+        assert_eq!(compiled.ret_ty(), &Type::I64);
+        let empty_exclusive: extern "C" fn() -> i64 = unsafe { std::mem::transmute(compiled.ptr()) };
         assert_eq!(empty_exclusive(), 0);
 
         let compiled = vm.get_fn("vm_empty_for_range::single_inclusive_iteration", &[])?;
-        assert_eq!(compiled.ret_ty(), &Type::I32);
-        let single_inclusive: extern "C" fn() -> i32 = unsafe { std::mem::transmute(compiled.ptr()) };
+        assert_eq!(compiled.ret_ty(), &Type::I64);
+        let single_inclusive: extern "C" fn() -> i64 = unsafe { std::mem::transmute(compiled.ptr()) };
         assert_eq!(single_inclusive(), 5);
         Ok(())
     }
@@ -3434,8 +3461,8 @@ mod tests {
         )?;
 
         let compiled = vm.get_fn("vm_any_method_chain::get_tags", &[Type::Any])?;
-        assert_eq!(compiled.ret_ty(), &Type::I32);
-        let get_tags: extern "C" fn(*const Dynamic) -> i32 = unsafe { std::mem::transmute(compiled.ptr()) };
+        assert_eq!(compiled.ret_ty(), &Type::I64);
+        let get_tags: extern "C" fn(*const Dynamic) -> i64 = unsafe { std::mem::transmute(compiled.ptr()) };
         let data = dynamic::map!("tags"=> Dynamic::list(vec!["a".into(), "b".into(), "c".into()]));
         assert_eq!(get_tags(&data), 3);
 

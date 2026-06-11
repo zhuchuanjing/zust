@@ -40,7 +40,17 @@ pub struct Parser {
     spans: Vec<usize>,
     decl_scopes: Vec<BTreeSet<SmolStr>>,
     impl_depth: usize,
+    depth: usize, //当前表达式/语句递归深度,防止恶意深嵌套输入打爆调用栈
+    fatal: bool,  //递归过深等不可恢复错误;置位后所有解析入口立即失败,避免回溯重试导致死循环
 }
+
+/// 解析递归深度上限。超过即返回 [`ParserErr::TooDeep`],把"栈溢出崩溃"降级为
+/// 普通解析错误。
+///
+/// 单层 `expr_with_min_weight` 帧约 7KB,worker 线程默认栈仅 2MB,因此上限取
+/// 128(与 rustc 默认 `recursion_limit` 一致):128×7KB≈0.9MB,在最小栈上仍有
+/// 余量,而正常代码极少超过几十层嵌套。
+pub const MAX_PARSE_DEPTH: usize = 128;
 
 const NOT_IDENT: &[u8] = &[b' ', b'\t', b'\n', b'\r', b'/', b'*', b'+', b'-', b'=', b'(', b')', b'{', b'}', b'[', b']', b';', b':', b',', b'.', b'<', b'>', b'!', b'#', b'$', b'%', b'^', b'&', b'|', b'\\', b'"', b'\''];
 const WHITE_SPACE: &[u8] = &[b' ', b'\t', b'\n', b'\r'];
@@ -90,6 +100,8 @@ macro_rules! try_parse {
         let save_impl_depth = $self.impl_depth;
         match $method {
             Ok(expr) => Ok(expr),
+            // fatal(如递归过深)不可恢复:不回退 pos,直接上抛,避免外层换产生式重试导致死循环
+            Err(e) if $self.fatal => Err(e),
             Err(e) => {
                 $self.pos = save_pos;
                 $self.decl_scopes = save_decl_scopes;
@@ -122,11 +134,38 @@ pub enum ParserErr {
     NotNumber,
     #[error("符号 {0} 已经声明")]
     DuplicateSymbol(SmolStr),
+    #[error("表达式嵌套过深")]
+    TooDeep,
 }
 
 impl Parser {
     pub fn new(buf: Vec<u8>) -> Self {
-        Self { pos: 0, buf, spans: Vec::new(), decl_scopes: vec![BTreeSet::new()], impl_depth: 0 }
+        Self { pos: 0, buf, spans: Vec::new(), decl_scopes: vec![BTreeSet::new()], impl_depth: 0, depth: 0, fatal: false }
+    }
+
+    /// 进入一层递归:自增深度并校验上限。配合 [`Parser::exit_depth`] 使用。
+    ///
+    /// 超限时置 [`Parser::fatal`]:这是不可恢复错误。否则 `try_parse!` 的回溯会
+    /// 把 [`ParserErr::TooDeep`] 当成"换个产生式再试",pos 回退后外层循环原地重试,
+    /// 形成死循环。置位后 [`Parser::check_fatal`] 让每个解析入口立即失败,错误一路
+    /// 通过 `?` 上抛终止解析。
+    fn enter_depth(&mut self) -> Result<()> {
+        self.depth += 1;
+        if self.depth > MAX_PARSE_DEPTH {
+            self.depth -= 1;
+            self.fatal = true;
+            return Err(ParserErr::TooDeep.into());
+        }
+        Ok(())
+    }
+
+    fn exit_depth(&mut self) {
+        self.depth = self.depth.saturating_sub(1);
+    }
+
+    /// 解析入口的快速失败检查:一旦进入 fatal 状态,立即返回错误,阻止任何回溯重试。
+    fn check_fatal(&self) -> Result<()> {
+        if self.fatal { Err(ParserErr::TooDeep.into()) } else { Ok(()) }
     }
 
     fn push_decl_scope(&mut self) {
@@ -564,18 +603,44 @@ impl Parser {
     }
 
     fn int_literal(&mut self, digits: &str, radix: u32, suffix: Option<Type>) -> Result<Dynamic> {
-        Ok(match suffix.unwrap_or(Type::I32) {
-            Type::I8 => Dynamic::I8(i128::from_str_radix(digits, radix)? as i8),
-            Type::I16 => Dynamic::I16(i128::from_str_radix(digits, radix)? as i16),
-            Type::I32 => Dynamic::I32(i128::from_str_radix(digits, radix)? as i32),
-            Type::I64 => Dynamic::I64(i128::from_str_radix(digits, radix)? as i64),
-            Type::U8 => Dynamic::U8(u128::from_str_radix(digits, radix)? as u8),
-            Type::U16 => Dynamic::U16(u128::from_str_radix(digits, radix)? as u16),
-            Type::U32 => Dynamic::U32(u128::from_str_radix(digits, radix)? as u32),
-            Type::U64 => Dynamic::U64(u128::from_str_radix(digits, radix)? as u64),
-            Type::F32 => Dynamic::F32(u128::from_str_radix(digits, radix)? as f32),
-            Type::F64 => Dynamic::F64(u128::from_str_radix(digits, radix)? as f64),
+        // 默认整数类型为 I64:常见的较大十进制数(如 30 亿)不再静默回绕成负数。
+        let ty = suffix.unwrap_or(Type::I64);
+        // 负号由一元运算符单独解析,这里的字面量恒为非负,因此统一解析成 u128。
+        let magnitude = u128::from_str_radix(digits, radix).map_err(|_| anyhow!("整数字面量 {} 超出可表示范围", digits))?;
+        let (signed, bits) = match ty {
+            Type::I8 => (true, 8u32),
+            Type::I16 => (true, 16),
+            Type::I32 => (true, 32),
+            Type::I64 => (true, 64),
+            Type::U8 => (false, 8),
+            Type::U16 => (false, 16),
+            Type::U32 => (false, 32),
+            Type::U64 => (false, 64),
+            Type::F32 => return Ok(Dynamic::F32(magnitude as f32)),
+            Type::F64 => return Ok(Dynamic::F64(magnitude as f64)),
             ty => return Err(anyhow!("{:?} 不能作为数字后缀", ty)),
+        };
+        let unsigned_max = (1u128 << bits) - 1;
+        // 十进制按数值语义判界(有符号允许到 |MIN|,即 2^(bits-1),以支持 -128i8、i64::MIN);
+        // 十六/八/二进制按位模式语义判界,允许写满整型位宽(如 0xFFFFFFFF 仍是合法的位掩码)。
+        let max_allowed = if radix == 10 {
+            if signed { unsigned_max / 2 + 1 } else { unsigned_max }
+        } else {
+            unsigned_max
+        };
+        if magnitude > max_allowed {
+            return Err(anyhow!("整数字面量 {} 超出 {:?} 的范围", digits, ty));
+        }
+        Ok(match ty {
+            Type::I8 => Dynamic::I8(magnitude as i8),
+            Type::I16 => Dynamic::I16(magnitude as i16),
+            Type::I32 => Dynamic::I32(magnitude as i32),
+            Type::I64 => Dynamic::I64(magnitude as i64),
+            Type::U8 => Dynamic::U8(magnitude as u8),
+            Type::U16 => Dynamic::U16(magnitude as u16),
+            Type::U32 => Dynamic::U32(magnitude as u32),
+            Type::U64 => Dynamic::U64(magnitude as u64),
+            _ => unreachable!(),
         })
     }
 
@@ -673,6 +738,83 @@ mod tests {
                 }
             }
         }
+    }
+
+    // 调试构建里单帧约 16KB,病态深嵌套即便有深度守卫也会在守卫触发"之前"打爆
+    // 测试线程默认 2MB 栈;因此用大栈线程跑,验证守卫确实返回 TooDeep(而非崩溃)。
+    // 生产是 release 构建,单帧仅数 KB,128 层上限在 8MB 主栈上余量充足。
+    fn run_with_big_stack(f: impl FnOnce() + Send + 'static) {
+        std::thread::Builder::new().stack_size(64 * 1024 * 1024).spawn(f).unwrap().join().unwrap();
+    }
+
+    #[test]
+    fn deeply_nested_parens_error_instead_of_stack_overflow() {
+        run_with_big_stack(|| {
+            let depth = MAX_PARSE_DEPTH + 50;
+            let code = format!("{}1{}", "(".repeat(depth), ")".repeat(depth));
+            let mut parser = Parser::new(code.into_bytes());
+            let err = parser.get_expr().unwrap_err();
+            assert!(err.to_string().contains("嵌套过深"), "got: {err}");
+        });
+    }
+
+    #[test]
+    fn deeply_nested_blocks_error_instead_of_stack_overflow() {
+        run_with_big_stack(|| {
+            let depth = MAX_PARSE_DEPTH + 50;
+            let code = format!("fn f() {}{}{}", "{".repeat(depth), "1", "}".repeat(depth));
+            let err = parse_all(&code).unwrap_err();
+            assert!(err.to_string().contains("嵌套过深"), "got: {err}");
+        });
+    }
+
+    #[test]
+    fn normal_nesting_within_limit_parses() {
+        // 远低于上限的正常嵌套不受影响
+        let code = format!("{}1{}", "(".repeat(32), ")".repeat(32));
+        let mut parser = Parser::new(code.into_bytes());
+        parser.get_expr().unwrap();
+    }
+
+    fn parse_literal(code: &str) -> Result<Dynamic> {
+        let mut parser = Parser::new(code.as_bytes().to_vec());
+        match parser.get_expr()?.kind {
+            crate::ExprKind::Value(value) => Ok(value),
+            other => Err(anyhow!("不是字面量: {:?}", other)),
+        }
+    }
+
+    #[test]
+    fn unsuffixed_integer_defaults_to_i64() {
+        assert_eq!(parse_literal("5").unwrap(), Dynamic::I64(5));
+        // 30 亿:旧的 I32 默认会静默回绕成负数,I64 默认保留正确数值
+        assert_eq!(parse_literal("3000000000").unwrap(), Dynamic::I64(3000000000));
+    }
+
+    #[test]
+    fn out_of_range_integer_literals_error() {
+        // 超出 u64,连 i128 解析也容纳不下 → 报错而非回绕
+        assert!(parse_literal("99999999999999999999999999999999999999999").is_err());
+        // 窄后缀越界
+        assert!(parse_literal("255i8").unwrap_err().to_string().contains("超出"));
+        assert!(parse_literal("70000i16").unwrap_err().to_string().contains("超出"));
+        assert!(parse_literal("256u8").unwrap_err().to_string().contains("超出"));
+    }
+
+    #[test]
+    fn signed_min_magnitude_literals_allowed() {
+        // -128i8 由一元负号 + 字面量 128 组成,字面量 128 必须可被接受
+        assert_eq!(parse_literal("128i8").unwrap(), Dynamic::I8(-128));
+        assert_eq!(parse_literal("9223372036854775808").unwrap(), Dynamic::I64(i64::MIN));
+    }
+
+    #[test]
+    fn hex_literals_keep_bit_pattern() {
+        // 十六进制按位模式语义:0xFFFFFFFF 是合法掩码,默认 I64 容纳为正值
+        assert_eq!(parse_literal("0xFFFFFFFF").unwrap(), Dynamic::I64(0xFFFFFFFF));
+        // 写满目标位宽的掩码允许通过(0xFF -> i8 的 -1)
+        assert_eq!(parse_literal("0xFFi8").unwrap(), Dynamic::I8(-1));
+        assert_eq!(parse_literal("0xFFFFFFFFu32").unwrap(), Dynamic::U32(u32::MAX));
     }
 
     #[test]

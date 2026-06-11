@@ -536,11 +536,15 @@ impl Parser {
     }
 
     pub fn base_expr(&mut self, allow_struct_literal: bool) -> Result<Expr> {
+        self.check_fatal()?;
         let start = self.current_pos();
         if let Ok(s) = self.text() {
             let expr = Expr::new(ExprKind::Value(Dynamic::String(s)), self.span_from(start));
             self.postfix_expr(start, expr)
-        } else if let Ok(n) = self.number() {
+        } else if self.get().map(|c| c.is_ascii_digit()).unwrap_or(false) {
+            // 数字开头一定是数字字面量:解析失败(如越界)直接上抛,
+            // 不要回落到其它产生式而把"超出范围"错误吞成笼统的"期望表达式"。
+            let n = self.number()?;
             let expr = if let Ok(ty) = self.get_type() {
                 if ty.is_native() {
                     Expr::new(ExprKind::Typed { value: Box::new(Expr::new(ExprKind::Value(n), self.span_from(start))), ty }, self.span_from(start))
@@ -694,6 +698,14 @@ impl Parser {
     }
 
     fn expr_with_min_weight(&mut self, left: Option<(Expr, bool)>, left_op: Option<BinaryOp>, min_weight: usize, allow_struct_literal: bool) -> Result<(Expr, bool)> {
+        self.check_fatal()?;
+        self.enter_depth()?;
+        let result = self.expr_with_min_weight_inner(left, left_op, min_weight, allow_struct_literal);
+        self.exit_depth();
+        result
+    }
+
+    fn expr_with_min_weight_inner(&mut self, left: Option<(Expr, bool)>, left_op: Option<BinaryOp>, min_weight: usize, allow_struct_literal: bool) -> Result<(Expr, bool)> {
         self.whitespace()?;
         if self.is_eof() {
             return left.ok_or(ParserErr::EndofInput.into());

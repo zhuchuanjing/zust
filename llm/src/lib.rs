@@ -1,7 +1,27 @@
 use anyhow::{Result, anyhow};
 use dynamic::{Dynamic, FromJson, ToJson};
+use std::io::Write;
 
 pub mod oss;
+
+fn debug_log_event(options: &Dynamic, event: Dynamic) {
+    let Some(path) = options.get_dynamic("debug_log_file") else {
+        return;
+    };
+    let path = path.as_str().to_string();
+    if path.is_empty() {
+        return;
+    }
+    let path = std::path::PathBuf::from(path);
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let mut line = String::new();
+    event.to_json(&mut line);
+    if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+        let _ = writeln!(file, "{line}");
+    }
+}
 
 pub fn to_markdown(d: &Dynamic, buf: &mut String) {
     if d.is_vec() {
@@ -579,6 +599,16 @@ async fn poll_image_task(options: &Dynamic, task_id: &str) -> Result<Dynamic> {
         let resp = req.send().await?;
         let status = resp.status();
         let text = resp.text().await?;
+        debug_log_event(
+            options,
+            map!(
+                "event"=> "llm_image_task_poll_response",
+                "url"=> task_url.clone(),
+                "taskId"=> task_id,
+                "status"=> status.as_u16() as i64,
+                "body"=> text.clone()
+            ),
+        );
         if !status.is_success() {
             return Err(anyhow!("图片任务查询失败 HTTP {}: {}", status.as_u16(), text.trim()));
         }
@@ -882,6 +912,15 @@ pub async fn post_binary(method: &str, openai: Dynamic, msg: Dynamic) -> Result<
     let mut body_str = String::new();
     msg.to_json(&mut body_str);
     log::info!("{}", body_str);
+    debug_log_event(
+        &openai,
+        map!(
+            "event"=> "llm_http_request",
+            "method"=> method,
+            "url"=> format!("{}/{}", url.as_str(), method),
+            "body"=> body_str.clone()
+        ),
+    );
 
     let resp = if let Some(token) = token {
         client.post(&format!("{}/{}", url.as_str(), method)).header("Content-Type", "application/json").header("authorization", format!("Bearer {}", token)).body(body_str).send().await?
@@ -1001,6 +1040,16 @@ pub async fn post(method: &str, openai: Dynamic, msg: Dynamic, tx: Option<Dynami
         tx.as_ref().map(|tx| notify(tx, Dynamic::Null));
     }
     log::info!("{:#?}", &text);
+    debug_log_event(
+        &openai,
+        map!(
+            "event"=> "llm_http_response",
+            "method"=> method,
+            "url"=> format!("{}/{}", url.as_str(), method),
+            "status"=> status.as_u16() as i64,
+            "body"=> text.clone()
+        ),
+    );
     if !status.is_success() {
         return Err(anyhow!("LLM 请求失败 HTTP {}: {}", status.as_u16(), text.trim()));
     }

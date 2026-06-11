@@ -485,11 +485,7 @@ impl JITRunTime {
         log::debug!("binary_with_expected fallback to dynamic: {:?} {:?} {:?}", ty, op, right);
         let left_any = self.convert(ctx, (left, ty.clone()), Type::Any)?;
         let right_any = self.convert(ctx, (right, ty.clone()), Type::Any)?;
-        if op.is_logic() {
-            self.any_logic(ctx, left_any, op, right_any)
-        } else {
-            self.any_binary(ctx, left_any, op, right_any)
-        }
+        if op.is_logic() { self.any_logic(ctx, left_any, op, right_any) } else { self.any_binary(ctx, left_any, op, right_any) }
     }
 
     pub(crate) fn binary_imm<'a>(&mut self, ctx: &'a mut BuildContext, left: (Value, Type), op: BinaryOp, right: Dynamic) -> Result<(Value, Type)> {
@@ -685,10 +681,6 @@ impl JITRunTime {
             self.get_const_value(ctx, idx)
         })?;
         let right_any = self.convert(ctx, right_vt, Type::Any)?;
-        if op.is_logic() {
-            self.any_logic(ctx, left_any, op, right_any)
-        } else {
-            self.any_binary(ctx, left_any, op, right_any)
-        }
+        if op.is_logic() { self.any_logic(ctx, left_any, op, right_any) } else { self.any_binary(ctx, left_any, op, right_any) }
     }
 }

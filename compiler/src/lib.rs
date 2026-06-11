@@ -1548,7 +1548,7 @@ impl Compiler {
                     return Ok(Expr::new(ExprKind::Capture(idx as u32), expr.span));
                 }
                 self.get_ident(ident, expr.span)
-            },
+            }
             ExprKind::Generic { obj, params } => {
                 let obj = self.eval(obj, stmts, cap)?;
                 let params = params.iter().map(|param| self.symbols.get_type(param).unwrap_or_else(|_| param.clone())).collect();

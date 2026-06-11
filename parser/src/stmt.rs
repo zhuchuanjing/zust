@@ -111,11 +111,15 @@ impl Stmt {
         } else {
             match &mut self.kind {
                 StmtKind::Block(stmts) => {
-                    if let Some(stmt) = stmts.last_mut() { stmt.bind_pattern(pat)?; }
+                    if let Some(stmt) = stmts.last_mut() {
+                        stmt.bind_pattern(pat)?;
+                    }
                 }
                 StmtKind::If { then_body, else_body, .. } => {
                     then_body.bind_pattern(pat.clone())?;
-                    if let Some(e) = else_body { e.bind_pattern(pat)?; }
+                    if let Some(e) = else_body {
+                        e.bind_pattern(pat)?;
+                    }
                 }
                 _ => {}
             }
@@ -154,9 +158,7 @@ impl fmt::Display for Stmt {
                 }
                 write!(f, "{}", body)?;
             }
-            _ => {
-                write!(f, "(todo display: {:?})", self.kind)?
-            }
+            _ => write!(f, "(todo display: {:?})", self.kind)?,
         }
         fmt::Result::Ok(())
     }

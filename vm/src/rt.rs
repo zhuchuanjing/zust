@@ -1443,28 +1443,64 @@ impl JITRunTime {
             StmtKind::For { pat, range, body } => {
                 if let ExprKind::Range { start, stop, inclusive } = &range.kind {
                     if let PatternKind::Var { idx, .. } = &pat.kind {
-                        let start = self.eval(ctx, start)?;
-                        ctx.set_var(*idx, start)?;
+                        let start = self.eval(ctx, start)?.get(ctx).ok_or(anyhow!("range start has no value"))?;
+                        let stop = self.eval(ctx, stop)?.get(ctx).ok_or(anyhow!("range stop has no value"))?;
+                        let range_ty = if start.1.is_any() && stop.1.is_any() {
+                            Type::I64
+                        } else if start.1.is_any() {
+                            stop.1.clone()
+                        } else if stop.1.is_any() {
+                            start.1.clone()
+                        } else {
+                            start.1.clone() + stop.1.clone()
+                        };
+                        if !range_ty.is_int() && !range_ty.is_uint() {
+                            anyhow::bail!("for range bounds must be integer, got {:?}", range_ty);
+                        }
+                        let start = self.convert(ctx, start, range_ty.clone())?;
+                        let stop = self.convert(ctx, stop, range_ty.clone())?;
+                        ctx.set_var(*idx, (start, range_ty.clone()).into())?;
                         self.declare_assigned_vars(ctx, body)?;
-                        let op = if *inclusive { BinaryOp::Le } else { BinaryOp::Lt };
-                        let cond = Self::expr(ExprKind::Binary { left: Box::new(Self::expr(ExprKind::Var(*idx))), op, right: Box::new(stop.as_ref().clone()) });
-                        self.gen_loop(
-                            ctx,
-                            Some(&cond),
-                            body,
-                            Some(|ctx: &mut BuildContext| {
-                                let v = ctx.get_var(*idx).unwrap().get(ctx).unwrap();
-                                let step = match &v.1 {
-                                    Type::I64 | Type::U64 => ctx.builder.ins().iconst(types::I64, 1),
-                                    Type::I32 | Type::U32 => ctx.builder.ins().iconst(types::I32, 1),
-                                    Type::I16 | Type::U16 => ctx.builder.ins().iconst(types::I16, 1),
-                                    Type::I8 | Type::U8 => ctx.builder.ins().iconst(types::I8, 1),
-                                    _ => ctx.builder.ins().iconst(types::I64, 1),
-                                };
-                                let vt = (ctx.builder.ins().iadd(v.0, step), v.1).into();
-                                let _ = ctx.set_var(*idx, vt);
-                            }),
-                        )?;
+
+                        let start_block = ctx.builder.create_block();
+                        let body_block = ctx.builder.create_block();
+                        let continue_block = ctx.builder.create_block();
+                        let end_block = ctx.builder.create_block();
+                        ctx.builder.ins().jump(start_block, &[]);
+
+                        ctx.builder.switch_to_block(start_block);
+                        let current = ctx.get_var(*idx)?.get(ctx).ok_or(anyhow!("range loop variable has no value"))?;
+                        let cond = if range_ty.is_uint() {
+                            let op = if *inclusive { IntCC::UnsignedLessThanOrEqual } else { IntCC::UnsignedLessThan };
+                            ctx.builder.ins().icmp(op, current.0, stop)
+                        } else {
+                            let op = if *inclusive { IntCC::SignedLessThanOrEqual } else { IntCC::SignedLessThan };
+                            ctx.builder.ins().icmp(op, current.0, stop)
+                        };
+                        ctx.builder.ins().brif(cond, body_block, &[], end_block, &[]);
+
+                        ctx.builder.switch_to_block(body_block);
+                        let body_terminated = self.gen_stmt(ctx, body, Some(end_block), Some(continue_block))?;
+                        if !body_terminated {
+                            ctx.builder.ins().jump(continue_block, &[]);
+                        }
+                        ctx.builder.seal_block(body_block);
+
+                        ctx.builder.switch_to_block(continue_block);
+                        let current = ctx.get_var(*idx)?.get(ctx).ok_or(anyhow!("range loop variable has no value"))?;
+                        let step = match &range_ty {
+                            Type::I64 | Type::U64 => ctx.builder.ins().iconst(types::I64, 1),
+                            Type::I32 | Type::U32 => ctx.builder.ins().iconst(types::I32, 1),
+                            Type::I16 | Type::U16 => ctx.builder.ins().iconst(types::I16, 1),
+                            Type::I8 | Type::U8 => ctx.builder.ins().iconst(types::I8, 1),
+                            _ => unreachable!(),
+                        };
+                        let next = ctx.builder.ins().iadd(current.0, step);
+                        ctx.set_var(*idx, (next, range_ty).into())?;
+                        ctx.builder.ins().jump(start_block, &[]);
+                        ctx.builder.seal_block(continue_block);
+                        ctx.builder.seal_block(start_block);
+                        ctx.builder.switch_to_block(end_block);
                     }
                 } else if let PatternKind::Var { idx, .. } = &pat.kind {
                     let vt = self.eval(ctx, range)?.get(ctx).unwrap();

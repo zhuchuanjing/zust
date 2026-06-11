@@ -84,13 +84,7 @@ fn zusts_path(path: &str) -> PathBuf {
 }
 
 fn vm_import_file(vm: &vm::Vm, name: &str, path: &str) -> Result<()> {
-    vm.jit
-        .write()
-        .unwrap()
-        .compiler
-        .import_file(name, zusts_path(path).to_str().expect("zust test path is valid utf-8"))
-        .map(|_| ())
-        .with_context(|| format!("import {path} as {name}"))
+    vm.jit.write().unwrap().compiler.import_file(name, zusts_path(path).to_str().expect("zust test path is valid utf-8")).map(|_| ()).with_context(|| format!("import {path} as {name}"))
 }
 
 fn run_test(vm: &vm::Vm, fn_name: &str, tys: &[Type]) -> Result<()> {

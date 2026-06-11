@@ -353,8 +353,12 @@ mod tests {
     }
 
     impl TestFn {
-        fn ptr(&self) -> *const u8 { self.ptr }
-        fn ret_ty(&self) -> &Type { &self.ret }
+        fn ptr(&self) -> *const u8 {
+            self.ptr
+        }
+        fn ret_ty(&self) -> &Type {
+            &self.ret
+        }
     }
 
     /// Test-only convenience wrapping `vm.jit.write().unwrap()` calls.
@@ -989,6 +993,57 @@ mod tests {
         let non_map_keys: extern "C" fn(*const Dynamic) -> bool = unsafe { std::mem::transmute(compiled.ptr()) };
         let value = Dynamic::from("alpha");
         assert!(non_map_keys(&value));
+        Ok(())
+    }
+
+    #[test]
+    fn any_logic_comparisons_use_bool_abi() -> anyhow::Result<()> {
+        let vm = Vm::with_all()?;
+        vm.import_code(
+            "vm_any_logic_abi",
+            br#"
+            pub fn ne_empty(value) {
+                value != ""
+            }
+
+            pub fn eq_empty(value) {
+                value == ""
+            }
+
+            pub fn less_than_ten(value) {
+                value < 10
+            }
+
+            pub fn contains_key(value) {
+                value.contains("alpha") == true
+            }
+            "#
+            .to_vec(),
+        )?;
+
+        let compiled = vm.get_fn("vm_any_logic_abi::ne_empty", &[Type::Any])?;
+        assert_eq!(compiled.ret_ty(), &Type::Bool);
+        let ne_empty: extern "C" fn(*const Dynamic) -> bool = unsafe { std::mem::transmute(compiled.ptr()) };
+        assert!(ne_empty(&Dynamic::from("x")));
+        assert!(!ne_empty(&Dynamic::from("")));
+
+        let compiled = vm.get_fn("vm_any_logic_abi::eq_empty", &[Type::Any])?;
+        assert_eq!(compiled.ret_ty(), &Type::Bool);
+        let eq_empty: extern "C" fn(*const Dynamic) -> bool = unsafe { std::mem::transmute(compiled.ptr()) };
+        assert!(eq_empty(&Dynamic::from("")));
+        assert!(!eq_empty(&Dynamic::from("x")));
+
+        let compiled = vm.get_fn("vm_any_logic_abi::less_than_ten", &[Type::Any])?;
+        assert_eq!(compiled.ret_ty(), &Type::Bool);
+        let less_than_ten: extern "C" fn(*const Dynamic) -> bool = unsafe { std::mem::transmute(compiled.ptr()) };
+        assert!(less_than_ten(&Dynamic::from(4i64)));
+        assert!(!less_than_ten(&Dynamic::from(14i64)));
+
+        let compiled = vm.get_fn("vm_any_logic_abi::contains_key", &[Type::Any])?;
+        assert_eq!(compiled.ret_ty(), &Type::Bool);
+        let contains_key: extern "C" fn(*const Dynamic) -> bool = unsafe { std::mem::transmute(compiled.ptr()) };
+        assert!(contains_key(&dynamic::map!("alpha"=> 1i64)));
+        assert!(!contains_key(&dynamic::map!("beta"=> 1i64)));
         Ok(())
     }
 
@@ -3397,6 +3452,37 @@ mod tests {
         assert_eq!(compiled.ret_ty(), &Type::I64);
         let single_inclusive: extern "C" fn() -> i64 = unsafe { std::mem::transmute(compiled.ptr()) };
         assert_eq!(single_inclusive(), 5);
+        Ok(())
+    }
+
+    #[test]
+    fn for_loop_range_accepts_dynamic_i64_bounds() -> anyhow::Result<()> {
+        let vm = Vm::with_all()?;
+        vm.import_code(
+            "vm_dynamic_for_range",
+            br#"
+            pub fn main() {
+                let view = {};
+                view.grid_min_x = -2i64;
+                view.grid_max_x = 2i64;
+
+                let end_x = view.grid_max_x + 1i64;
+                let count = 0i64;
+
+                for x in view.grid_min_x..end_x {
+                    count += 1i64;
+                }
+
+                count
+            }
+            "#
+            .to_vec(),
+        )?;
+
+        let compiled = vm.get_fn("vm_dynamic_for_range::main", &[])?;
+        assert_eq!(compiled.ret_ty(), &Type::I64);
+        let main: extern "C" fn() -> i64 = unsafe { std::mem::transmute(compiled.ptr()) };
+        assert_eq!(main(), 5);
         Ok(())
     }
 

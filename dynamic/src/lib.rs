@@ -1,6 +1,6 @@
 use bytemuck::{AnyBitPattern, NoUninit, cast_slice, cast_slice_mut};
-use smol_str::SmolStr;
 use indexmap::IndexMap;
+use smol_str::SmolStr;
 use std::any::Any;
 use std::collections::BTreeMap;
 use std::mem;

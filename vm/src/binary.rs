@@ -217,6 +217,60 @@ impl JITRunTime {
         }
     }
 
+    /// 整数除法 / 取余的运行期守卫。
+    ///
+    /// Cranelift 的 `sdiv/udiv/srem/urem` 在除数为 0(有符号还有 `INT_MIN/-1`)时
+    /// 发出硬件 trap,会直接杀掉进程且无法被 `catch_unwind` 捕获。这里在除法前
+    /// 分支:除数非法时调用 `__vm_arith_fault` 记录运行期错误并返回 0,合法时才
+    /// 进入真正的除法块(此时除数可证非 0,trap 永不触发)。
+    fn guarded_idiv(&mut self, ctx: &mut BuildContext, left: Value, right: Value, signed: bool, is_rem: bool) -> Result<Value> {
+        use cranelift::codegen::ir::BlockArg;
+        let int_ty = ctx.builder.func.dfg.value_type(left);
+        let is_zero = ctx.builder.ins().icmp_imm(IntCC::Equal, right, 0);
+        let is_bad = if signed {
+            let min = match int_ty.bits() {
+                8 => i8::MIN as i64,
+                16 => i16::MIN as i64,
+                32 => i32::MIN as i64,
+                _ => i64::MIN,
+            };
+            let is_min = ctx.builder.ins().icmp_imm(IntCC::Equal, left, min);
+            let is_neg_one = ctx.builder.ins().icmp_imm(IntCC::Equal, right, -1);
+            let is_overflow = ctx.builder.ins().band(is_min, is_neg_one);
+            ctx.builder.ins().bor(is_zero, is_overflow)
+        } else {
+            is_zero
+        };
+
+        let ok_block = ctx.builder.create_block();
+        let bad_block = ctx.builder.create_block();
+        let merge_block = ctx.builder.create_block();
+        ctx.builder.append_block_param(merge_block, int_ty);
+        ctx.builder.ins().brif(is_bad, bad_block, &[], ok_block, &[]);
+
+        ctx.builder.switch_to_block(ok_block);
+        let raw = match (signed, is_rem) {
+            (true, false) => ctx.builder.ins().sdiv(left, right),
+            (false, false) => ctx.builder.ins().udiv(left, right),
+            (true, true) => ctx.builder.ins().srem(left, right),
+            (false, true) => ctx.builder.ins().urem(left, right),
+        };
+        ctx.builder.ins().jump(merge_block, &[BlockArg::Value(raw)]);
+        ctx.builder.seal_block(ok_block);
+
+        ctx.builder.switch_to_block(bad_block);
+        let fault_fn = self.arith_fault_fn.ok_or_else(|| anyhow!("VM arith fault runtime is not registered"))?;
+        let fault_ref = self.get_fn_ref(ctx, fault_fn);
+        ctx.builder.ins().call(fault_ref, &[]);
+        let zero = ctx.builder.ins().iconst(int_ty, 0);
+        ctx.builder.ins().jump(merge_block, &[BlockArg::Value(zero)]);
+        ctx.builder.seal_block(bad_block);
+
+        ctx.builder.switch_to_block(merge_block);
+        ctx.builder.seal_block(merge_block);
+        Ok(ctx.builder.block_params(merge_block)[0])
+    }
+
     pub(crate) fn binary_with_expected(&mut self, ctx: &mut BuildContext, left: (Value, Type), op: BinaryOp, right: &Expr, expected: Option<&Type>) -> Result<(Value, Type)> {
         //处理可以计算的简单情形
         if matches!(op, BinaryOp::And | BinaryOp::Or) {
@@ -313,18 +367,18 @@ impl JITRunTime {
             }
             BinaryOp::Div | BinaryOp::DivAssign => {
                 if ty.is_int() {
-                    return Ok((ctx.builder.ins().sdiv(left, right), ty));
+                    return Ok((self.guarded_idiv(ctx, left, right, true, false)?, ty));
                 } else if ty.is_uint() {
-                    return Ok((ctx.builder.ins().udiv(left, right), ty));
+                    return Ok((self.guarded_idiv(ctx, left, right, false, false)?, ty));
                 } else if ty.is_float() {
                     return Ok((ctx.builder.ins().fdiv(left, right), ty));
                 }
             }
             BinaryOp::Mod | BinaryOp::ModAssign => {
                 if ty.is_int() {
-                    return Ok((ctx.builder.ins().srem(left, right), ty));
+                    return Ok((self.guarded_idiv(ctx, left, right, true, true)?, ty));
                 } else if ty.is_uint() {
-                    return Ok((ctx.builder.ins().urem(left, right), ty));
+                    return Ok((self.guarded_idiv(ctx, left, right, false, true)?, ty));
                 }
             }
             BinaryOp::Shl | BinaryOp::ShlAssign => {
@@ -493,10 +547,10 @@ impl JITRunTime {
                 }
             }
             BinaryOp::Div | BinaryOp::DivAssign => {
-                if ty.is_int() {
-                    return Ok((ctx.builder.ins().sdiv_imm(left, right.as_int().ok_or(anyhow!("非整数"))?), ty));
-                } else if ty.is_uint() {
-                    return Ok((ctx.builder.ins().udiv_imm(left, right.as_int().ok_or(anyhow!("非整数"))?), ty));
+                if ty.is_int() || ty.is_uint() {
+                    let int_ty = ctx.builder.func.dfg.value_type(left);
+                    let rv = ctx.builder.ins().iconst(int_ty, right.as_int().ok_or(anyhow!("非整数"))?);
+                    return Ok((self.guarded_idiv(ctx, left, rv, ty.is_int(), false)?, ty));
                 } else if ty.is_float() {
                     return Ok((ctx.builder.ins().fdiv(left, right_float.unwrap()), ty));
                 }
@@ -577,10 +631,10 @@ impl JITRunTime {
                 }
             }
             BinaryOp::Mod | BinaryOp::ModAssign => {
-                if ty.is_int() {
-                    return Ok((ctx.builder.ins().srem_imm(left, right.as_int().unwrap()), ty));
-                } else if ty.is_uint() {
-                    return Ok((ctx.builder.ins().urem_imm(left, right.as_int().unwrap()), ty));
+                if ty.is_int() || ty.is_uint() {
+                    let int_ty = ctx.builder.func.dfg.value_type(left);
+                    let rv = ctx.builder.ins().iconst(int_ty, right.as_int().ok_or(anyhow!("非整数"))?);
+                    return Ok((self.guarded_idiv(ctx, left, rv, ty.is_int(), true)?, ty));
                 }
             }
             exp => {

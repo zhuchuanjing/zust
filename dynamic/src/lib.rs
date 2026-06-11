@@ -1594,6 +1594,8 @@ pub use msgpack::{MsgPack, MsgUnpack};
 
 pub use json::{FromJson, ToJson};
 
+mod fault;
+pub use fault::{has_fault, set_fault, take_fault};
 mod ops;
 mod types;
 pub use types::{ConstIntOp, Type, call_fn, set_dynamic_return_handler};

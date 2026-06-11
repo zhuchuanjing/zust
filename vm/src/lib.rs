@@ -107,6 +107,7 @@ impl JITRunTime {
         self.native_symbols.write().unwrap().insert("__vm_struct_from_ptr".to_string(), native::struct_from_ptr as *const () as usize);
         self.native_symbols.write().unwrap().insert("__vm_array_from_ptr".to_string(), native::array_from_ptr as *const () as usize);
         self.native_symbols.write().unwrap().insert("__vm_array_to_ptr".to_string(), native::array_to_ptr as *const () as usize);
+        self.native_symbols.write().unwrap().insert("__vm_arith_fault".to_string(), memory::arith_fault as *const () as usize);
 
         let void_sig = self.get_sig(&[], Type::Void)?;
         self.scope_enter_fn = Some(self.module.declare_function("__vm_scope_enter", cranelift_module::Linkage::Import, &void_sig)?);
@@ -144,6 +145,8 @@ impl JITRunTime {
         self.array_from_ptr_fn = Some(self.module.declare_function("__vm_array_from_ptr", cranelift_module::Linkage::Import, &struct_from_ptr_sig)?);
         let array_to_ptr_sig = self.get_sig(&[Type::Any, Type::Any, Type::I64], Type::Void)?;
         self.array_to_ptr_fn = Some(self.module.declare_function("__vm_array_to_ptr", cranelift_module::Linkage::Import, &array_to_ptr_sig)?);
+
+        self.arith_fault_fn = Some(self.module.declare_function("__vm_arith_fault", cranelift_module::Linkage::Import, &void_sig)?);
         Ok(())
     }
 
@@ -627,6 +630,66 @@ mod tests {
         assert_eq!(result.get_dynamic("ok").and_then(|value| value.as_bool()), Some(true));
         assert_eq!(result.get_dynamic("user_id").map(|value| value.as_str().to_string()), Some("acct_role_2".to_string()));
         assert_eq!(result.get_dynamic("first").map(|value| value.as_str().to_string()), Some("acct_role_2".to_string()));
+        Ok(())
+    }
+
+    #[test]
+    fn integer_divide_by_zero_does_not_crash() -> anyhow::Result<()> {
+        let vm = Vm::with_all()?;
+        vm.import_code(
+            "vm_div_by_zero",
+            br#"
+            pub fn divz(a: i64, b: i64) { a / b }
+            pub fn modz(a: i64, b: i64) { a % b }
+            pub fn overflow(a: i64, b: i64) { a / b }
+            "#
+            .to_vec(),
+        )?;
+
+        let divz = vm.get_fn("vm_div_by_zero::divz", &[Type::I64, Type::I64])?;
+        let modz = vm.get_fn("vm_div_by_zero::modz", &[Type::I64, Type::I64])?;
+        let overflow = vm.get_fn("vm_div_by_zero::overflow", &[Type::I64, Type::I64])?;
+        let divz: extern "C" fn(i64, i64) -> i64 = unsafe { std::mem::transmute(divz.ptr()) };
+        let modz: extern "C" fn(i64, i64) -> i64 = unsafe { std::mem::transmute(modz.ptr()) };
+        let overflow: extern "C" fn(i64, i64) -> i64 = unsafe { std::mem::transmute(overflow.ptr()) };
+
+        // 正常路径不受守卫影响
+        let _ = dynamic::take_fault();
+        assert_eq!(divz(7, 2), 3);
+        assert_eq!(modz(7, 2), 1);
+        assert!(dynamic::take_fault().is_none());
+
+        // 除零:返回 0 且置 fault,而不是 trap 杀进程
+        assert_eq!(divz(7, 0), 0);
+        assert!(dynamic::take_fault().is_some());
+        assert_eq!(modz(7, 0), 0);
+        assert!(dynamic::take_fault().is_some());
+
+        // INT_MIN / -1 溢出同样被守卫
+        assert_eq!(overflow(i64::MIN, -1), 0);
+        assert!(dynamic::take_fault().is_some());
+        Ok(())
+    }
+
+    #[test]
+    fn dynamic_divide_by_zero_returns_null() -> anyhow::Result<()> {
+        let vm = Vm::with_all()?;
+        vm.import_code(
+            "vm_any_div_by_zero",
+            br#"
+            pub fn divz(a, b) { a / b }
+            "#
+            .to_vec(),
+        )?;
+
+        let divz = vm.get_fn("vm_any_div_by_zero::divz", &[Type::Any, Type::Any])?;
+        let divz: extern "C" fn(*const Dynamic, *const Dynamic) -> *const Dynamic = unsafe { std::mem::transmute(divz.ptr()) };
+        let a = Dynamic::from(7i64);
+        let zero = Dynamic::from(0i64);
+        let _ = dynamic::take_fault();
+        let result = unsafe { &*divz(&a, &zero) };
+        assert!(result.is_null());
+        assert!(dynamic::take_fault().is_some());
         Ok(())
     }
 

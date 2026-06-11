@@ -128,6 +128,13 @@ pub(crate) fn alloc_dynamic(value: Dynamic) -> *const Dynamic {
     })
 }
 
+/// JIT 守卫代码在整数除零 / `INT_MIN/-1` 溢出时调用,记录运行期错误标志。
+/// 边界([`crate::call_jit_isolated`])在调用结束后读取它,把错误降级为失败的
+/// 调用而不是进程崩溃。
+pub(crate) extern "C" fn arith_fault() {
+    dynamic::set_fault("整数除零");
+}
+
 pub(crate) extern "C" fn scope_enter() {
     VM_MEMORY.with(|memory| memory.borrow_mut().enter_scope());
 }

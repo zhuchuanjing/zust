@@ -1160,6 +1160,7 @@ impl Compiler {
                 }
                 StmtKind::Const { name, ty, value, is_pub } => {
                     let value = self.const_expr_value(&value)?;
+                    let ty = if ty.is_any() { value.get_type() } else { ty };
                     self.symbols.add(name, Symbol::Const { value, ty, is_pub });
                 }
                 StmtKind::Fn { name, generic_params, args, body, is_pub } => {

@@ -159,7 +159,13 @@ impl Div for Dynamic {
             return Dynamic::F32(self.as_float().unwrap() as f32 / rhs.as_float().unwrap() as f32);
         }
         if self.is_int() || rhs.is_int() || self.is_uint() || rhs.is_uint() {
-            return Self::I64(self.as_int().unwrap() / rhs.as_int().unwrap());
+            return match self.as_int().unwrap().checked_div(rhs.as_int().unwrap()) {
+                Some(value) => Self::I64(value),
+                None => {
+                    crate::set_fault("整数除零");
+                    Self::Null
+                }
+            };
         }
         self
     }
@@ -169,7 +175,13 @@ impl Rem for Dynamic {
     type Output = Self;
     fn rem(self, rhs: Self) -> Self::Output {
         if self.is_int() || rhs.is_int() || self.is_uint() || rhs.is_uint() {
-            return Self::I64(self.as_int().unwrap() % rhs.as_int().unwrap());
+            return match self.as_int().unwrap().checked_rem(rhs.as_int().unwrap()) {
+                Some(value) => Self::I64(value),
+                None => {
+                    crate::set_fault("整数取余除零");
+                    Self::Null
+                }
+            };
         }
         self
     }

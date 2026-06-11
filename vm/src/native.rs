@@ -1,7 +1,7 @@
 use super::FnVariant;
 use crate::JITRunTime;
 use crate::memory::{alloc_dynamic, alloc_struct_bytes, take_dynamic_return};
-use anyhow::Result;
+use anyhow::{Result, anyhow};
 use cranelift::prelude::AbiParam;
 use cranelift_module::{Linkage, Module};
 use dynamic::{Dynamic, Type};
@@ -47,7 +47,7 @@ impl ZustCallback {
         let args: Vec<Box<Dynamic>> = args.into_iter().map(Box::new).collect();
         let mut ptrs: Vec<*const Dynamic> = args.iter().map(|arg| arg.as_ref() as *const Dynamic).collect();
         ptrs.extend(self.captures.iter().map(|value| value as *const Dynamic));
-        unsafe { call_callback(self.fn_ptr as *const u8, &self.ret_ty, &ptrs) }
+        call_jit_isolated(|| unsafe { call_callback(self.fn_ptr as *const u8, &self.ret_ty, &ptrs) })
     }
 }
 
@@ -345,10 +345,7 @@ fn spawn_run(context: Weak<RwLock<JITRunTime>>, fn_name: &str, args: Dynamic) ->
     let (ptr, ret_ty) = super::with_vm_context(&context as *const Weak<RwLock<JITRunTime>>, |vm| vm.jit.write().unwrap().get_fn_ptr(fn_name, &arg_tys))?;
     let args: Vec<Box<Dynamic>> = args.into_iter().map(Box::new).collect();
     let ptrs: Vec<*const Dynamic> = args.iter().map(|arg| arg.as_ref() as *const Dynamic).collect();
-    unsafe {
-        call_spawned(ptr, &ret_ty, &ptrs)?;
-    }
-    Ok(())
+    call_jit_isolated(|| unsafe { call_spawned(ptr, &ret_ty, &ptrs) })
 }
 
 pub(crate) extern "C" fn spawn_ptr(fn_ptr: i64, ret_ty: i64, args: *const Dynamic) -> bool {
@@ -392,10 +389,30 @@ fn spawn_run_ptr(fn_ptr: usize, ret_ty: Type, args: Dynamic) -> Result<()> {
     }
     let args: Vec<Box<Dynamic>> = args.into_iter().map(Box::new).collect();
     let ptrs: Vec<*const Dynamic> = args.iter().map(|arg| arg.as_ref() as *const Dynamic).collect();
-    unsafe {
-        call_spawned(fn_ptr as *const u8, &ret_ty, &ptrs)?;
+    call_jit_isolated(|| unsafe { call_spawned(fn_ptr as *const u8, &ret_ty, &ptrs) })
+}
+
+/// 脚本执行的隔离边界。
+///
+/// JIT 代码无法返回 `Result`,运行期错误(整数除零等)通过 [`dynamic`] 的线程
+/// 局部 fault 标志上报(由 `__vm_arith_fault` 与 `Dynamic` 的除法守卫设置)。这里
+/// 在调用前清掉陈旧标志,调用后读取它,把"脚本出错"降级为一次失败的 `Result`,
+/// 而不是让进程崩溃。`catch_unwind` 额外兜住宿主侧 Rust 代码(参数编组、返回值
+/// 取出)的 panic。
+///
+/// 注意:若 panic 发生在 JIT 的 `extern "C"` 帧之内再向外穿越,Rust 默认会 abort,
+/// `catch_unwind` 无法拦截——这类路径靠的是各 native 助手不 panic(除零已改为置
+/// fault 标志)。
+pub(crate) fn call_jit_isolated<T>(f: impl FnOnce() -> Result<T>) -> Result<T> {
+    let _ = dynamic::take_fault();
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
+    match outcome {
+        Ok(inner) => match dynamic::take_fault() {
+            Some(reason) => Err(anyhow!("脚本运行期错误: {}", reason)),
+            None => inner,
+        },
+        Err(_) => Err(anyhow!("脚本执行 panic,已隔离")),
     }
-    Ok(())
 }
 
 unsafe fn call_callback(ptr: *const u8, ret_ty: &Type, args: &[*const Dynamic]) -> Result<Dynamic> {

@@ -40,6 +40,7 @@ pub struct JITRunTime {
     pub(crate) struct_from_ptr_fn: Option<FuncId>,
     pub(crate) array_from_ptr_fn: Option<FuncId>,
     pub(crate) array_to_ptr_fn: Option<FuncId>,
+    pub(crate) arith_fault_fn: Option<FuncId>,
 }
 
 // TODO(memory): 函数调用期间为 VM 内部临时 Any/struct 分配引入 arena。
@@ -214,6 +215,7 @@ impl JITRunTime {
             struct_from_ptr_fn: None,
             array_from_ptr_fn: None,
             array_to_ptr_fn: None,
+            arith_fault_fn: None,
         }
     }
 

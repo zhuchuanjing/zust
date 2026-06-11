@@ -361,7 +361,7 @@ impl Ord for Dynamic {
         } else if self.is_uint() || other.is_uint() {
             self.as_uint().unwrap_or(0).cmp(&other.as_uint().unwrap_or(0))
         } else if self.is_false() && other.is_true() {
-            Ordering::Less    // false < true
+            Ordering::Less // false < true
         } else if self.is_true() && other.is_false() {
             Ordering::Greater // true > false
         } else if self.is_null() && other.is_null() {
@@ -1467,6 +1467,27 @@ mod tests {
     #[derive(Debug, PartialEq)]
     struct CustomCounter {
         value: i64,
+    }
+
+    #[test]
+    fn type_add_promotion_rules() {
+        use crate::Type;
+        // 相同类型保持
+        assert_eq!(Type::I32 + Type::I32, Type::I32);
+        // 字符串吸收一切
+        assert_eq!(Type::I32 + Type::Str, Type::Str);
+        // Any 退化
+        assert_eq!(Type::I32 + Type::Any, Type::Any);
+        // 浮点优先,取较宽
+        assert_eq!(Type::I64 + Type::F32, Type::F32);
+        assert_eq!(Type::F32 + Type::F64, Type::F64);
+        // 整数取较大宽度
+        assert_eq!(Type::I8 + Type::I32, Type::I32);
+        assert_eq!(Type::I32 + Type::I64, Type::I64);
+        // 有符号先于无符号被处理:i32 + u32 -> i32
+        assert_eq!(Type::I32 + Type::U32, Type::I32);
+        // 无符号同宽
+        assert_eq!(Type::U8 + Type::U32, Type::U32);
     }
 
     #[test]

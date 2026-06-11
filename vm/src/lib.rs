@@ -3310,6 +3310,31 @@ mod tests {
     }
 
     #[test]
+    fn void_and_null_are_false_in_boolean_context() -> anyhow::Result<()> {
+        let vm = Vm::with_all()?;
+        vm.import_code(
+            "vm_void_bool_context",
+            br#"
+            pub fn run() {
+                let items = [1i32, 2i32];
+                let ok1 = !(items.push(3i32) && false);
+                let ok2 = !(true && items.push(4i32));
+                let ok3 = null || true;
+                let ok4 = null || items.len() == 4;
+                ok1 && ok2 && ok3 && ok4
+            }
+            "#
+            .to_vec(),
+        )?;
+
+        let compiled = vm.get_fn("vm_void_bool_context::run", &[])?;
+        assert_eq!(compiled.ret_ty(), &Type::Bool);
+        let run: extern "C" fn() -> bool = unsafe { std::mem::transmute(compiled.ptr()) };
+        assert!(run());
+        Ok(())
+    }
+
+    #[test]
     fn empty_for_loop_range_has_zero_iterations() -> anyhow::Result<()> {
         let vm = Vm::with_all()?;
         vm.import_code(
@@ -3889,6 +3914,51 @@ mod tests {
         let make: extern "C" fn() -> *const Dynamic = unsafe { std::mem::transmute(compiled.ptr()) };
         let result = unsafe { &*make() };
         assert!(matches!(result, Dynamic::VecI64(values) if values == &vec![1]), "result: {:?}", result);
+        Ok(())
+    }
+
+    #[test]
+    fn for_in_iterates_list_filled_in_same_function() -> anyhow::Result<()> {
+        let vm = Vm::with_all()?;
+        vm.import_code(
+            "vm_for_in_local_pushed_list",
+            br#"
+            pub fn sum_i32_items() {
+                let items = [];
+                items.push(6000i32);
+                items.push(4000i32);
+                let total = 0i32;
+                for item in items {
+                    total += item;
+                }
+                total
+            }
+
+            pub fn sum_split_bps() {
+                let splits = [];
+                splits.push({ bps: "6000" });
+                splits.push({ bps: 4000 });
+                let total = 0i32;
+                let count = 0i32;
+                for split in splits {
+                    total += split.bps as i32;
+                    count += 1i32;
+                }
+                total + count
+            }
+            "#
+            .to_vec(),
+        )?;
+
+        let compiled = vm.get_fn("vm_for_in_local_pushed_list::sum_i32_items", &[])?;
+        assert_eq!(compiled.ret_ty(), &Type::I32);
+        let sum_i32_items: extern "C" fn() -> i32 = unsafe { std::mem::transmute(compiled.ptr()) };
+        assert_eq!(sum_i32_items(), 10000);
+
+        let compiled = vm.get_fn("vm_for_in_local_pushed_list::sum_split_bps", &[])?;
+        assert_eq!(compiled.ret_ty(), &Type::I32);
+        let sum_split_bps: extern "C" fn() -> i32 = unsafe { std::mem::transmute(compiled.ptr()) };
+        assert_eq!(sum_split_bps(), 10002);
         Ok(())
     }
 

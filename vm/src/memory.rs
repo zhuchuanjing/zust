@@ -30,6 +30,13 @@ impl Chunk {
     fn ptr(&mut self) -> *mut u8 {
         self.bytes.as_mut_ptr() as *mut u8
     }
+
+    /// 本 chunk 覆盖的地址区间 [base, end)。用于 O(1)/O(chunks) 判断某指针是否
+    /// 由 arena 持有(分配不跨 chunk,故起始地址落在区间内即整块都在内)。
+    fn contains(&self, addr: usize) -> bool {
+        let base = self.bytes.as_ptr() as usize;
+        addr >= base && addr < base + self.bytes.len()
+    }
 }
 
 struct VmMemory {
@@ -50,7 +57,10 @@ impl VmMemory {
     }
 
     fn owns_dynamic(&self, ptr: *const Dynamic) -> bool {
-        self.dynamics.iter().any(|dynamic| std::ptr::addr_eq(*dynamic as *const Dynamic, ptr))
+        // arena 持有的 Dynamic 都落在某个 chunk 的内存区间内;堆上 Box 的不在。
+        // 按 chunk 地址区间判断是 O(chunks)(chunk 极少),取代原先 O(dynamics) 线性扫描。
+        let addr = ptr as usize;
+        self.chunks.iter().any(|chunk| chunk.contains(addr))
     }
 
     fn enter_scope(&mut self) {

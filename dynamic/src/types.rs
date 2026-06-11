@@ -66,6 +66,19 @@ pub enum Type {
 unsafe impl Send for Type {}
 unsafe impl Sync for Type {}
 
+/// 两个类型相加得到的"公共类型",也是 VM 里混合宽度算术结果类型的推断规则。
+///
+/// 优先级(从高到低):
+/// 1. 完全相同的类型 → 自身;
+/// 2. 任一为字符串 → `Str`(支持 `任意 + 字符串` 拼接);
+/// 3. 任一为 `Any` → `Any`(动态值参与即退化为动态);
+/// 4. 任一为浮点 → 取较宽的浮点(有 f64 则 f64,否则 f32);
+/// 5. 任一为有符号整数 → 取双方较大宽度的有符号整数(有符号优先于无符号);
+/// 6. 任一为无符号整数 → 取双方较大宽度的无符号整数;
+/// 7. 其它 → `Any`。
+///
+/// 注意:有符号在第 5 步先于无符号被处理,因此 `i32 + u32` 结果是 `i32`(按宽度,
+/// 不做无符号回绕检查)。宽度按 `Type::width` 计算。
 impl std::ops::Add for Type {
     type Output = Self;
     fn add(self, rhs: Self) -> Self::Output {
@@ -78,22 +91,18 @@ impl std::ops::Add for Type {
         } else if self.is_float() || rhs.is_float() {
             if self.is_f64() || rhs.is_f64() { Type::F64 } else { Type::F32 }
         } else if self.is_int() || rhs.is_int() {
-            let width = self.width().max(rhs.width());
-            match width {
+            match self.width().max(rhs.width()) {
                 1 => Type::I8,
                 2 => Type::I16,
                 4 => Type::I32,
-                8 => Type::I64,
-                _ => panic!("{:?} 非法类型", self),
+                _ => Type::I64,
             }
         } else if self.is_uint() || rhs.is_uint() {
-            let width = self.width().max(rhs.width());
-            match width {
+            match self.width().max(rhs.width()) {
                 1 => Type::U8,
                 2 => Type::U16,
                 4 => Type::U32,
-                8 => Type::U64,
-                _ => panic!("{:?} 非法类型", self),
+                _ => Type::U64,
             }
         } else {
             Type::Any

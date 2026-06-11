@@ -509,9 +509,18 @@ impl Parser {
                 //转义字符
                 self.pos += 1;
                 match self.buf[self.pos] {
-                    b'n' => { text_buf.push(b'\n'); self.pos += 1; }
-                    b'r' => { text_buf.push(b'\r'); self.pos += 1; }
-                    b't' => { text_buf.push(b'\t'); self.pos += 1; }
+                    b'n' => {
+                        text_buf.push(b'\n');
+                        self.pos += 1;
+                    }
+                    b'r' => {
+                        text_buf.push(b'\r');
+                        self.pos += 1;
+                    }
+                    b't' => {
+                        text_buf.push(b'\t');
+                        self.pos += 1;
+                    }
                     ch @ (b'\\' | b'"') => {
                         text_buf.push(ch);
                         self.pos += 1;
@@ -623,11 +632,7 @@ impl Parser {
         let unsigned_max = (1u128 << bits) - 1;
         // 十进制按数值语义判界(有符号允许到 |MIN|,即 2^(bits-1),以支持 -128i8、i64::MIN);
         // 十六/八/二进制按位模式语义判界,允许写满整型位宽(如 0xFFFFFFFF 仍是合法的位掩码)。
-        let max_allowed = if radix == 10 {
-            if signed { unsigned_max / 2 + 1 } else { unsigned_max }
-        } else {
-            unsigned_max
-        };
+        let max_allowed = if radix == 10 { if signed { unsigned_max / 2 + 1 } else { unsigned_max } } else { unsigned_max };
         if magnitude > max_allowed {
             return Err(anyhow!("整数字面量 {} 超出 {:?} 的范围", digits, ty));
         }
@@ -827,10 +832,27 @@ mod tests {
     fn binop_sym(op: &crate::BinaryOp) -> &'static str {
         use crate::BinaryOp::*;
         match op {
-            Add => "+", Sub => "-", Mul => "*", Div => "/", Mod => "%",
-            Shl => "<<", Shr => ">>", BitAnd => "&", BitOr => "|", BitXor => "^",
-            Assign => "=", AddAssign => "+=", Eq => "==", Ne => "!=", Lt => "<", Gt => ">",
-            Le => "<=", Ge => ">=", And => "&&", Or => "||", Idx => "idx",
+            Add => "+",
+            Sub => "-",
+            Mul => "*",
+            Div => "/",
+            Mod => "%",
+            Shl => "<<",
+            Shr => ">>",
+            BitAnd => "&",
+            BitOr => "|",
+            BitXor => "^",
+            Assign => "=",
+            AddAssign => "+=",
+            Eq => "==",
+            Ne => "!=",
+            Lt => "<",
+            Gt => ">",
+            Le => "<=",
+            Ge => ">=",
+            And => "&&",
+            Or => "||",
+            Idx => "idx",
             other => {
                 let _ = other;
                 "?"
@@ -891,6 +913,56 @@ mod tests {
         // 已知限制:as 当前绑定整个左侧表达式 (as (+ a b) T),Rust 语义应为 (+ a (as b T))。
         // 现有代码依赖此松绑定,改动有破坏风险;锁定现状,正确优先级见后续独立任务。
         assert_eq!(shape("a + b as i64"), "(as (+ a b) I64)");
+    }
+
+    // 轻量 fuzz:用确定性 PRNG 生成大量随机/半结构化输入喂给解析器,断言它永远
+    // 不 panic、不崩溃(返回 Ok 或 Err 都可),也不卡死(B2 的深度守卫保证有界)。
+    // 在大栈线程上跑,避免深嵌套合法解析在调试构建里耗尽测试线程的 2MB 栈。
+    #[test]
+    fn parser_never_panics_on_random_input() {
+        run_with_big_stack(|| {
+            const FRAGMENTS: &[&str] = &[
+                "fn", "let", "if", "else", "for", "in", "while", "return", "struct", "impl", "pub", "(", ")", "{", "}", "[", "]", "<", ">", "+", "-", "*", "/", "%", "=", "==", "&&", "||", "..", "..=", "as", "i32",
+                "u64", "f64", ".", ",", ";", ":", "::", "x", "0", "1", "255i8", "0xFF", "\"s\"", "true", "null", "|a|", "->",
+            ];
+            // xorshift64* 确定性 PRNG
+            let mut state: u64 = 0x9E3779B97F4A7C15;
+            let mut next = || {
+                state ^= state >> 12;
+                state ^= state << 25;
+                state ^= state >> 27;
+                state = state.wrapping_mul(0x2545F4914F6CDD1D);
+                state
+            };
+
+            for _ in 0..4000 {
+                let mut code = String::new();
+                let tokens = (next() % 40) as usize;
+                for _ in 0..tokens {
+                    code.push_str(FRAGMENTS[(next() as usize) % FRAGMENTS.len()]);
+                    if next() % 2 == 0 {
+                        code.push(' ');
+                    }
+                }
+                // 解析全程不应 panic;parse_all 返回 Ok/Err 均可接受。
+                let result = std::panic::catch_unwind(|| {
+                    let mut parser = Parser::new(code.clone().into_bytes());
+                    let mut count = 0;
+                    loop {
+                        match parser.stmt(false) {
+                            Ok(_) => {
+                                count += 1;
+                                if parser.is_eof() || count > 1000 {
+                                    break;
+                                }
+                            }
+                            Err(_) => break,
+                        }
+                    }
+                });
+                assert!(result.is_ok(), "parser panicked on input: {:?}", code);
+            }
+        });
     }
 
     #[test]

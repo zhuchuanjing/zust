@@ -370,8 +370,10 @@ impl JITRunTime {
         }
 
         ctx.builder.switch_to_block(rhs_block);
-        let right = self.eval(ctx, right)?.get(ctx).unwrap();
-        let right = self.bool_value(ctx, right)?;
+        let right = match self.eval(ctx, right)?.get(ctx) {
+            Some(right) => self.bool_value(ctx, right)?,
+            None => ctx.builder.ins().iconst(types::I8, 0),
+        };
         ctx.builder.ins().jump(end_block, &[cranelift::codegen::ir::BlockArg::Value(right)]);
         ctx.builder.seal_block(rhs_block);
 
@@ -1137,6 +1139,16 @@ impl JITRunTime {
                         }
                     }
                 } else {
+                    if matches!(op, BinaryOp::And | BinaryOp::Or) {
+                        let left = match self.eval(ctx, left)?.get(ctx) {
+                            Some(left) => left,
+                            None => {
+                                let false_value = ctx.builder.ins().iconst(types::I8, 0);
+                                (false_value, Type::Bool)
+                            }
+                        };
+                        return self.short_circuit_logic(ctx, left, op.clone(), right).map(Into::into);
+                    }
                     let assign_expr = if op.is_assign() { Some(left.clone()) } else { None };
                     let assign_expected = if op.is_assign() { self.assignment_target_ty(ctx, left) } else { None };
                     let left = match self.eval(ctx, left)?.get(ctx) {
@@ -1456,7 +1468,57 @@ impl JITRunTime {
                     }
                 } else if let PatternKind::Var { idx, .. } = &pat.kind {
                     let vt = self.eval(ctx, range)?.get(ctx).unwrap();
-                    if vt.1.is_any() {
+                    if let Type::List(elem_ty) = &vt.1 {
+                        let len_fn = self.get_fn(self.get_id("Any::len")?, &[Type::Any])?;
+                        let len = self.call(ctx, len_fn, vec![vt.0])?;
+                        let len = self.convert(ctx, len.into(), Type::I64)?;
+                        let zero = ctx.builder.ins().iconst(types::I64, 0);
+                        let get_idx_fn = if let Some((fn_name, _)) = Self::list_get_idx_shortcut(elem_ty) {
+                            self.get_fn(self.get_id(fn_name)?, &[Type::Any, Type::I64])?
+                        } else {
+                            self.get_fn(self.get_id("Any::get_idx")?, &[Type::Any, Type::I64])?
+                        };
+                        let get_idx_ret_ty = get_idx_fn.get_type()?;
+                        let get_idx_id = get_idx_fn.get_id()?;
+                        let get_idx_ref = self.get_fn_ref(ctx, get_idx_id);
+                        let call_inst = ctx.builder.ins().call(get_idx_ref, &[vt.0, zero]);
+                        let first = ctx.builder.inst_results(call_inst)[0];
+                        ctx.set_var(*idx, (first, get_idx_ret_ty.clone()).into())?;
+                        self.declare_assigned_vars(ctx, body)?;
+
+                        let index_var = ctx.builder.declare_var(types::I64);
+                        ctx.builder.def_var(index_var, zero);
+                        let start_block = ctx.builder.create_block();
+                        let body_block = ctx.builder.create_block();
+                        let continue_block = ctx.builder.create_block();
+                        let end_block = ctx.builder.create_block();
+                        ctx.builder.ins().jump(start_block, &[]);
+                        ctx.builder.switch_to_block(start_block);
+                        let index = ctx.builder.use_var(index_var);
+                        let cond = ctx.builder.ins().icmp(IntCC::SignedLessThan, index, len);
+                        ctx.builder.ins().brif(cond, body_block, &[], end_block, &[]);
+
+                        ctx.builder.switch_to_block(body_block);
+                        let get_idx_ref = ctx.get_fn_ref(get_idx_id).unwrap();
+                        let call_inst = ctx.builder.ins().call(get_idx_ref, &[vt.0, index]);
+                        let item = ctx.builder.inst_results(call_inst)[0];
+                        ctx.set_var(*idx, (item, get_idx_ret_ty).into())?;
+                        let body_terminated = self.gen_stmt(ctx, body, Some(end_block), Some(continue_block))?;
+                        if !body_terminated {
+                            ctx.builder.ins().jump(continue_block, &[]);
+                        }
+                        ctx.builder.seal_block(body_block);
+
+                        ctx.builder.switch_to_block(continue_block);
+                        let index = ctx.builder.use_var(index_var);
+                        let one = ctx.builder.ins().iconst(types::I64, 1);
+                        let next_index = ctx.builder.ins().iadd(index, one);
+                        ctx.builder.def_var(index_var, next_index);
+                        ctx.builder.ins().jump(start_block, &[]);
+                        ctx.builder.seal_block(continue_block);
+                        ctx.builder.seal_block(start_block);
+                        ctx.builder.switch_to_block(end_block);
+                    } else if vt.1.is_any() {
                         let iter = self.call(ctx, self.get_method(&vt.1, "iter")?, vec![vt.0])?;
                         let next = self.get_method(&vt.1, "next")?;
                         let next_id = next.get_id()?;

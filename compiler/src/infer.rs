@@ -10,6 +10,12 @@ struct ReturnInfo {
     shape: Option<Type>,
 }
 
+/// 类型推断递归链的硬上限。同一实例化由 `self.fns` 记忆化挡住,但互递归的泛型
+/// 函数每次可能产生新的 (generic_args, fn_tys) 实例化,记忆化命不中,会无限递归
+/// 直至栈溢出。超过此深度即把推断结果回退成 [`Type::Any`],把"挂起/崩溃"降级为
+/// 一个保守但安全的类型。正常代码的推断链远不及此。
+const MAX_INFER_DEPTH: usize = 64;
+
 impl Compiler {
     fn current_infer_key(&self) -> Option<(u32, Vec<Type>, Vec<Type>)> {
         self.infer_stack.last().cloned()
@@ -52,8 +58,7 @@ impl Compiler {
     fn try_find_base_return_ty(&self, body: &Stmt) -> Option<Type> {
         match &body.kind {
             StmtKind::Block(stmts) => stmts.iter().find_map(|s| self.try_find_base_return_ty(s)),
-            StmtKind::If { then_body, else_body, .. } => self.try_find_base_return_ty(then_body)
-                .or_else(|| else_body.as_ref().and_then(|b| self.try_find_base_return_ty(b))),
+            StmtKind::If { then_body, else_body, .. } => self.try_find_base_return_ty(then_body).or_else(|| else_body.as_ref().and_then(|b| self.try_find_base_return_ty(b))),
             StmtKind::Return(Some(expr)) => Self::try_literal_type(expr),
             StmtKind::Expr(expr, false) => Self::try_literal_type(expr),
             _ => None,
@@ -76,15 +81,22 @@ impl Compiler {
     fn try_find_base_return_ty_with_scope_inner(&mut self, body: &Stmt, fn_id: u32, fn_name: &str) -> Option<Type> {
         match &body.kind {
             StmtKind::Block(stmts) => stmts.iter().find_map(|s| self.try_find_base_return_ty_with_scope_inner(s, fn_id, fn_name)),
-            StmtKind::If { then_body, else_body, .. } => self.try_find_base_return_ty_with_scope_inner(then_body, fn_id, fn_name)
-                .or_else(|| else_body.as_ref().and_then(|b| self.try_find_base_return_ty_with_scope_inner(b, fn_id, fn_name))),
+            StmtKind::If { then_body, else_body, .. } => {
+                self.try_find_base_return_ty_with_scope_inner(then_body, fn_id, fn_name).or_else(|| else_body.as_ref().and_then(|b| self.try_find_base_return_ty_with_scope_inner(b, fn_id, fn_name)))
+            }
             StmtKind::Return(Some(expr)) => {
-                if Self::expr_calls_fn(expr, fn_id, fn_name) { None }
-                else { self.infer_return_expr(expr).ok().map(|info| info.ty) }
+                if Self::expr_calls_fn(expr, fn_id, fn_name) {
+                    None
+                } else {
+                    self.infer_return_expr(expr).ok().map(|info| info.ty)
+                }
             }
             StmtKind::Expr(expr, false) => {
-                if Self::expr_calls_fn(expr, fn_id, fn_name) { None }
-                else { self.infer_return_expr(expr).ok().map(|info| info.ty) }
+                if Self::expr_calls_fn(expr, fn_id, fn_name) {
+                    None
+                } else {
+                    self.infer_return_expr(expr).ok().map(|info| info.ty)
+                }
             }
             _ => None,
         }
@@ -93,9 +105,13 @@ impl Compiler {
     fn expr_calls_fn(expr: &Expr, fn_id: u32, fn_name: &str) -> bool {
         match &expr.kind {
             ExprKind::Call { obj, params } => {
-                if let ExprKind::Id(id, _) = &obj.kind { return *id == fn_id; }
+                if let ExprKind::Id(id, _) = &obj.kind {
+                    return *id == fn_id;
+                }
                 if let ExprKind::Ident(name) = &obj.kind {
-                    if name.as_str() == fn_name || fn_name.ends_with(&format!("::{}", name)) { return true; }
+                    if name.as_str() == fn_name || fn_name.ends_with(&format!("::{}", name)) {
+                        return true;
+                    }
                 }
                 params.iter().any(|p| Self::expr_calls_fn(p, fn_id, fn_name))
             }
@@ -756,6 +772,11 @@ impl Compiler {
     }
 
     pub fn infer_fn_with_params(&mut self, id: u32, arg_tys: &[Type], generic_args: &[Type]) -> Result<Type> {
+        // 病态(互)递归泛型推断会不断产生新实例化、绕过记忆化;到达深度上限即回退 Any,
+        // 避免推断阶段栈溢出崩溃。
+        if self.infer_stack.len() > MAX_INFER_DEPTH {
+            return Ok(Type::Any);
+        }
         let (name, s) = self.symbols.get_symbol(id).map(|(n, s)| (n.clone(), s.clone()))?;
         if let Symbol::Fn { ty, args, generic_params, cap, body, .. } = s {
             if let Type::Fn { tys, ret: _ } = ty {

@@ -3923,6 +3923,29 @@ mod tests {
     }
 
     #[test]
+    fn loop_pushed_list_is_typed_vector() -> anyhow::Result<()> {
+        let vm = Vm::with_all()?;
+        vm.import_code(
+            "vm_loop_pushed_list",
+            br#"
+            pub fn make(n: i64) {
+                let l = [];
+                for i in 0..n {
+                    l.push(i);
+                }
+                l
+            }
+            "#
+            .to_vec(),
+        )?;
+        let compiled = vm.get_fn("vm_loop_pushed_list::make", &[Type::I64])?;
+        let make: extern "C" fn(i64) -> *const Dynamic = unsafe { std::mem::transmute(compiled.ptr()) };
+        let result = unsafe { &*make(3) };
+        assert!(matches!(result, Dynamic::VecI64(v) if v == &vec![0, 1, 2]), "expected flat VecI64, got: {:?}", result);
+        Ok(())
+    }
+
+    #[test]
     fn inferred_empty_list_uses_typed_dynamic_vector() -> anyhow::Result<()> {
         let vm = Vm::with_all()?;
         vm.import_code(

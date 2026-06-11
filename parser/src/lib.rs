@@ -899,20 +899,19 @@ mod tests {
 
     #[test]
     fn assignment_range_and_as_precedence_golden() {
-        // 赋值最低优先级
+        // 赋值最低优先级,右结合
         assert_eq!(shape("a = b + c"), "(= a (+ b c))");
-        // 已知限制:链式赋值当前为左结合 (= (= a b) c),理想应为右结合。
-        // 由于外层 = 的左侧不是 lvalue,这会在编译期报错而非静默误算;
-        // 锁定现状以防回归,正确的右结合修复见后续独立任务。
-        assert_eq!(shape("a = b = c"), "(= (= a b) c)");
+        assert_eq!(shape("a = b = c"), "(= a (= b c))");
+        assert_eq!(shape("a = b = c = d"), "(= a (= b (= c d)))");
         // 复合赋值
         assert_eq!(shape("a += b * c"), "(+= a (* b c))");
-        // range 边界是完整算术表达式(已修复:上界按完整子表达式解析)
+        // range 边界是完整算术表达式(上界按完整子表达式解析)
         assert_eq!(shape("1 + 1 .. n * 2"), "(.. (+ 1 1) (* n 2))");
         assert_eq!(shape("0 ..= n - 1"), "(..= 0 (- n 1))");
-        // 已知限制:as 当前绑定整个左侧表达式 (as (+ a b) T),Rust 语义应为 (+ a (as b T))。
-        // 现有代码依赖此松绑定,改动有破坏风险;锁定现状,正确优先级见后续独立任务。
-        assert_eq!(shape("a + b as i64"), "(as (+ a b) I64)");
+        // as 紧绑定到操作数,优先级高于二元算术(Rust 语义)
+        assert_eq!(shape("a + b as i64"), "(+ a (as b I64))");
+        assert_eq!(shape("a as i64 + b"), "(+ (as a I64) b)");
+        assert_eq!(shape("(a + b) as i64"), "(as (+ a b) I64)");
     }
 
     // 轻量 fuzz:用确定性 PRNG 生成大量随机/半结构化输入喂给解析器,断言它永远

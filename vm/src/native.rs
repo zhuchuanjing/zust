@@ -376,9 +376,11 @@ pub(crate) extern "C" fn callback_new(fn_ptr: i64, ret_ty: i64, explicit_arg_len
     let captures = if captures.is_null() {
         Vec::new()
     } else {
+        // 闭包捕获按引用共享:浅 clone 只复制 Arc 句柄,多个闭包捕获同一个
+        // Map/List 时读写同一份数据(spawn 跨线程才需要 deep_clone 隔离)。
         match unsafe { &*captures } {
-            Dynamic::List(values) => values.read().unwrap().iter().map(Dynamic::deep_clone).collect(),
-            value => vec![value.deep_clone()],
+            Dynamic::List(values) => values.read().unwrap().to_vec(),
+            value => vec![value.clone()],
         }
     };
     alloc_dynamic(Dynamic::custom(ZustCallback::new_with_arg_len(fn_ptr as usize, ret_ty, explicit_arg_len, captures)))

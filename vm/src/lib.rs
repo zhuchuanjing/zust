@@ -1849,6 +1849,58 @@ mod tests {
     }
 
     #[test]
+    fn closure_captures_share_state_between_callbacks() -> anyhow::Result<()> {
+        static SAVED_CALLBACKS: Mutex<Vec<ZustCallback>> = Mutex::new(Vec::new());
+
+        extern "C" fn save_callback(callback: *const Dynamic) -> bool {
+            if callback.is_null() {
+                return false;
+            }
+            let Some(callback) = (unsafe { &*callback }).as_custom::<ZustCallback>().cloned() else {
+                return false;
+            };
+            SAVED_CALLBACKS.lock().unwrap().push(callback);
+            true
+        }
+
+        SAVED_CALLBACKS.lock().unwrap().clear();
+
+        let vm = Vm::with_all()?;
+        vm.add_native_module_ptr("capture_test", "save", &[Type::Any], Type::Bool, save_callback as *const u8)?;
+        vm.import_code(
+            "vm_shared_capture",
+            br#"
+            pub fn register() {
+                let state = {};
+                state.drag_kind = 0;
+                capture_test::save(|| {
+                    state.drag_kind = 2;
+                    true
+                });
+                capture_test::save(|| {
+                    state.drag_kind
+                })
+            }
+            "#
+            .to_vec(),
+        )?;
+
+        let register = vm.get_fn("vm_shared_capture::register", &[])?;
+        let register: extern "C" fn() -> bool = unsafe { std::mem::transmute(register.ptr()) };
+        assert!(register());
+
+        let (writer, reader) = {
+            let saved = SAVED_CALLBACKS.lock().unwrap();
+            assert_eq!(saved.len(), 2);
+            (saved[0].clone(), saved[1].clone())
+        };
+        assert_eq!(reader.call0()?.as_int(), Some(0));
+        assert_eq!(writer.call0()?.as_bool(), Some(true));
+        assert_eq!(reader.call0()?.as_int(), Some(2));
+        Ok(())
+    }
+
+    #[test]
     fn native_can_save_and_later_call_named_function_callback() -> anyhow::Result<()> {
         static SAVED_CALLBACK: Mutex<Option<ZustCallback>> = Mutex::new(None);
 

@@ -21,7 +21,7 @@ metal = ["vm-metal/runtime"]
 
 [dependencies]
 log = "0.4.29"
-dynamic = { package = "zust-dynamic", version = "0.9.16", path = "../dynamic" }
+dynamic = { package = "zust-dynamic", version = "0.9.17", path = "../dynamic" }
 parser = { package = "zust-parser", version = "0.9.16", path = "../parser" }
 compiler = { package = "zust-compiler", version = "0.9.35", path = "../compiler" }
 root = { package = "zust-root", version = "0.9.6", path = "../root" }

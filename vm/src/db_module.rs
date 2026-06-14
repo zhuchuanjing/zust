@@ -13,7 +13,7 @@ use sqlx_core::{
 use std::{
     collections::BTreeMap,
     collections::HashMap,
-    sync::{LazyLock, Mutex, Once},
+    sync::{LazyLock, Once},
 };
 
 #[derive(Clone)]
@@ -49,7 +49,7 @@ enum DbKind {
     MySql,
 }
 
-static POOLS: LazyLock<Mutex<HashMap<String, PoolEntry>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
+static POOLS: LazyLock<parking_lot::Mutex<HashMap<String, PoolEntry>>> = LazyLock::new(|| parking_lot::Mutex::new(HashMap::new()));
 static INSTALL_DRIVERS: Once = Once::new();
 
 extern "C" fn db_create(path: *const Dynamic, fields: *const Dynamic) -> bool {
@@ -195,12 +195,12 @@ async fn pool_for(target: &DbTarget) -> Result<AnyPool> {
         install_drivers(&[sqlx_mysql::any::DRIVER, sqlx_postgres::any::DRIVER]).expect("SQLx Any drivers already installed");
     });
 
-    if let Some(pool) = POOLS.lock().unwrap().get(&target.pool_path).filter(|entry| entry.url == target.url).map(|entry| entry.pool.clone()) {
+    if let Some(pool) = POOLS.lock().get(&target.pool_path).filter(|entry| entry.url == target.url).map(|entry| entry.pool.clone()) {
         return Ok(pool);
     }
 
     let pool = AnyPoolOptions::new().max_connections(target.max_connections).connect(&target.url).await?;
-    POOLS.lock().unwrap().insert(target.pool_path.clone(), PoolEntry { url: target.url.clone(), pool: pool.clone() });
+    POOLS.lock().insert(target.pool_path.clone(), PoolEntry { url: target.url.clone(), pool: pool.clone() });
     Ok(pool)
 }
 
@@ -937,7 +937,7 @@ mod tests {
         root::add_value("local/db_module_postgres_vm_tx", url)?;
 
         let vm = Vm::with_all()?;
-        vm.jit.write().unwrap().import_code(
+        vm.jit.write().import_code(
             "db_transaction_vm",
             br#"
             pub fn run() {
@@ -952,7 +952,7 @@ mod tests {
             .to_vec(),
         )?;
 
-        let (ptr, ret) = vm.jit.write().unwrap().get_fn_ptr("db_transaction_vm::run", &[])?;
+        let (ptr, ret) = vm.jit.write().get_fn_ptr("db_transaction_vm::run", &[])?;
         assert_eq!(ret, Type::I64);
         let run: extern "C" fn() -> i64 = unsafe { std::mem::transmute(ptr) };
         assert_eq!(run(), 2);

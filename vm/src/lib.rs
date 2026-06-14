@@ -22,8 +22,9 @@ mod llm_module;
 mod oss_module;
 mod root_module;
 pub use gpu_layout::{GpuFieldLayout, GpuStructLayout};
+pub use parking_lot::RwLock;
 
-use std::sync::{OnceLock, RwLock, Weak};
+use std::sync::{OnceLock, Weak};
 static PTR_TYPE: OnceLock<types::Type> = OnceLock::new();
 pub fn ptr_type() -> types::Type {
     PTR_TYPE.get().cloned().unwrap()
@@ -93,21 +94,21 @@ fn add_native_module_fns(jit: &mut JITRunTime, module: &str, fns: &[(&str, &[Typ
 
 impl JITRunTime {
     fn add_memory_runtime(&mut self) -> Result<()> {
-        self.native_symbols.write().unwrap().insert("__vm_scope_enter".to_string(), memory::scope_enter as *const () as usize);
-        self.native_symbols.write().unwrap().insert("__vm_scope_exit_void".to_string(), memory::scope_exit_void as *const () as usize);
-        self.native_symbols.write().unwrap().insert("__vm_scope_exit_dynamic".to_string(), memory::scope_exit_dynamic as *const () as usize);
-        self.native_symbols.write().unwrap().insert("__vm_scope_exit_bytes".to_string(), memory::scope_exit_bytes as *const () as usize);
-        self.native_symbols.write().unwrap().insert("__vm_struct_alloc".to_string(), native::struct_alloc as *const () as usize);
-        self.native_symbols.write().unwrap().insert("__vm_repeat_fill".to_string(), native::repeat_fill as *const () as usize);
-        self.native_symbols.write().unwrap().insert("__vm_strcat".to_string(), native::strcat as *const () as usize);
-        self.native_symbols.write().unwrap().insert("__vm_strcat_i64".to_string(), native::strcat_i64 as *const () as usize);
-        self.native_symbols.write().unwrap().insert("__vm_strcat_assign".to_string(), native::strcat_assign as *const () as usize);
-        self.native_symbols.write().unwrap().insert("__vm_callback_new".to_string(), native::callback_new as *const () as usize);
-        self.native_symbols.write().unwrap().insert("__vm_spawn_ptr".to_string(), native::spawn_ptr as *const () as usize);
-        self.native_symbols.write().unwrap().insert("__vm_struct_from_ptr".to_string(), native::struct_from_ptr as *const () as usize);
-        self.native_symbols.write().unwrap().insert("__vm_array_from_ptr".to_string(), native::array_from_ptr as *const () as usize);
-        self.native_symbols.write().unwrap().insert("__vm_array_to_ptr".to_string(), native::array_to_ptr as *const () as usize);
-        self.native_symbols.write().unwrap().insert("__vm_arith_fault".to_string(), memory::arith_fault as *const () as usize);
+        self.native_symbols.write().insert("__vm_scope_enter".to_string(), memory::scope_enter as *const () as usize);
+        self.native_symbols.write().insert("__vm_scope_exit_void".to_string(), memory::scope_exit_void as *const () as usize);
+        self.native_symbols.write().insert("__vm_scope_exit_dynamic".to_string(), memory::scope_exit_dynamic as *const () as usize);
+        self.native_symbols.write().insert("__vm_scope_exit_bytes".to_string(), memory::scope_exit_bytes as *const () as usize);
+        self.native_symbols.write().insert("__vm_struct_alloc".to_string(), native::struct_alloc as *const () as usize);
+        self.native_symbols.write().insert("__vm_repeat_fill".to_string(), native::repeat_fill as *const () as usize);
+        self.native_symbols.write().insert("__vm_strcat".to_string(), native::strcat as *const () as usize);
+        self.native_symbols.write().insert("__vm_strcat_i64".to_string(), native::strcat_i64 as *const () as usize);
+        self.native_symbols.write().insert("__vm_strcat_assign".to_string(), native::strcat_assign as *const () as usize);
+        self.native_symbols.write().insert("__vm_callback_new".to_string(), native::callback_new as *const () as usize);
+        self.native_symbols.write().insert("__vm_spawn_ptr".to_string(), native::spawn_ptr as *const () as usize);
+        self.native_symbols.write().insert("__vm_struct_from_ptr".to_string(), native::struct_from_ptr as *const () as usize);
+        self.native_symbols.write().insert("__vm_array_from_ptr".to_string(), native::array_from_ptr as *const () as usize);
+        self.native_symbols.write().insert("__vm_array_to_ptr".to_string(), native::array_to_ptr as *const () as usize);
+        self.native_symbols.write().insert("__vm_arith_fault".to_string(), memory::arith_fault as *const () as usize);
 
         let void_sig = self.get_sig(&[], Type::Void)?;
         self.scope_enter_fn = Some(self.module.declare_function("__vm_scope_enter", cranelift_module::Linkage::Import, &void_sig)?);
@@ -295,7 +296,7 @@ impl JITRunTime {
 
 #[derive(Clone)]
 pub struct Vm {
-    pub jit: Arc<RwLock<JITRunTime>>,
+    pub jit: Arc<parking_lot::RwLock<JITRunTime>>,
 }
 
 impl Vm {
@@ -303,7 +304,7 @@ impl Vm {
         dynamic::set_dynamic_return_handler(memory::take_dynamic_return);
         let jit = Arc::new(RwLock::new(JITRunTime::new(|_| {})));
         {
-            let mut guard = jit.write().unwrap();
+            let mut guard = jit.write();
             guard.set_owner(Arc::downgrade(&jit));
             guard.add_memory_runtime().expect("register VM memory runtime");
             guard.add_std().expect("register VM std runtime");
@@ -314,20 +315,22 @@ impl Vm {
 
     pub fn with_all() -> Result<Self> {
         let vm = Self::new();
-        vm.jit.write().unwrap().add_all()?;
+        vm.jit.write().add_all()?;
         Ok(vm)
     }
 
     pub fn import(&self, name: &str, path: &str) -> Result<()> {
-        if root::contains(path) {
-            let code = root::get(path).unwrap();
+        // 之前用 contains + get 两步会因其他线程并发 add/remove 出现 race;
+        // 改用 if let Some 一次性持有,失败返回明确的错误而不是 host panic。
+        if let Ok(code) = root::get(path) {
             if code.is_str() {
-                self.jit.write().unwrap().import_code(name, code.as_str().as_bytes().to_vec())
+                self.jit.write().import_code(name, code.as_str().as_bytes().to_vec())?;
             } else {
-                self.jit.write().unwrap().import_code(name, code.get_dynamic("code").ok_or(anyhow!("{:?} 没有 code 成员", code))?.as_str().as_bytes().to_vec())
+                self.jit.write().import_code(name, code.get_dynamic("code").ok_or_else(|| anyhow!("{:?} 没有 code 成员", code))?.as_str().as_bytes().to_vec())?;
             }
+            Ok(())
         } else {
-            self.jit.write().unwrap().compiler.import_file(name, path)?;
+            self.jit.write().compiler.import_file(name, path)?;
             Ok(())
         }
     }
@@ -344,7 +347,6 @@ mod tests {
     use super::{GpuStructLayout, Vm, ZustCallback};
     use dynamic::{CustomProperty, Dynamic, ToJson, Type};
     use std::collections::BTreeMap;
-    use std::sync::{Mutex, RwLock};
 
     /// Test-only wrapper for a compiled function pointer + return type.
     struct TestFn {
@@ -361,7 +363,7 @@ mod tests {
         }
     }
 
-    /// Test-only convenience wrapping `vm.jit.write().unwrap()` calls.
+    /// Test-only convenience wrapping `vm.jit.write()` calls.
     trait VmTestExt {
         fn import_code(&self, name: &str, code: Vec<u8>) -> anyhow::Result<()>;
         fn get_fn(&self, name: &str, arg_tys: &[Type]) -> anyhow::Result<TestFn>;
@@ -380,46 +382,46 @@ mod tests {
 
     impl VmTestExt for Vm {
         fn import_code(&self, name: &str, code: Vec<u8>) -> anyhow::Result<()> {
-            self.jit.write().unwrap().import_code(name, code)
+            self.jit.write().import_code(name, code)
         }
         fn get_fn(&self, name: &str, arg_tys: &[Type]) -> anyhow::Result<TestFn> {
-            let (ptr, ret) = self.jit.write().unwrap().get_fn_ptr(name, arg_tys)?;
+            let (ptr, ret) = self.jit.write().get_fn_ptr(name, arg_tys)?;
             Ok(TestFn { ptr, ret })
         }
         fn get_fn_with_params(&self, name: &str, arg_tys: &[Type], generic_args: &[Type]) -> anyhow::Result<TestFn> {
-            let (ptr, ret) = self.jit.write().unwrap().get_fn_ptr_with_params(name, arg_tys, generic_args)?;
+            let (ptr, ret) = self.jit.write().get_fn_ptr_with_params(name, arg_tys, generic_args)?;
             Ok(TestFn { ptr, ret })
         }
         fn get_fn_ptr(&self, name: &str, arg_tys: &[Type]) -> anyhow::Result<(*const u8, Type)> {
-            self.jit.write().unwrap().get_fn_ptr(name, arg_tys)
+            self.jit.write().get_fn_ptr(name, arg_tys)
         }
         fn infer(&self, name: &str, arg_tys: &[Type]) -> anyhow::Result<Type> {
-            self.jit.write().unwrap().get_type(name, arg_tys)
+            self.jit.write().get_type(name, arg_tys)
         }
         fn add_native_module_ptr(&self, module: &str, name: &str, arg_tys: &[Type], ret_ty: Type, ptr: *const u8) -> anyhow::Result<u32> {
-            self.jit.write().unwrap().add_native_module_ptr(module, name, arg_tys, ret_ty, ptr)
+            self.jit.write().add_native_module_ptr(module, name, arg_tys, ret_ty, ptr)
         }
         fn add_native_method_ptr(&self, def: &str, method: &str, arg_tys: &[Type], ret_ty: Type, ptr: *const u8) -> anyhow::Result<u32> {
-            self.jit.write().unwrap().add_native_method_ptr(def, method, arg_tys, ret_ty, ptr)
+            self.jit.write().add_native_method_ptr(def, method, arg_tys, ret_ty, ptr)
         }
         fn add_empty_type(&self, name: &str) -> anyhow::Result<u32> {
-            self.jit.write().unwrap().add_empty_type(name)
+            self.jit.write().add_empty_type(name)
         }
         fn add_std(&self) -> anyhow::Result<()> {
-            self.jit.write().unwrap().add_std()
+            self.jit.write().add_std()
         }
         fn add_any(&self) -> anyhow::Result<()> {
-            self.jit.write().unwrap().add_any()
+            self.jit.write().add_any()
         }
         fn get_symbol(&self, name: &str, params: Vec<Type>) -> anyhow::Result<Type> {
-            Ok(Type::Symbol { id: self.jit.write().unwrap().get_id(name)?, params })
+            Ok(Type::Symbol { id: self.jit.write().get_id(name)?, params })
         }
         fn gpu_struct_layout(&self, name: &str, params: &[Type]) -> anyhow::Result<GpuStructLayout> {
-            let jit = self.jit.write().unwrap();
+            let jit = self.jit.write();
             GpuStructLayout::from_symbol_table(&jit.compiler.symbols, name, params)
         }
         fn load(&self, code: Vec<u8>, arg_name: smol_str::SmolStr) -> anyhow::Result<(i64, Type)> {
-            self.jit.write().unwrap().load(code, arg_name)
+            self.jit.write().load(code, arg_name)
         }
     }
 
@@ -1802,7 +1804,7 @@ mod tests {
 
     #[test]
     fn native_can_save_and_later_call_closure_callback() -> anyhow::Result<()> {
-        static SAVED_CALLBACK: Mutex<Option<ZustCallback>> = Mutex::new(None);
+        static SAVED_CALLBACK: parking_lot::Mutex<Option<ZustCallback>> = parking_lot::Mutex::new(None);
 
         extern "C" fn save_callback(callback: *const Dynamic) -> bool {
             if callback.is_null() {
@@ -1811,13 +1813,13 @@ mod tests {
             let Some(callback) = (unsafe { &*callback }).as_custom::<ZustCallback>().cloned() else {
                 return false;
             };
-            *SAVED_CALLBACK.lock().unwrap() = Some(callback);
+            *SAVED_CALLBACK.lock() = Some(callback);
             true
         }
 
         let path = "local/vm_callback/result";
         let _ = root::remove(path);
-        *SAVED_CALLBACK.lock().unwrap() = None;
+        *SAVED_CALLBACK.lock() = None;
 
         let vm = Vm::with_all()?;
         vm.add_native_module_ptr("callback_test", "save", &[Type::Any], Type::Bool, save_callback as *const u8)?;
@@ -1841,7 +1843,7 @@ mod tests {
         assert!(register());
         assert!(root::get(path).is_err());
 
-        let callback = SAVED_CALLBACK.lock().unwrap().clone().expect("callback should be saved");
+        let callback = SAVED_CALLBACK.lock().clone().expect("callback should be saved");
         let result = callback.call0()?;
         assert_eq!(result.as_bool(), Some(true));
         assert_eq!(root::get(path)?.as_int(), Some(42));
@@ -1850,7 +1852,7 @@ mod tests {
 
     #[test]
     fn closure_captures_share_state_between_callbacks() -> anyhow::Result<()> {
-        static SAVED_CALLBACKS: Mutex<Vec<ZustCallback>> = Mutex::new(Vec::new());
+        static SAVED_CALLBACKS: parking_lot::Mutex<Vec<ZustCallback>> = parking_lot::Mutex::new(Vec::new());
 
         extern "C" fn save_callback(callback: *const Dynamic) -> bool {
             if callback.is_null() {
@@ -1859,11 +1861,11 @@ mod tests {
             let Some(callback) = (unsafe { &*callback }).as_custom::<ZustCallback>().cloned() else {
                 return false;
             };
-            SAVED_CALLBACKS.lock().unwrap().push(callback);
+            SAVED_CALLBACKS.lock().push(callback);
             true
         }
 
-        SAVED_CALLBACKS.lock().unwrap().clear();
+        SAVED_CALLBACKS.lock().clear();
 
         let vm = Vm::with_all()?;
         vm.add_native_module_ptr("capture_test", "save", &[Type::Any], Type::Bool, save_callback as *const u8)?;
@@ -1890,7 +1892,7 @@ mod tests {
         assert!(register());
 
         let (writer, reader) = {
-            let saved = SAVED_CALLBACKS.lock().unwrap();
+            let saved = SAVED_CALLBACKS.lock();
             assert_eq!(saved.len(), 2);
             (saved[0].clone(), saved[1].clone())
         };
@@ -1902,7 +1904,7 @@ mod tests {
 
     #[test]
     fn native_can_save_and_later_call_named_function_callback() -> anyhow::Result<()> {
-        static SAVED_CALLBACK: Mutex<Option<ZustCallback>> = Mutex::new(None);
+        static SAVED_CALLBACK: parking_lot::Mutex<Option<ZustCallback>> = parking_lot::Mutex::new(None);
 
         extern "C" fn save_callback(callback: *const Dynamic) -> bool {
             if callback.is_null() {
@@ -1911,13 +1913,13 @@ mod tests {
             let Some(callback) = (unsafe { &*callback }).as_custom::<ZustCallback>().cloned() else {
                 return false;
             };
-            *SAVED_CALLBACK.lock().unwrap() = Some(callback);
+            *SAVED_CALLBACK.lock() = Some(callback);
             true
         }
 
         let path = "local/vm_named_callback/result";
         let _ = root::remove(path);
-        *SAVED_CALLBACK.lock().unwrap() = None;
+        *SAVED_CALLBACK.lock() = None;
 
         let vm = Vm::with_all()?;
         vm.add_native_module_ptr("callback_test", "save", &[Type::Any], Type::Bool, save_callback as *const u8)?;
@@ -1941,7 +1943,7 @@ mod tests {
         assert!(register());
         assert!(root::get(path).is_err());
 
-        let callback = SAVED_CALLBACK.lock().unwrap().clone().expect("callback should be saved");
+        let callback = SAVED_CALLBACK.lock().clone().expect("callback should be saved");
         assert_eq!(callback.call1(dynamic::map!("text"=> "done"))?.as_bool(), Some(true));
         assert_eq!(root::get(path)?.as_str(), "done");
         Ok(())
@@ -1949,8 +1951,8 @@ mod tests {
 
     #[test]
     fn native_callback_can_receive_later_dynamic_args() -> anyhow::Result<()> {
-        static SAVED_PATH_CALLBACK: Mutex<Option<ZustCallback>> = Mutex::new(None);
-        static SAVED_SUM_CALLBACK: Mutex<Option<ZustCallback>> = Mutex::new(None);
+        static SAVED_PATH_CALLBACK: parking_lot::Mutex<Option<ZustCallback>> = parking_lot::Mutex::new(None);
+        static SAVED_SUM_CALLBACK: parking_lot::Mutex<Option<ZustCallback>> = parking_lot::Mutex::new(None);
 
         extern "C" fn save_path_callback(callback: *const Dynamic) -> bool {
             if callback.is_null() {
@@ -1959,7 +1961,7 @@ mod tests {
             let Some(callback) = (unsafe { &*callback }).as_custom::<ZustCallback>().cloned() else {
                 return false;
             };
-            *SAVED_PATH_CALLBACK.lock().unwrap() = Some(callback);
+            *SAVED_PATH_CALLBACK.lock() = Some(callback);
             true
         }
 
@@ -1970,7 +1972,7 @@ mod tests {
             let Some(callback) = (unsafe { &*callback }).as_custom::<ZustCallback>().cloned() else {
                 return false;
             };
-            *SAVED_SUM_CALLBACK.lock().unwrap() = Some(callback);
+            *SAVED_SUM_CALLBACK.lock() = Some(callback);
             true
         }
 
@@ -1978,8 +1980,8 @@ mod tests {
         let sum_result = "local/vm_callback/sum8";
         let _ = root::remove(path_result);
         let _ = root::remove(sum_result);
-        *SAVED_PATH_CALLBACK.lock().unwrap() = None;
-        *SAVED_SUM_CALLBACK.lock().unwrap() = None;
+        *SAVED_PATH_CALLBACK.lock() = None;
+        *SAVED_SUM_CALLBACK.lock() = None;
 
         let vm = Vm::with_all()?;
         vm.add_native_module_ptr("callback_test", "save_path", &[Type::Any], Type::Bool, save_path_callback as *const u8)?;
@@ -2013,11 +2015,11 @@ mod tests {
         let register_sum: extern "C" fn() -> bool = unsafe { std::mem::transmute(register_sum.ptr()) };
         assert!(register_sum());
 
-        let path_callback = SAVED_PATH_CALLBACK.lock().unwrap().clone().expect("path callback should be saved");
+        let path_callback = SAVED_PATH_CALLBACK.lock().clone().expect("path callback should be saved");
         assert_eq!(path_callback.call1(Dynamic::from("picked.txt"))?.as_bool(), Some(true));
         assert_eq!(root::get(path_result)?.as_str(), "picked.txt");
 
-        let sum_callback = SAVED_SUM_CALLBACK.lock().unwrap().clone().expect("sum callback should be saved");
+        let sum_callback = SAVED_SUM_CALLBACK.lock().clone().expect("sum callback should be saved");
         let sum_args = (1i64..=8).map(Dynamic::from).collect();
         assert_eq!(sum_callback.call(sum_args)?.as_bool(), Some(true));
         assert_eq!(root::get(sum_result)?.as_int(), Some(36));
@@ -2026,7 +2028,7 @@ mod tests {
 
     #[test]
     fn callback_with_16_explicit_args_and_captures() -> anyhow::Result<()> {
-        static SAVED_SUM16: Mutex<Option<ZustCallback>> = Mutex::new(None);
+        static SAVED_SUM16: parking_lot::Mutex<Option<ZustCallback>> = parking_lot::Mutex::new(None);
 
         extern "C" fn save_sum16(callback: *const Dynamic) -> bool {
             if callback.is_null() {
@@ -2035,13 +2037,13 @@ mod tests {
             let Some(callback) = (unsafe { &*callback }).as_custom::<ZustCallback>().cloned() else {
                 return false;
             };
-            *SAVED_SUM16.lock().unwrap() = Some(callback);
+            *SAVED_SUM16.lock() = Some(callback);
             true
         }
 
         let sum16_path = "local/vm_callback/sum16";
         let _ = root::remove(sum16_path);
-        *SAVED_SUM16.lock().unwrap() = None;
+        *SAVED_SUM16.lock() = None;
 
         let vm = Vm::with_all()?;
         vm.add_native_module_ptr("callback_test", "save_sum16", &[Type::Any], Type::Bool, save_sum16 as *const u8)?;
@@ -2064,7 +2066,7 @@ mod tests {
         let register: extern "C" fn() -> bool = unsafe { std::mem::transmute(register.ptr()) };
         assert!(register());
 
-        let callback = SAVED_SUM16.lock().unwrap().clone().expect("sum16 callback saved");
+        let callback = SAVED_SUM16.lock().clone().expect("sum16 callback saved");
         let args: Vec<Dynamic> = (1i64..=16).map(Dynamic::from).collect();
         assert_eq!(callback.call(args)?.as_bool(), Some(true));
         assert_eq!(root::get(sum16_path)?.as_str(), "sum=136");
@@ -2183,6 +2185,28 @@ mod tests {
         )?;
 
         assert!(vm.get_fn_ptr("vm_registered_string_concat::send_panel", &[Type::Any]).is_ok());
+        Ok(())
+    }
+
+    #[test]
+    fn dynamic_method_error_reports_source_location() -> anyhow::Result<()> {
+        let vm = Vm::with_all()?;
+        vm.import_code(
+            "vm_bad_dynamic_method",
+            br#"
+            pub fn main(value) {
+                let out = "";
+                out = out + value.fetch("name");
+            }
+            "#
+            .to_vec(),
+        )?;
+
+        let err = vm.get_fn_ptr("vm_bad_dynamic_method::main", &[Type::Any]).expect_err("bad dynamic method should fail to compile");
+        let msg = format!("{err:#}");
+        assert!(msg.contains("vm_bad_dynamic_method:4:"), "{msg}");
+        assert!(msg.contains("`Any.fetch` 不是成员函数"), "{msg}");
+        assert!(msg.contains(r#"out = out + value.fetch("name");"#), "{msg}");
         Ok(())
     }
 
@@ -2427,6 +2451,39 @@ mod tests {
         let result = unsafe { &*read_action(&action_map, &panel_id, &action_id) };
 
         assert_eq!(result.get_dynamic("id").map(|value| value.as_str().to_string()), Some("open".to_string()));
+        Ok(())
+    }
+
+    #[test]
+    fn map_get_alias_matches_get_key() -> anyhow::Result<()> {
+        let vm = Vm::with_all()?;
+        vm.import_code(
+            "vm_map_get_alias",
+            br#"
+            pub fn read_name(data) {
+                data.get("name")
+            }
+
+            pub fn read_missing(data) {
+                data.get("missing")
+            }
+            "#
+            .to_vec(),
+        )?;
+
+        let data = dynamic::map!("name"=> "zust");
+
+        let compiled = vm.get_fn("vm_map_get_alias::read_name", &[Type::Any])?;
+        assert_eq!(compiled.ret_ty(), &Type::Any);
+        let read_name: extern "C" fn(*const Dynamic) -> *const Dynamic = unsafe { std::mem::transmute(compiled.ptr()) };
+        let result = unsafe { &*read_name(&data) };
+        assert_eq!(result.as_str(), "zust");
+
+        let compiled = vm.get_fn("vm_map_get_alias::read_missing", &[Type::Any])?;
+        assert_eq!(compiled.ret_ty(), &Type::Any);
+        let read_missing: extern "C" fn(*const Dynamic) -> *const Dynamic = unsafe { std::mem::transmute(compiled.ptr()) };
+        let result = unsafe { &*read_missing(&data) };
+        assert!(result.is_null());
         Ok(())
     }
 
@@ -3268,16 +3325,16 @@ mod tests {
 
     #[derive(Debug, Default)]
     struct PropertyForwardingObject {
-        values: RwLock<BTreeMap<String, Dynamic>>,
+        values: parking_lot::RwLock<BTreeMap<String, Dynamic>>,
     }
 
     impl CustomProperty for PropertyForwardingObject {
         fn get_key(&self, key: &str) -> Option<Dynamic> {
-            self.values.read().unwrap().get(key).cloned()
+            self.values.read().get(key).cloned()
         }
 
         fn set_key(&self, key: &str, value: Dynamic) -> bool {
-            self.values.write().unwrap().insert(key.to_string(), value);
+            self.values.write().insert(key.to_string(), value);
             true
         }
     }
@@ -4051,8 +4108,8 @@ mod tests {
         )?;
 
         let compiled = vm.get_fn("vm_dynamic_index_sum::sum_list", &[Type::I64])?;
-        let sum_list_id = vm.jit.write().unwrap().compiler.symbols.get_id("vm_dynamic_index_sum::sum_list")?;
-        let hints = vm.jit.write().unwrap().compiler.inferred_local_type_hints(sum_list_id, &[], &[Type::I64]);
+        let sum_list_id = vm.jit.write().compiler.symbols.get_id("vm_dynamic_index_sum::sum_list")?;
+        let hints = vm.jit.write().compiler.inferred_local_type_hints(sum_list_id, &[], &[Type::I64]);
         assert!(hints.iter().any(|ty| matches!(ty, Some(Type::List(elem)) if elem.as_ref() == &Type::I64)), "local type hints: {:?}", hints);
         assert_eq!(compiled.ret_ty(), &Type::I64);
         let sum_list: extern "C" fn(i64) -> i64 = unsafe { std::mem::transmute(compiled.ptr()) };
@@ -4205,40 +4262,40 @@ mod tests {
         )?;
 
         let compiled = vm.get_fn("vm_inferred_list_shortcuts::second_bool", &[])?;
-        let second_bool_id = vm.jit.write().unwrap().compiler.symbols.get_id("vm_inferred_list_shortcuts::second_bool")?;
-        let hints = vm.jit.write().unwrap().compiler.inferred_local_type_hints(second_bool_id, &[], &[]);
+        let second_bool_id = vm.jit.write().compiler.symbols.get_id("vm_inferred_list_shortcuts::second_bool")?;
+        let hints = vm.jit.write().compiler.inferred_local_type_hints(second_bool_id, &[], &[]);
         assert!(hints.iter().any(|ty| matches!(ty, Some(Type::List(elem)) if elem.as_ref() == &Type::Bool)), "bool local type hints: {:?}", hints);
         assert_eq!(compiled.ret_ty(), &Type::Bool);
         let second_bool: extern "C" fn() -> bool = unsafe { std::mem::transmute(compiled.ptr()) };
         assert!(!second_bool());
 
         let compiled = vm.get_fn("vm_inferred_list_shortcuts::first_u8", &[])?;
-        let first_u8_id = vm.jit.write().unwrap().compiler.symbols.get_id("vm_inferred_list_shortcuts::first_u8")?;
-        let hints = vm.jit.write().unwrap().compiler.inferred_local_type_hints(first_u8_id, &[], &[]);
+        let first_u8_id = vm.jit.write().compiler.symbols.get_id("vm_inferred_list_shortcuts::first_u8")?;
+        let hints = vm.jit.write().compiler.inferred_local_type_hints(first_u8_id, &[], &[]);
         assert!(hints.iter().any(|ty| matches!(ty, Some(Type::List(elem)) if elem.as_ref() == &Type::U8)), "u8 local type hints: {:?}", hints);
         assert_eq!(compiled.ret_ty(), &Type::U8);
         let first_u8: extern "C" fn() -> u8 = unsafe { std::mem::transmute(compiled.ptr()) };
         assert_eq!(first_u8(), 7);
 
         let compiled = vm.get_fn("vm_inferred_list_shortcuts::sum_i32", &[Type::I64])?;
-        let sum_i32_id = vm.jit.write().unwrap().compiler.symbols.get_id("vm_inferred_list_shortcuts::sum_i32")?;
-        let hints = vm.jit.write().unwrap().compiler.inferred_local_type_hints(sum_i32_id, &[], &[Type::I64]);
+        let sum_i32_id = vm.jit.write().compiler.symbols.get_id("vm_inferred_list_shortcuts::sum_i32")?;
+        let hints = vm.jit.write().compiler.inferred_local_type_hints(sum_i32_id, &[], &[Type::I64]);
         assert!(hints.iter().any(|ty| matches!(ty, Some(Type::List(elem)) if elem.as_ref() == &Type::I32)), "i32 local type hints: {:?}", hints);
         assert_eq!(compiled.ret_ty(), &Type::I32);
         let sum_i32: extern "C" fn(i64) -> i32 = unsafe { std::mem::transmute(compiled.ptr()) };
         assert_eq!(sum_i32(100), 4950);
 
         let compiled = vm.get_fn("vm_inferred_list_shortcuts::sum_f32", &[Type::I64])?;
-        let sum_f32_id = vm.jit.write().unwrap().compiler.symbols.get_id("vm_inferred_list_shortcuts::sum_f32")?;
-        let hints = vm.jit.write().unwrap().compiler.inferred_local_type_hints(sum_f32_id, &[], &[Type::I64]);
+        let sum_f32_id = vm.jit.write().compiler.symbols.get_id("vm_inferred_list_shortcuts::sum_f32")?;
+        let hints = vm.jit.write().compiler.inferred_local_type_hints(sum_f32_id, &[], &[Type::I64]);
         assert!(hints.iter().any(|ty| matches!(ty, Some(Type::List(elem)) if elem.as_ref() == &Type::F32)), "f32 local type hints: {:?}", hints);
         assert_eq!(compiled.ret_ty(), &Type::F32);
         let sum_f32: extern "C" fn(i64) -> f32 = unsafe { std::mem::transmute(compiled.ptr()) };
         assert_eq!(sum_f32(10), 45.0);
 
         let compiled = vm.get_fn("vm_inferred_list_shortcuts::second_str", &[])?;
-        let second_str_id = vm.jit.write().unwrap().compiler.symbols.get_id("vm_inferred_list_shortcuts::second_str")?;
-        let hints = vm.jit.write().unwrap().compiler.inferred_local_type_hints(second_str_id, &[], &[]);
+        let second_str_id = vm.jit.write().compiler.symbols.get_id("vm_inferred_list_shortcuts::second_str")?;
+        let hints = vm.jit.write().compiler.inferred_local_type_hints(second_str_id, &[], &[]);
         assert!(hints.iter().any(|ty| matches!(ty, Some(Type::List(elem)) if elem.as_ref() == &Type::Str)), "str local type hints: {:?}", hints);
         assert_eq!(compiled.ret_ty(), &Type::Str);
         let second_str: extern "C" fn() -> *const Dynamic = unsafe { std::mem::transmute(compiled.ptr()) };

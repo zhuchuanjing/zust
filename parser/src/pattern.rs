@@ -45,7 +45,60 @@ impl Parser {
         } else if self.just("(").is_ok() {
             Ok(Pattern::new(PatternKind::Tuple(crate::parse_list!(self, Vec::new(), b')', b',', self.pattern()?)), self.span_from(start)))
         } else if self.just("[").is_ok() {
-            Ok(Pattern::new(PatternKind::List { elems: crate::parse_list!(self, Vec::new(), b']', b',', self.pattern()?), has_rest: false }, self.span_from(start)))
+            // 手写 list 解析,处理 `..rest`。
+            let mut elems = Vec::new();
+            let mut has_rest = false;
+            self.whitespace()?;
+            if self.take(b']').is_ok() {
+                return Ok(Pattern::new(PatternKind::List { elems, has_rest }, self.span_from(start)));
+            }
+            // 第一个元素可能是 `..name` 形式(整个 list 都是 rest)。
+            if self.take(b'.').is_ok() && self.take(b'.').is_ok() {
+                self.whitespace()?;
+                let (name, ty) = self.ident_typed()?;
+                elems.push(Pattern::new(PatternKind::Ident { name, ty }, self.span_from(start)));
+                has_rest = true;
+                self.whitespace()?;
+                self.take(b']')?;
+                return Ok(Pattern::new(PatternKind::List { elems, has_rest }, self.span_from(start)));
+            }
+            elems.push(self.pattern()?);
+            self.whitespace()?;
+            if self.take(b'.').is_ok() && self.take(b'.').is_ok() {
+                self.whitespace()?;
+                let (name, ty) = self.ident_typed()?;
+                elems.push(Pattern::new(PatternKind::Ident { name, ty }, self.span_from(start)));
+                has_rest = true;
+                self.whitespace()?;
+                let _ = self.take(b','); // 容忍尾随逗号
+                self.whitespace()?;
+                self.take(b']')?;
+                return Ok(Pattern::new(PatternKind::List { elems, has_rest }, self.span_from(start)));
+            } else if self.take(b',').is_ok() {
+                loop {
+                    self.whitespace()?;
+                    if self.take(b']').is_ok() {
+                        break;
+                    }
+                    if self.take(b'.').is_ok() && self.take(b'.').is_ok() {
+                        self.whitespace()?;
+                        let (name, ty) = self.ident_typed()?;
+                        elems.push(Pattern::new(PatternKind::Ident { name, ty }, self.span_from(start)));
+                        has_rest = true;
+                        self.whitespace()?;
+                        self.take(b']')?;
+                        return Ok(Pattern::new(PatternKind::List { elems, has_rest }, self.span_from(start)));
+                    }
+                    elems.push(self.pattern()?);
+                    self.whitespace()?;
+                    if !self.take(b',').is_ok() {
+                        break;
+                    }
+                }
+            }
+            self.whitespace()?;
+            self.take(b']')?;
+            Ok(Pattern::new(PatternKind::List { elems, has_rest }, self.span_from(start)))
         } else if let Ok(text) = self.string() {
             Ok(Pattern::new(PatternKind::Literal(Dynamic::String(text)), self.span_from(start)))
         } else if let Ok((name, ty)) = self.ident_typed() {

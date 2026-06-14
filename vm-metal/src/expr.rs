@@ -17,7 +17,7 @@ impl MetalCompiler {
         }
         match &expr.kind {
             ExprKind::Value(value) => self.const_dynamic(value.clone()),
-            ExprKind::Const(idx) => self.const_dynamic(self.compiler.consts.get(*idx).cloned().ok_or_else(|| anyhow!("compiler constant {idx} missing"))?),
+            ExprKind::Const(idx) => self.const_dynamic(self.compiler.consts.get_index(*idx).map(|(_, v)| v.clone()).ok_or_else(|| anyhow!("compiler constant {idx} missing"))?),
             ExprKind::Typed { value, ty } => {
                 let ty = self.resolve_type(ty);
                 if ty.is_native()

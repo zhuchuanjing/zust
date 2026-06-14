@@ -590,13 +590,6 @@ async fn upload_dispatch(axum::extract::State(options): axum::extract::State<Ser
     }
 }
 
-fn api_route(options: &ServerOptions, req: &Request<Body>) -> String {
-    let method = req.method().as_str().to_ascii_lowercase();
-    let prefix = format!("/{}/", options.api_prefix.trim_matches('/'));
-    let path = req.uri().path().strip_prefix(&prefix).unwrap_or("").trim_matches('/');
-    format!("local/http/{method}/{path}")
-}
-
 async fn api_payload(req: Request<Body>, body_limit: usize) -> Result<Dynamic> {
     let (parts, body) = req.into_parts();
     let method = parts.method.as_str().to_ascii_lowercase();

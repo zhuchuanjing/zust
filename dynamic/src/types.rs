@@ -2,8 +2,8 @@ use crate::{Dynamic, DynamicErr};
 use smol_str::SmolStr;
 
 use anyhow::{Result, anyhow};
+use parking_lot::RwLock;
 use std::rc::Rc;
-use std::sync::RwLock;
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub enum ConstIntOp {
@@ -140,16 +140,7 @@ impl PartialEq for Type {
             (Type::Vec(elem_type1, len1), Type::Vec(elem_type2, len2)) => elem_type1 == elem_type2 && len1 == len2,
             (Type::Array(elem_type1, len1), Type::Array(elem_type2, len2)) => elem_type1 == elem_type2 && len1 == len2,
             (Type::ArrayParam(elem_type1, len1), Type::ArrayParam(elem_type2, len2)) => elem_type1 == elem_type2 && len1 == len2,
-            (Type::Fn { tys: t1, ret: r1 }, Type::Fn { tys: t2, ret: r2 }) => {
-                if t1 == t2 {
-                    if r1 != r2 {
-                        panic!("函数返回类型不一致")
-                    }
-                    true
-                } else {
-                    false
-                }
-            }
+            (Type::Fn { tys: t1, ret: r1 }, Type::Fn { tys: t2, ret: r2 }) => t1 == t2 && r1 == r2,
             _ => false,
         }
     }
@@ -251,6 +242,10 @@ impl Type {
             Self::U16 => src.try_into().map(Dynamic::U16),
             Self::U32 => src.try_into().map(Dynamic::U32),
             Self::U64 => src.try_into().map(Dynamic::U64),
+            Self::F16 => {
+                let f: f64 = src.try_into()?;
+                Ok(Dynamic::F16(crate::f64_to_f16(f)))
+            }
             Self::F32 => src.try_into().map(Dynamic::F32),
             Self::F64 => src.try_into().map(Dynamic::F64),
             Self::Str => Ok(Dynamic::from(src.to_string())),
@@ -395,6 +390,7 @@ impl Dynamic {
             Self::U16(_) => Type::U16,
             Self::U32(_) => Type::U32,
             Self::U64(_) => Type::U64,
+            Self::F16(_) => Type::F16,
             Self::F32(_) => Type::F32,
             Self::F64(_) => Type::F64,
             Self::Bytes(_) => Type::Vec(Rc::new(Type::U8), len),
@@ -413,7 +409,7 @@ impl Dynamic {
             Self::Custom(_) => Type::Any,
             Self::Null => Type::Void,
             Self::List(items) => {
-                let tys: Vec<Type> = items.read().unwrap().iter().map(|v| v.get_type()).collect();
+                let tys: Vec<Type> = items.read().iter().map(|v| v.get_type()).collect();
                 if let Some(first) = tys.first() {
                     if tys.iter().all(|x| x == first) {
                         return Type::Array(Rc::new(first.clone()), len);
@@ -431,11 +427,11 @@ type DynamicReturnHandler = unsafe fn(*const Dynamic) -> Box<Dynamic>;
 static DYNAMIC_RETURN_HANDLER: RwLock<Option<DynamicReturnHandler>> = RwLock::new(None);
 
 pub fn set_dynamic_return_handler(handler: DynamicReturnHandler) {
-    *DYNAMIC_RETURN_HANDLER.write().unwrap() = Some(handler);
+    *DYNAMIC_RETURN_HANDLER.write() = Some(handler);
 }
 
 unsafe fn take_dynamic_return(ptr: *const Dynamic) -> Box<Dynamic> {
-    if let Some(handler) = *DYNAMIC_RETURN_HANDLER.read().unwrap() {
+    if let Some(handler) = *DYNAMIC_RETURN_HANDLER.read() {
         unsafe { handler(ptr) }
     } else if ptr.is_null() {
         Box::new(Dynamic::Null)

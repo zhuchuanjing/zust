@@ -28,14 +28,11 @@ pub fn to_markdown(d: &Dynamic, buf: &mut String) {
         //简单的 Vec<float> Vec<int> 按照 json
         d.to_json(buf);
     } else if let Dynamic::Map(m) = d {
-        if let Ok(map) = m.read() {
-            for (key, v) in map.iter() {
-                buf.push_str(&format!("#### ```{}```\n", key));
-                to_markdown(v, buf);
-                buf.push('\n');
-            }
-        } else {
-            buf.push_str(&d.to_string());
+        let map = m.read();
+        for (key, v) in map.iter() {
+            buf.push_str(&format!("#### ```{}```\n", key));
+            to_markdown(v, buf);
+            buf.push('\n');
         }
     } else if let Dynamic::Bytes(bytes) = d {
         if bytes.len() >= 8 {

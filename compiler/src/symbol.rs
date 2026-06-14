@@ -1,7 +1,7 @@
 use dynamic::{ConstIntOp, Dynamic, Type};
 use parser::Stmt;
 use smol_str::SmolStr;
-use std::{collections::BTreeMap, rc::Rc, sync::Arc};
+use std::{rc::Rc, sync::Arc};
 
 use super::Capture;
 
@@ -106,7 +106,8 @@ pub fn substitute_type(ty: &Type, params: &[Type], args: &[Type]) -> Type {
 #[derive(Clone, Default)]
 pub struct SymbolTable {
     pub symbols: IndexMap<SmolStr, Symbol>,
-    modules: BTreeMap<SmolStr, BTreeMap<SmolStr, u32>>,
+    // 双 IndexMap:按模块名 + 模块内符号名 O(1) 查找;按插入顺序遍历。
+    modules: IndexMap<SmolStr, IndexMap<SmolStr, u32>>,
     pub roots: Vec<SmolStr>,
 }
 
@@ -283,7 +284,7 @@ impl SymbolTable {
         } else {
             self.roots.push(name.clone());
         }
-        self.modules.insert(name, BTreeMap::new());
+        self.modules.insert(name, IndexMap::new());
     }
 
     pub fn push_module_scope(&mut self, name: SmolStr) {
@@ -303,7 +304,7 @@ impl SymbolTable {
             }) {
                 if let Some(m) = self.modules.get_mut(&last) {
                     for name in names {
-                        m.remove(&name); //删除非 pub 的符号
+                        m.shift_remove(&name); //删除非 pub 的符号;保持插入顺序
                     }
                 }
             }
@@ -311,26 +312,40 @@ impl SymbolTable {
     }
 
     pub fn get_id(&self, name: &str) -> Result<u32> {
+        // 1) 全名命中 (含 :: 的 id 或 add_global 注册过的全局符号)。
         if let Some(idx) = self.symbols.get_index_of(name) {
             return Ok(idx as u32);
         }
-        if let Some(id) = self.roots.iter().rev().find_map(|r| self.modules.get(r).and_then(|m| m.get(name))) {
-            return Ok(*id);
-        }
-        for root in self.roots.iter().rev() {
-            if let Some(idx) = self.symbols.get_index_of(format!("{root}::{name}").as_str()) {
+        // 2) 含 :: 的名字拆分按模块查找,O(1)。
+        if let Some((mod_name, sym_name)) = name.split_once("::") {
+            if let Some(&id) = self.modules.get(mod_name).and_then(|m| m.get(sym_name)) {
+                return Ok(id);
+            }
+            // 即使 modules 里被 pop_module 移除,完整名仍可能在 symbols IndexMap 里。
+            let full = format!("{mod_name}::{sym_name}");
+            if let Some(idx) = self.symbols.get_index_of(full.as_str()) {
                 return Ok(idx as u32);
             }
         }
-        if let Some(id) = self.modules.values().find_map(|m| m.get(name)) {
-            return Ok(*id);
-        }
-        if let Some((mod_name, symbol_name)) = name.split_once("::") {
-            if let Some(m) = self.modules.get(mod_name) {
-                return m.get(symbol_name).copied().ok_or(anyhow!("{} 未发现", name));
+        // 3) 不含 :: 的短名,按 roots 倒序查找第一个匹配的模块。O(M)。
+        //    pop_module 会清掉非 pub 项,所以 modules 可能没有;再退回按 root 拼全名查 symbols。
+        let short_name = name;
+        for root in self.roots.iter().rev() {
+            if let Some(&id) = self.modules.get(root).and_then(|m| m.get(short_name)) {
+                return Ok(id);
+            }
+            let full = format!("{root}::{short_name}");
+            if let Some(idx) = self.symbols.get_index_of(full.as_str()) {
+                return Ok(idx as u32);
             }
         }
-        self.roots.iter().find_map(|r| self.modules.get(r).and_then(|m| m.get(name))).copied().ok_or(anyhow!("{} 未发现", name))
+        // 4) 兜底:任意模块下的同名短符号。O(M*K),K 为模块内符号数。
+        for (_, m) in &self.modules {
+            if let Some(&id) = m.get(short_name) {
+                return Ok(id);
+            }
+        }
+        Err(anyhow!("{} 未发现", name))
     }
 
     pub fn add(&mut self, name: SmolStr, s: Symbol) -> u32 {

@@ -722,7 +722,7 @@ impl Parser {
     fn expr_with_min_weight_inner(&mut self, left: Option<(Expr, bool)>, left_op: Option<BinaryOp>, min_weight: usize, allow_struct_literal: bool) -> Result<(Expr, bool)> {
         self.whitespace()?;
         if self.is_eof() {
-            return left.ok_or(ParserErr::EndofInput.into());
+            return left.ok_or_else(|| ParserErr::at("左操作数缺失", self.current_pos()).into());
         }
         let start = self.current_pos();
         let ch = self.get()?;

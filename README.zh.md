@@ -356,7 +356,7 @@ spawn(|x, y| {
 - 构造和类型辅助：`Any::null()`、`is_map()`、`is_list()`、`is_string()`、`is_null()`、`clone()`。
 - 长度和转换辅助：`len()`、`keys()`、`to_string()`、`Any::from_i64(value)`、`Any::to_i64(value)`、`Any::from_bool(value)`、`Any::to_bool(value)`、`Any::from_f64(value)`、`Any::to_f64(value)`。
 - List 和字符串辅助：`push(value)`、`pop()`、`split(sep)`、`slice(start, stop, inclusive)`。
-- Map 和索引辅助：`get_idx(idx)`、`set_idx(idx, value)`、`get_key(key)`、`set_key(key, value)`、`del_key(key)`、`contains(value)`、`starts_with(prefix)`。
+- Map 和索引辅助：`get_idx(idx)`、`set_idx(idx, value)`、`get(key)`、`get_key(key)`、`set_key(key, value)`、`del_key(key)`、`contains(value)`、`starts_with(prefix)`。
 - 迭代辅助：`iter()`、`next()`。
 - 动态表达式辅助：`Any::binary(left, op, right)`、`Any::logic(left, op, right)`，主要由编译器生成调用。
 
@@ -366,7 +366,7 @@ spawn(|x, y| {
 let data = {name: "zust", tags: ["vm", "native"]};
 
 if data.is_map() && data.contains("name") {
-    print(data.get_key("name"));
+    print(data.get("name"));
 }
 
 data.tags.push("script");

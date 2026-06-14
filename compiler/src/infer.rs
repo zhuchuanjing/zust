@@ -221,7 +221,7 @@ impl Compiler {
             ExprKind::List(_) | ExprKind::Tuple(_) => Some(Type::list_any()),
             ExprKind::Dict(_) => Some(Type::Map),
             ExprKind::Value(value) => Self::dynamic_return_shape(value.get_type()),
-            ExprKind::Const(idx) => self.consts.get(*idx).and_then(|value| Self::dynamic_return_shape(value.get_type())),
+            ExprKind::Const(idx) => self.consts.get_index(*idx).and_then(|(_, value)| Self::dynamic_return_shape(value.get_type())),
             ExprKind::Typed { ty, .. } => Some(ty.clone()),
             _ => None,
         }
@@ -416,9 +416,9 @@ impl Compiler {
             ExprKind::Value(v) if v.is_list() => Ok(v.get_type()),
             ExprKind::Value(v) if v.is_map() => Ok(Type::Any),
             ExprKind::Value(v) => Ok(v.get_type()),
-            ExprKind::Const(idx) => Ok(match self.consts.get(*idx) {
-                Some(value) if value.is_str() => Type::Str,
-                Some(value) if value.is_list() && value.len() == 0 => Type::list_any(),
+            ExprKind::Const(idx) => Ok(match self.consts.get_index(*idx) {
+                Some((_, value)) if value.is_str() => Type::Str,
+                Some((_, value)) if value.is_list() && value.len() == 0 => Type::list_any(),
                 _ => Type::Any,
             }),
             ExprKind::Var(idx) => {
@@ -495,7 +495,14 @@ impl Compiler {
                     } else {
                         let left_ty = self.symbols.get_type(&left_ty)?;
                         let right_ty = if right.is_value() || right.is_const() {
-                            let right_value = if let ExprKind::Const(c) = &right.kind { self.consts[*c].clone() } else { right.clone().value()? };
+                            let right_value = if let ExprKind::Const(c) = &right.kind {
+                                match self.consts.get_index(*c) {
+                                    Some((_, v)) => v.clone(),
+                                    None => right.clone().value()?,
+                                }
+                            } else {
+                                right.clone().value()?
+                            };
                             if right_value.is_str() {
                                 if left_ty.is_any() {
                                     return Ok(Type::Any);

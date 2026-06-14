@@ -40,6 +40,12 @@ pub struct Parser {
     spans: Vec<usize>,
     decl_scopes: Vec<BTreeSet<SmolStr>>,
     impl_depth: usize,
+    /// 函数体嵌套深度。>0 表示当前 stmt 处于某个 `fn body` 内,需要拒绝
+    /// `fn / struct / impl / const / static` 等顶层声明关键字。
+    fn_body_depth: usize,
+    /// impl 体嵌套深度。>0 表示当前 stmt 处于 `impl { ... }` 内,
+    /// 拒绝嵌套 `struct / impl / const / static`(fn 仍允许,即方法)。
+    impl_body_depth: usize,
     depth: usize, //当前表达式/语句递归深度,防止恶意深嵌套输入打爆调用栈
     fatal: bool,  //递归过深等不可恢复错误;置位后所有解析入口立即失败,避免回溯重试导致死循环
 }
@@ -114,33 +120,52 @@ macro_rules! try_parse {
 
 #[derive(Debug, thiserror::Error)]
 pub enum ParserErr {
-    #[error("期望字符 {0} 实际字符 {1}")]
-    ExpectChar(char, char),
-    #[error("未发现期望字符")]
-    NoCharCollect,
-    #[error("期望字符串 {0}")]
-    ExpectedString(SmolStr),
-    #[error("输入结束")]
-    EndofInput,
-    #[error("未关闭的注释")]
-    UncloseComment,
-    #[error("非法的原始字符串")]
-    IllegalRawString,
-    #[error("未关闭字符串")]
-    UnclosedString,
-    #[error("非字符串")]
-    NotString,
-    #[error("非数字")]
-    NotNumber,
-    #[error("符号 {0} 已经声明")]
-    DuplicateSymbol(SmolStr),
-    #[error("表达式嵌套过深")]
-    TooDeep,
+    #[error("{message}")]
+    Spanned { message: String, span: Span },
+}
+
+impl ParserErr {
+    /// 构造携带 span 的解析错误。所有 ParserErr 错误都应该走这个构造。
+    pub fn new(message: impl Into<String>, span: Span) -> Self {
+        Self::Spanned { message: message.into(), span }
+    }
+
+    /// 便捷构造:span 是 [pos, pos) 的零长 span,用于"在当前位置报错"的场景。
+    pub fn at(message: impl Into<String>, pos: usize) -> Self {
+        Self::Spanned { message: message.into(), span: Span::new(pos, pos) }
+    }
+
+    pub fn span(&self) -> Span {
+        match self {
+            Self::Spanned { span, .. } => *span,
+        }
+    }
+
+    pub fn message(&self) -> &str {
+        match self {
+            Self::Spanned { message, .. } => message,
+        }
+    }
+}
+
+/// 在 ParserErr 基础上附带 parser 当前光标位置。
+/// parse_code 顶层 downcast 此类型,做精确的 LSP-style 错误高亮。
+#[derive(Debug, thiserror::Error)]
+#[error("{err}")]
+pub struct SpannedParseError {
+    pub err: ParserErr,
+    pub pos: usize,
+}
+
+impl SpannedParseError {
+    pub fn new(err: ParserErr, pos: usize) -> Self {
+        Self { err, pos }
+    }
 }
 
 impl Parser {
     pub fn new(buf: Vec<u8>) -> Self {
-        Self { pos: 0, buf, spans: Vec::new(), decl_scopes: vec![BTreeSet::new()], impl_depth: 0, depth: 0, fatal: false }
+        Self { pos: 0, buf, spans: Vec::new(), decl_scopes: vec![BTreeSet::new()], impl_depth: 0, fn_body_depth: 0, impl_body_depth: 0, depth: 0, fatal: false }
     }
 
     /// 进入一层递归:自增深度并校验上限。配合 [`Parser::exit_depth`] 使用。
@@ -154,7 +179,7 @@ impl Parser {
         if self.depth > MAX_PARSE_DEPTH {
             self.depth -= 1;
             self.fatal = true;
-            return Err(ParserErr::TooDeep.into());
+            return Err(ParserErr::at("表达式嵌套过深", self.current_pos()).into());
         }
         Ok(())
     }
@@ -165,7 +190,7 @@ impl Parser {
 
     /// 解析入口的快速失败检查:一旦进入 fatal 状态,立即返回错误,阻止任何回溯重试。
     fn check_fatal(&self) -> Result<()> {
-        if self.fatal { Err(ParserErr::TooDeep.into()) } else { Ok(()) }
+        if self.fatal { Err(ParserErr::at("表达式嵌套过深", self.current_pos()).into()) } else { Ok(()) }
     }
 
     fn push_decl_scope(&mut self) {
@@ -183,7 +208,7 @@ impl Parser {
             return Ok(());
         }
         if self.decl_scopes.iter().rev().any(|scope| scope.contains(name)) {
-            return Err(ParserErr::DuplicateSymbol(name.clone()).into());
+            return Err(ParserErr::at(format!("符号 {} 已经声明", name), self.current_pos()).into());
         }
         self.decl_scopes.last_mut().expect("parser always has a declaration scope").insert(name.clone());
         Ok(())
@@ -195,7 +220,7 @@ impl Parser {
         }
         let scope = self.decl_scopes.last_mut().expect("parser always has a declaration scope");
         if scope.contains(name) {
-            return Err(ParserErr::DuplicateSymbol(name.clone()).into());
+            return Err(ParserErr::at(format!("符号 {} 已经声明", name), self.current_pos()).into());
         }
         scope.insert(name.clone());
         Ok(())
@@ -233,10 +258,12 @@ impl Parser {
 
     fn function_body(&mut self, args: &[(SmolStr, Type)]) -> Result<Stmt> {
         self.push_decl_scope();
+        self.fn_body_depth += 1;
         let result = (|| {
             self.declare_args(args)?;
             self.block()
         })();
+        self.fn_body_depth -= 1;
         self.pop_decl_scope();
         result
     }
@@ -244,7 +271,9 @@ impl Parser {
     fn impl_body(&mut self) -> Result<Stmt> {
         self.push_decl_scope();
         self.impl_depth += 1;
+        self.impl_body_depth += 1;
         let result = self.block();
+        self.impl_body_depth -= 1;
         self.impl_depth -= 1;
         self.pop_decl_scope();
         result
@@ -256,7 +285,7 @@ impl Parser {
 
     pub fn get(&self) -> Result<u8> {
         //查看当前字符
-        self.buf.get(self.pos).cloned().ok_or(ParserErr::EndofInput.into())
+        self.buf.get(self.pos).cloned().ok_or_else(|| ParserErr::at("输入结束", self.pos).into())
     }
 
     pub fn take(&mut self, ch: u8) -> Result<()> {
@@ -265,7 +294,7 @@ impl Parser {
             self.pos += 1;
             Ok(())
         } else {
-            Err(ParserErr::ExpectChar(ch as char, self.buf.get(self.pos as usize).cloned().unwrap_or(0) as char).into())
+            Err(SpannedParseError::new(ParserErr::at(format!("期望字符 {} 实际字符 {}", ch as char, self.buf.get(self.pos as usize).cloned().unwrap_or(0) as char), self.pos), self.pos).into())
         }
     }
 
@@ -277,7 +306,7 @@ impl Parser {
 
     pub fn ahead(&self) -> Result<u8> {
         //朝前看
-        self.buf.get(self.pos + 1).cloned().ok_or(ParserErr::EndofInput.into())
+        self.buf.get(self.pos + 1).cloned().ok_or_else(|| ParserErr::at("输入结束", self.pos).into())
     }
 
     pub fn get_str(&self, start: usize, stop: usize) -> SmolStr {
@@ -301,7 +330,7 @@ impl Parser {
         while self.pos < self.buf.len() && f(self.buf[self.pos]) {
             self.pos += 1;
         }
-        if self.pos > start { Ok((start, self.pos)) } else { Err(ParserErr::NoCharCollect.into()) }
+        if self.pos > start { Ok((start, self.pos)) } else { Err(ParserErr::at("未发现期望字符", start).into()) }
     }
 
     pub fn just(&mut self, pattern: &str) -> Result<()> {
@@ -309,7 +338,7 @@ impl Parser {
             self.pos += pattern.len();
             Ok(())
         } else {
-            Err(ParserErr::ExpectedString(SmolStr::new(pattern)).into())
+            Err(ParserErr::at(format!("期望字符串 {}", pattern), self.pos).into())
         }
     }
 
@@ -317,7 +346,7 @@ impl Parser {
         self.just(pattern)?;
         if self.pos < self.buf.len() && !NOT_IDENT.contains(&self.buf[self.pos]) {
             self.pos -= pattern.len();
-            return Err(ParserErr::ExpectedString(SmolStr::new(pattern)).into());
+            return Err(ParserErr::at(format!("期望字符串 {}", pattern), self.pos).into());
         }
         Ok(())
     }
@@ -458,7 +487,7 @@ impl Parser {
                 }
                 self.pos += 1;
             }
-            Err(ParserErr::UncloseComment.into())
+            Err(ParserErr::at("未关闭的注释", self.pos).into())
         } else {
             Ok(())
         }
@@ -500,7 +529,7 @@ impl Parser {
 
     pub fn string(&mut self) -> Result<SmolStr> {
         if self.get()? != b'"' {
-            return Err(ParserErr::NotString.into());
+            return Err(ParserErr::at("非字符串", self.current_pos()).into());
         }
         self.pos += 1;
         let mut text_buf = Vec::new();
@@ -541,13 +570,20 @@ impl Parser {
                     }
                     b'x' => {
                         self.pos += 1;
-                        if self.pos + 2 < self.buf.len() {
-                            let start = self.pos;
-                            self.pos += 2;
-                            let hex = &self.buf[start..self.pos];
-                            let code = u32::from_str_radix(String::from_utf8_lossy(hex).as_ref(), 16)?;
-                            text_buf.push(code as u8);
+                        if self.pos + 2 > self.buf.len() {
+                            return Err(anyhow!("非法 \\x 转义：需要 2 位十六进制"));
                         }
+                        let start = self.pos;
+                        self.pos += 2;
+                        let hex = &self.buf[start..self.pos];
+                        if hex.iter().any(|b| !b.is_ascii_hexdigit()) {
+                            return Err(anyhow!("非法 \\x 转义：仅允许十六进制字符"));
+                        }
+                        let code = u32::from_str_radix(String::from_utf8_lossy(hex).as_ref(), 16)?;
+                        if code > 0xFF {
+                            return Err(anyhow!("\\x 转义值 0x{:02X} 超出 0xFF", code));
+                        }
+                        text_buf.push(code as u8);
                     }
                     other => {
                         return Err(anyhow!("invalid escape character: {}", other as char));
@@ -562,7 +598,7 @@ impl Parser {
                 self.pos += 1;
             }
         }
-        Err(ParserErr::UnclosedString.into())
+        Err(ParserErr::at("未关闭字符串", self.pos).into())
     }
 
     pub fn text(&mut self) -> Result<SmolStr> {
@@ -574,7 +610,7 @@ impl Parser {
                 self.pos += 1;
             }
             if self.get()? != b'"' {
-                return Err(ParserErr::IllegalRawString.into());
+                return Err(ParserErr::at("非法的原始字符串", self.current_pos()).into());
             }
             self.pos += 1;
             let start_pos = self.pos;
@@ -599,7 +635,7 @@ impl Parser {
     fn numeric_suffix(&mut self) -> Option<Type> {
         let save = self.pos;
         for (name, ty) in TYPES {
-            if !ty.is_native() || *ty == Type::F16 {
+            if !ty.is_native() {
                 continue;
             }
             if self.buf.len() >= self.pos + name.len() && self.buf[self.pos..self.pos + name.len()].eq(name.as_bytes()) {
@@ -625,6 +661,7 @@ impl Parser {
             Type::U16 => (false, 16),
             Type::U32 => (false, 32),
             Type::U64 => (false, 64),
+            Type::F16 => return Ok(Dynamic::F16(dynamic::f64_to_f16(magnitude as f64))),
             Type::F32 => return Ok(Dynamic::F32(magnitude as f32)),
             Type::F64 => return Ok(Dynamic::F64(magnitude as f64)),
             ty => return Err(anyhow!("{:?} 不能作为数字后缀", ty)),
@@ -651,6 +688,29 @@ impl Parser {
 
     fn float_literal(&mut self, digits: &str, suffix: Option<Type>) -> Result<Dynamic> {
         let value: f64 = digits.parse()?;
+        if let Some(ref ty) = suffix {
+            // 整数类后缀:校验是否在目标范围内。NaN / Inf 一律拒绝;
+            // 不允许小数部分。F16/F32/F64 不做范围 / 整数性校验。
+            let is_int_suffix = matches!(ty, Type::I8 | Type::I16 | Type::I32 | Type::I64 | Type::U8 | Type::U16 | Type::U32 | Type::U64);
+            if is_int_suffix {
+                let (min, max): (f64, f64) = match ty {
+                    Type::I8 => (i8::MIN as f64, i8::MAX as f64),
+                    Type::I16 => (i16::MIN as f64, i16::MAX as f64),
+                    Type::I32 => (i32::MIN as f64, i32::MAX as f64),
+                    Type::I64 => (i64::MIN as f64, i64::MAX as f64),
+                    Type::U8 => (0.0, u8::MAX as f64),
+                    Type::U16 => (0.0, u16::MAX as f64),
+                    Type::U32 => (0.0, u32::MAX as f64),
+                    Type::U64 => (0.0, u64::MAX as f64),
+                    _ => unreachable!(),
+                };
+                if !value.is_finite() || value < min || value > max || value.fract() != 0.0 {
+                    return Err(anyhow!("浮点字面量 {:?} 超出 {:?} 范围", value, ty));
+                }
+            } else if !value.is_finite() {
+                return Err(anyhow!("非法浮点字面量: {:?}", value));
+            }
+        }
         Ok(match suffix.unwrap_or(Type::F32) {
             Type::I8 => Dynamic::I8(value as i8),
             Type::I16 => Dynamic::I16(value as i16),
@@ -660,6 +720,7 @@ impl Parser {
             Type::U16 => Dynamic::U16(value as u16),
             Type::U32 => Dynamic::U32(value as u32),
             Type::U64 => Dynamic::U64(value as u64),
+            Type::F16 => Dynamic::F16(dynamic::f64_to_f16(value)),
             Type::F32 => Dynamic::F32(value as f32),
             Type::F64 => Dynamic::F64(value),
             ty => return Err(anyhow!("{:?} 不能作为浮点数字后缀", ty)),
@@ -721,7 +782,7 @@ impl Parser {
             }
             return self.int_literal(&text, 10, suffix);
         }
-        Err(ParserErr::NotNumber.into())
+        Err(ParserErr::at("非数字", start).into())
     }
 }
 
@@ -1019,6 +1080,138 @@ mod tests {
             "#,
         )
         .unwrap();
+    }
+
+    #[test]
+    fn rejects_nested_fn_inside_function_body() {
+        let err = parse_all("fn outer() { fn inner() { 1 } }").unwrap_err();
+        assert!(err.to_string().contains("函数体内不能定义"), "got: {err}");
+    }
+
+    #[test]
+    fn rejects_nested_struct_inside_function_body() {
+        let err = parse_all("fn outer() { struct S { x: i32 } S{x: 1} }").unwrap_err();
+        assert!(err.to_string().contains("函数体内不能定义"), "got: {err}");
+    }
+
+    #[test]
+    fn rejects_nested_const_inside_function_body() {
+        let err = parse_all("fn outer() { const K = 1 } K").unwrap_err();
+        assert!(err.to_string().contains("函数体内不能定义"), "got: {err}");
+    }
+
+    #[test]
+    fn hex_escape_at_end_of_string_preserves_byte() {
+        let mut p = Parser::new(br#""abc\x41""#.to_vec());
+        let s = p.string().unwrap();
+        assert_eq!(s.as_str(), "abcA");
+    }
+
+    #[test]
+    fn hex_escape_truncated_reports_clear_error() {
+        let mut p = Parser::new(br#""abc\x""#.to_vec());
+        let err = p.string().unwrap_err();
+        assert!(err.to_string().contains("\\x"), "got: {err}");
+    }
+
+    #[test]
+    fn hex_escape_non_hex_char_reports_clear_error() {
+        let mut p = Parser::new(br#""abc\xZZ""#.to_vec());
+        let err = p.string().unwrap_err();
+        assert!(err.to_string().contains("\\x"), "got: {err}");
+    }
+
+    #[test]
+    fn else_with_invalid_body_reports_error() {
+        // 让 block() 在 else 后失败:解析到 '}' 紧跟一个无闭的 '{' 触发 "not code block"
+        let err = parse_all("fn f() { if true { 1 } else }").unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("not code block") || msg.contains("未结束的"), "got: {msg}");
+    }
+
+    #[test]
+    fn float_literal_with_int_suffix_out_of_range_errors() {
+        let mut p = Parser::new(b"1e30u8".to_vec());
+        let err = p.number().unwrap_err();
+        assert!(err.to_string().contains("超出"), "got: {err}");
+    }
+
+    #[test]
+    fn float_literal_with_int_suffix_fractional_errors() {
+        let mut p = Parser::new(b"1.5i32".to_vec());
+        let err = p.number().unwrap_err();
+        assert!(err.to_string().contains("超出"), "got: {err}");
+    }
+
+    #[test]
+    fn float_literal_with_float_suffix_accepts_fractional() {
+        let mut p = Parser::new(b"1e-3f32".to_vec());
+        assert!(matches!(p.number().unwrap(), Dynamic::F32(v) if (v - 1e-3).abs() < 1e-8));
+    }
+
+    #[test]
+    fn allows_closure_inside_function_body() {
+        parse_all("fn outer() { let f = |x: i32| { x + 1 }; f(1) }").unwrap();
+    }
+
+    #[test]
+    fn rejects_const_inside_impl_body() {
+        let err = parse_all("struct S {}\nimpl S { const K = 1 }").unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("impl 体内不能定义") && msg.contains("const"), "got: {msg}");
+    }
+
+    #[test]
+    fn allows_fn_inside_impl_body() {
+        parse_all("struct S {}\nimpl S { pub fn m(self: S) { 1 } }").unwrap();
+    }
+
+    #[test]
+    fn parser_err_carries_span() {
+        // 用 fn 重复声明触发 DuplicateSymbol,ParserErr span 应当指向重复位置。
+        let src = "fn f() {}\nfn f() {}\n";
+        let err = parse_all(src).unwrap_err();
+        eprintln!("err display: {err}");
+        let downcast = err.downcast_ref::<ParserErr>().expect("ParserErr");
+        eprintln!("message: {}", downcast.message());
+        eprintln!("span: {:?}", downcast.span());
+        assert!(downcast.message().contains("f"));
+        // span 应当在文件范围内
+        assert!(downcast.span().start < src.len());
+    }
+
+    #[test]
+    fn block_as_let_value_is_expression() {
+        parse_all("pub fn f() { let x = { let y = 1; y + 1 }; x }").unwrap();
+    }
+
+    #[test]
+    fn dict_still_takes_priority_over_block() {
+        // dict 仍是 dict,不能误判为 block
+        parse_all("pub fn f() { let d = { key: 1 }; d }").unwrap();
+    }
+
+    #[test]
+    fn list_pattern_with_rest_parses() {
+        parse_all("pub fn f(items) { let [first, ..rest] = items; first }").unwrap();
+    }
+
+    #[test]
+    fn list_pattern_with_only_rest_parses() {
+        parse_all("pub fn f(items) { let [..all] = items; all }").unwrap();
+    }
+
+    #[test]
+    fn take_error_carries_precise_pos() {
+        // take 失败时,SpannedParseError.pos 应该指向缺失字符的位置,
+        // 而不是 parse_code 默认的 parser.current_pos。
+        use crate::SpannedParseError;
+        let mut p = Parser::new(b"ab".to_vec());
+        let pos_before = p.current_pos();
+        let err = p.take(b'c').unwrap_err();
+        let spanned = err.downcast_ref::<SpannedParseError>().expect("take should wrap in SpannedParseError");
+        // take 在 pos_before 处失败,期望 pos == pos_before(0)
+        assert_eq!(spanned.pos, pos_before);
     }
 
     #[test]

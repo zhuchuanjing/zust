@@ -1,4 +1,5 @@
 use bytemuck::{AnyBitPattern, NoUninit, cast_slice, cast_slice_mut};
+use half::f16;
 use indexmap::IndexMap;
 use smol_str::SmolStr;
 use std::any::Any;
@@ -7,6 +8,19 @@ use std::mem;
 use tinyvec::TinyVec;
 const TINY_SIZE: usize = 28;
 pub mod json;
+
+/// IEEE 754 half-precision bits -> f64. Delegates to `half::f16` for proper
+/// signaling NaN, subnormal, and rounding semantics.
+#[inline]
+pub fn f16_to_f64(bits: u16) -> f64 {
+    f16::from_bits(bits).to_f64()
+}
+
+/// f64 -> IEEE 754 half-precision bits, via `half::f16`.
+#[inline]
+pub fn f64_to_f16(value: f64) -> u16 {
+    f16::from_f64(value).to_bits()
+}
 #[derive(Debug, Default, Clone, PartialEq)]
 pub struct MyVec<T> {
     pub(crate) data: TinyVec<[u8; TINY_SIZE]>,
@@ -139,7 +153,8 @@ pub enum DynamicErr {
     OutOfRange,
 }
 
-use std::sync::{Arc, RwLock};
+pub use parking_lot::RwLock;
+use std::sync::Arc;
 
 pub trait CustomProperty: Any + Send + Sync {
     fn get_key(&self, key: &str) -> Option<Dynamic>;
@@ -245,6 +260,7 @@ pub enum Dynamic {
     I32(i32), //默认整数类型
     U64(u64),
     I64(i64),
+    F16(u16), //IEEE 754 half-precision bits
     F32(f32), //默认浮点类型
     F64(f64),
     String(SmolStr),
@@ -295,9 +311,10 @@ impl PartialEq for Dynamic {
             // Mixed integer types - compare as i64
             (a, b) if a.is_int() && b.is_int() => a.as_int() == b.as_int(),
             // Float types
+            (Self::F16(a), Self::F16(b)) => a == b,
             (Self::F32(a), Self::F32(b)) => a.to_bits() == b.to_bits(),
             (Self::F64(a), Self::F64(b)) => a.to_bits() == b.to_bits(),
-            (a, b) if (a.is_f32() || a.is_f64()) && (b.is_f32() || b.is_f64()) => a.as_float() == b.as_float(),
+            (a, b) if (a.is_f16() || a.is_f32() || a.is_f64()) && (b.is_f16() || b.is_f32() || b.is_f64()) => a.as_float() == b.as_float(),
             // Typed vectors
             (Self::VecI8(a), Self::VecI8(b)) => a.data == b.data,
             (Self::VecU16(a), Self::VecU16(b)) => a.data == b.data,
@@ -310,8 +327,8 @@ impl PartialEq for Dynamic {
             (Self::VecF64(a), Self::VecF64(b)) => a == b,
             // List - compare inner values
             (Self::List(a), Self::List(b)) => {
-                let a_guard = a.read().unwrap();
-                let b_guard = b.read().unwrap();
+                let a_guard = a.read();
+                let b_guard = b.read();
                 if a_guard.len() != b_guard.len() {
                     return false;
                 }
@@ -319,8 +336,8 @@ impl PartialEq for Dynamic {
             }
             // Map - compare key-value pairs
             (Self::Map(a), Self::Map(b)) => {
-                let a_guard = a.read().unwrap();
-                let b_guard = b.read().unwrap();
+                let a_guard = a.read();
+                let b_guard = b.read();
                 if a_guard.len() != b_guard.len() {
                     return false;
                 }
@@ -664,11 +681,11 @@ impl Dynamic {
     pub fn deep_clone(&self) -> Self {
         match self {
             Self::Map(m) => {
-                let m = m.read().unwrap().iter().map(|(k, v)| (k.clone(), v.deep_clone())).collect();
+                let m = m.read().iter().map(|(k, v)| (k.clone(), v.deep_clone())).collect();
                 Self::map(m)
             }
             Self::List(l) => {
-                let l = l.read().unwrap().iter().map(|item| item.deep_clone()).collect();
+                let l = l.read().iter().map(|item| item.deep_clone()).collect();
                 Self::list(l)
             }
             Self::Struct { addr, ty } => Self::Struct { addr: *addr, ty: ty.clone() },
@@ -758,13 +775,13 @@ impl Dynamic {
         match (self, other) {
             (Self::List(left), rhs) => {
                 if let Self::List(right) = rhs {
-                    left.write().unwrap().append(&mut right.write().unwrap());
+                    left.write().append(&mut right.write());
                 } else {
-                    left.write().unwrap().push(rhs);
+                    left.write().push(rhs);
                 }
             }
             (Self::Map(left), Self::Map(right)) => {
-                left.write().unwrap().append(&mut right.write().unwrap());
+                left.write().append(&mut right.write());
             }
             (_, _) => {}
         }
@@ -773,12 +790,10 @@ impl Dynamic {
     pub fn into_vec<T: TryFrom<Self> + 'static>(self) -> Option<Vec<T>> {
         if std::any::TypeId::of::<T>() == std::any::TypeId::of::<Dynamic>() {
             match self {
-                Dynamic::List(list) => {
-                    match Arc::try_unwrap(list) {
-                        Ok(vec) => vec.into_inner().map(|v| unsafe { mem::transmute::<Vec<Dynamic>, Vec<T>>(v) }).ok(), // 成功：直接返回 Vec
-                        Err(_) => None,                                                                                 // 失败：有其他引用，无法移动所有权
-                    }
-                }
+                Dynamic::List(list) => match Arc::try_unwrap(list) {
+                    Ok(vec) => Some(unsafe { mem::transmute::<Vec<Dynamic>, Vec<T>>(vec.into_inner()) }),
+                    Err(_) => None,
+                },
                 _ => {
                     let mut vec = Vec::with_capacity(self.len());
                     for idx in 0..self.len() {
@@ -791,7 +806,7 @@ impl Dynamic {
             }
         } else {
             match self {
-                Dynamic::List(list) => Arc::try_unwrap(list).ok().and_then(|l| l.into_inner().map(|l| l.into_iter().filter_map(|l| T::try_from(l).ok()).collect()).ok()),
+                Dynamic::List(list) => Arc::try_unwrap(list).ok().map(|l| l.into_inner().into_iter().filter_map(|l| T::try_from(l).ok()).collect()),
                 Dynamic::Bytes(vec) => {
                     if std::any::TypeId::of::<T>() == std::any::TypeId::of::<u8>() {
                         let bytes_vec: Vec<u8> = Vec::from(vec);
@@ -877,7 +892,7 @@ impl Dynamic {
     pub fn push<T: Into<Dynamic> + 'static>(&mut self, value: T) -> bool {
         match self {
             Self::List(list) => {
-                list.write().unwrap().push(value.into());
+                list.write().push(value.into());
                 true
             }
             Self::Bytes(vec) => {
@@ -967,7 +982,7 @@ impl Dynamic {
     pub fn push_dynamic(&mut self, value: Dynamic) -> bool {
         match self {
             Self::List(list) => {
-                list.write().unwrap().push(value);
+                list.write().push(value);
                 true
             }
             Self::Bytes(vec) => value.try_into().map(|value| vec.push(value)).is_ok(),
@@ -986,7 +1001,7 @@ impl Dynamic {
 
     pub fn pop(&mut self) -> Option<Dynamic> {
         match self {
-            Self::List(list) => list.write().unwrap().pop(),
+            Self::List(list) => list.write().pop(),
             Self::Bytes(vec) => vec.pop().map(Dynamic::U8),
             Self::VecI8(vec) => vec.pop().map(Dynamic::I8),
             Self::VecU16(vec) => vec.pop().map(Dynamic::U16),
@@ -1069,6 +1084,10 @@ impl Dynamic {
         if let Self::F32(_) = self { true } else { false }
     }
 
+    pub fn is_f16(&self) -> bool {
+        if let Self::F16(_) = self { true } else { false }
+    }
+
     pub fn is_str(&self) -> bool {
         if let Self::String(_) | Self::StringBuf(_) = self { true } else { false }
     }
@@ -1087,6 +1106,7 @@ impl Dynamic {
             Self::I16(i) => Some(*i as f64),
             Self::I32(i) => Some(*i as f64),
             Self::I64(i) => Some(*i as f64),
+            Self::F16(bits) => Some(f16_to_f64(*bits)),
             Self::F32(f) => Some(*f as f64),
             Self::F64(f) => Some(*f),
             _ => None,
@@ -1095,7 +1115,7 @@ impl Dynamic {
 
     pub fn is_signed(&self) -> bool {
         match self {
-            Self::I8(_) | Self::I16(_) | Self::I32(_) | Self::I64(_) | Self::F32(_) | Self::F64(_) => true,
+            Self::I8(_) | Self::I16(_) | Self::I32(_) | Self::I64(_) | Self::F16(_) | Self::F32(_) | Self::F64(_) => true,
             _ => false,
         }
     }
@@ -1106,6 +1126,7 @@ impl Dynamic {
             Self::I16(_) | Self::U16(_) => 2,
             Self::I32(_) | Self::U32(_) | Self::F32(_) => 4,
             Self::I64(_) | Self::U64(_) | Self::F64(_) => 8,
+            Self::F16(_) => 2,
             Self::String(s) => s.len(),
             Self::StringBuf(s) => s.len(),
             Self::Bytes(bytes) => bytes.len(),
@@ -1118,8 +1139,8 @@ impl Dynamic {
             Self::VecI64(vec) => vec.len(),
             Self::VecU64(vec) => vec.len(),
             Self::VecF64(vec) => vec.len(),
-            Self::List(list) => list.read().unwrap().len(),
-            Self::Map(obj) => obj.read().unwrap().len(),
+            Self::List(list) => list.read().len(),
+            Self::Map(obj) => obj.read().len(),
             Self::Struct { ty, .. } => ty.len(),
             Self::Custom(_) => 0,
             _ => 1,
@@ -1152,7 +1173,7 @@ impl Dynamic {
     }
 
     pub fn into_map(self) -> Option<IndexMap<SmolStr, Dynamic>> {
-        if let Self::Map(map) = self { Arc::try_unwrap(map).ok().and_then(|m| m.into_inner().ok()) } else { None }
+        if let Self::Map(map) = self { Arc::try_unwrap(map).ok().map(|m| m.into_inner()) } else { None }
     }
 
     pub fn is_map(&self) -> bool {
@@ -1162,7 +1183,7 @@ impl Dynamic {
     pub fn insert<K: Into<SmolStr>, T: Into<Self>>(&self, key: K, value: T) {
         match self {
             Self::Map(obj) => {
-                obj.write().unwrap().insert(key.into(), value.into());
+                obj.write().insert(key.into(), value.into());
             }
             _ => {}
         }
@@ -1172,7 +1193,7 @@ impl Dynamic {
         match self {
             Self::String(value) => value.len(),
             Self::StringBuf(value) => value.len(),
-            Self::List(list) => list.read().unwrap().len(),
+            Self::List(list) => list.read().len(),
             Self::Bytes(bytes) => bytes.len(),
             Self::VecI8(vec) => vec.len(),
             Self::VecU16(vec) => vec.len(),
@@ -1183,7 +1204,7 @@ impl Dynamic {
             Self::VecI64(vec) => vec.len(),
             Self::VecU64(vec) => vec.len(),
             Self::VecF64(vec) => vec.len(),
-            Self::Map(obj) => obj.read().unwrap().len(),
+            Self::Map(obj) => obj.read().len(),
             Self::Custom(_) => 0,
             _ => 0,
         }
@@ -1191,7 +1212,7 @@ impl Dynamic {
 
     pub fn keys(&self) -> Vec<SmolStr> {
         if let Self::Map(map) = self {
-            map.read().unwrap().keys().cloned().collect()
+            map.read().keys().cloned().collect()
         } else if let Self::Struct { ty: Type::Struct { params: _, fields }, .. } = self {
             fields.iter().map(|(name, _)| name.clone()).collect()
         } else {
@@ -1201,11 +1222,11 @@ impl Dynamic {
 
     pub fn contains(&self, key: &str) -> bool {
         if let Self::Map(map) = self {
-            map.read().unwrap().get(key).is_some_and(|value| !value.is_null())
+            map.read().get(key).is_some_and(|value| !value.is_null())
         } else if let Self::Struct { ty, .. } = self {
             ty.get_field(key).is_ok()
         } else if let Self::List(list) = self {
-            list.read().unwrap().iter().find(|l| l.as_str() == key).is_some()
+            list.read().iter().find(|l| l.as_str() == key).is_some()
         } else if let Self::String(s) = self {
             s.contains(key)
         } else if let Self::StringBuf(s) = self {
@@ -1229,7 +1250,7 @@ impl Dynamic {
 
     pub fn get_dynamic(&self, key: &str) -> Option<Dynamic> {
         if let Self::Map(map) = self {
-            map.read().unwrap().get(key).cloned()
+            map.read().get(key).cloned()
         } else if let Self::Struct { addr, ty } = self {
             let (idx, field_ty) = ty.get_field(key).ok()?;
             Self::read_struct_field(*addr, idx, field_ty, ty)
@@ -1242,7 +1263,7 @@ impl Dynamic {
 
     pub fn set_dynamic(&self, key: SmolStr, value: impl Into<Dynamic>) {
         if let Self::Map(map) = self {
-            map.write().unwrap().insert(key, value.into());
+            map.write().insert(key, value.into());
         } else if let Self::Struct { addr, ty } = self
             && let Ok((idx, field_ty)) = ty.get_field(key.as_str())
         {
@@ -1341,12 +1362,12 @@ impl Dynamic {
 
     pub fn remove_dynamic(&self, key: &str) -> Option<Dynamic> {
         // shift_remove 保留插入顺序(swap_remove 会打乱),与原 BTreeMap 删除后仍有序的语义最接近
-        if let Self::Map(map) = self { map.write().unwrap().shift_remove(key) } else { None }
+        if let Self::Map(map) = self { map.write().shift_remove(key) } else { None }
     }
 
     pub fn get_idx(&self, idx: usize) -> Option<Self> {
         match self {
-            Self::List(list) => list.read().unwrap().get(idx).cloned(),
+            Self::List(list) => list.read().get(idx).cloned(),
             Self::VecI8(vec) => vec.get(idx).map(Self::I8),
             Self::VecU16(vec) => vec.get(idx).map(Self::U16),
             Self::VecI16(vec) => vec.get(idx).map(Self::I16),
@@ -1417,7 +1438,7 @@ impl Dynamic {
     pub fn set_idx(&mut self, idx: usize, val: Dynamic) {
         match self {
             Self::List(list) => {
-                list.write().unwrap().get_mut(idx).map(|l| *l = val);
+                list.write().get_mut(idx).map(|l| *l = val);
             }
             Self::VecI8(vec) => vec.set(idx, val.try_into().unwrap()),
             Self::VecU16(vec) => vec.set(idx, val.try_into().unwrap()),
@@ -1442,7 +1463,7 @@ impl Dynamic {
     pub fn to_markdown(&self) -> String {
         let mut s = String::new();
         if let Self::Map(m) = self {
-            for (key, v) in m.read().unwrap().iter() {
+            for (key, v) in m.read().iter() {
                 s.push_str(&format!("#### ```{}```\n", key));
                 s.push_str(&v.to_markdown());
                 s.push('\n');
@@ -1466,7 +1487,7 @@ impl Dynamic {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::RwLock;
+    use parking_lot::RwLock;
 
     #[derive(Debug, PartialEq)]
     struct CustomCounter {
@@ -1501,10 +1522,10 @@ mod tests {
         assert!(value.custom_type_name().is_some());
 
         let cloned = value.clone();
-        assert_eq!(cloned.as_custom::<RwLock<CustomCounter>>().unwrap().read().unwrap().value, 7);
+        assert_eq!(cloned.as_custom::<RwLock<CustomCounter>>().unwrap().read().value, 7);
 
-        cloned.as_custom::<RwLock<CustomCounter>>().unwrap().write().unwrap().value = 9;
-        assert_eq!(value.as_custom::<RwLock<CustomCounter>>().unwrap().read().unwrap().value, 9);
+        cloned.as_custom::<RwLock<CustomCounter>>().unwrap().write().value = 9;
+        assert_eq!(value.as_custom::<RwLock<CustomCounter>>().unwrap().read().value, 9);
         assert_eq!(value, cloned);
     }
 
@@ -1515,11 +1536,11 @@ mod tests {
 
     impl CustomProperty for CustomPropertyBag {
         fn get_key(&self, key: &str) -> Option<Dynamic> {
-            self.values.read().unwrap().get(key).cloned()
+            self.values.read().get(key).cloned()
         }
 
         fn set_key(&self, key: &str, value: Dynamic) -> bool {
-            self.values.write().unwrap().insert(key.into(), value);
+            self.values.write().insert(key.into(), value);
             true
         }
     }
@@ -1578,6 +1599,96 @@ mod tests {
         assert_eq!(Dynamic::U64(i64::MAX as u64).as_int(), Some(i64::MAX));
         assert_eq!(Dynamic::U64(i64::MAX as u64 + 1).as_int(), None);
     }
+
+    #[test]
+    fn f16_roundtrip_via_helpers() {
+        let bits = f64_to_f16(1.0);
+        assert_eq!(bits, 0x3C00);
+        assert_eq!(f16_to_f64(bits), 1.0);
+        let bits = f64_to_f16(0.5);
+        assert_eq!(bits, 0x3800);
+        assert_eq!(f16_to_f64(bits), 0.5);
+    }
+
+    #[test]
+    fn f16_dynamic_get_type_and_is_float() {
+        let v = Dynamic::F16(0x3C00);
+        assert_eq!(v.get_type(), Type::F16);
+        assert!(v.is_f16());
+        assert!(v.is_signed());
+        assert_eq!(v.size_of(), 2);
+        assert_eq!(v.as_float(), Some(1.0));
+    }
+
+    #[test]
+    fn f16_force_from_f64_preserves_value() {
+        let d = Type::F16.force(Dynamic::F64(2.0)).unwrap();
+        let Dynamic::F16(bits) = d else {
+            panic!("expected F16");
+        };
+        assert_eq!(bits, 0x4000);
+        assert_eq!(f16_to_f64(bits), 2.0);
+    }
+
+    #[test]
+    fn f16_compare_equal_by_bits() {
+        assert_eq!(Dynamic::F16(0x3C00), Dynamic::F16(0x3C00));
+        assert_ne!(Dynamic::F16(0x3C00), Dynamic::F16(0x4000));
+    }
+
+    #[test]
+    fn f16_subnormal_roundtrip() {
+        // 最小 subnormal (0x0001) ≈ 5.960464477539063e-8
+        let bits = f64_to_f16(5.96e-8);
+        assert_eq!(bits, 0x0001);
+        let back = f16_to_f64(bits);
+        let expected = half::f16::from_bits(0x0001).to_f64();
+        assert_eq!(back, expected, "got {back}");
+    }
+
+    #[test]
+    fn f16_infinity_roundtrip() {
+        let bits = f64_to_f16(f64::INFINITY);
+        assert_eq!(bits, 0x7C00);
+        assert!(f16_to_f64(bits).is_infinite());
+
+        let bits = f64_to_f16(f64::NEG_INFINITY);
+        assert_eq!(bits, 0xFC00);
+        assert!(f16_to_f64(bits).is_sign_negative());
+    }
+
+    #[test]
+    fn fn_type_partial_eq_with_diff_ret_returns_false_not_panic() {
+        use std::rc::Rc;
+        let a = Type::Fn { tys: vec![Type::I32], ret: Rc::new(Type::I32) };
+        let b = Type::Fn { tys: vec![Type::I32], ret: Rc::new(Type::F32) };
+        assert!(a != b);
+        assert!(!(a == b));
+    }
+
+    #[test]
+    fn fn_type_partial_eq_same_args_same_ret_is_true() {
+        use std::rc::Rc;
+        let a = Type::Fn { tys: vec![Type::I32], ret: Rc::new(Type::I32) };
+        let b = Type::Fn { tys: vec![Type::I32], ret: Rc::new(Type::I32) };
+        assert!(a == b);
+    }
+
+    #[test]
+    fn fn_type_partial_eq_diff_args_returns_false() {
+        use std::rc::Rc;
+        let a = Type::Fn { tys: vec![Type::I32], ret: Rc::new(Type::Void) };
+        let b = Type::Fn { tys: vec![Type::I64], ret: Rc::new(Type::Void) };
+        assert!(a != b);
+    }
+
+    #[test]
+    fn fn_type_partial_eq_with_any_ret_is_false() {
+        use std::rc::Rc;
+        let a = Type::Fn { tys: vec![Type::I32], ret: Rc::new(Type::Any) };
+        let b = Type::Fn { tys: vec![Type::I32], ret: Rc::new(Type::I32) };
+        assert!(a != b);
+    }
 }
 
 #[macro_export]
@@ -1630,7 +1741,7 @@ macro_rules! list {
     ($($v:expr),+ $(,)?) => {{
         let mut list = Vec::new();
         $( let _ = list.push(Dynamic::from($v)); )*
-        Dynamic::List(std::sync::Arc::new(std::sync::RwLock::new(list)))
+        Dynamic::List(::std::sync::Arc::new($crate::RwLock::new(list)))
     }};
 }
 

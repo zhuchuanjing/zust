@@ -1,5 +1,5 @@
 use crate::try_parse;
-use dynamic::Type;
+use dynamic::{Dynamic, Type};
 
 use super::{Expr, Parser, Pattern, Span, expr::ExprKind, pattern::PatternKind};
 use anyhow::{Result, anyhow};
@@ -85,6 +85,11 @@ impl Stmt {
         Self::new(StmtKind::Expr(Expr::new(ExprKind::Binary { left: Box::new(pat), op: crate::BinaryOp::Assign, right: Box::new(right) }, span), true), span)
     }
 
+    fn get_assign_expr(pat: Expr, expr: Expr) -> Self {
+        let span = pat.span.merge(expr.span);
+        Self::new(StmtKind::Expr(Expr::new(ExprKind::Binary { left: Box::new(pat), op: crate::BinaryOp::Assign, right: Box::new(expr) }, span), true), span)
+    }
+
     pub fn bind_pattern(&mut self, pat: Pattern) -> Result<()> {
         if let Some(expr) = self.expr() {
             let stmt = match pat.kind {
@@ -95,13 +100,46 @@ impl Stmt {
                         Self::get_assign(idx, expr)
                     }
                 }
-                PatternKind::Tuple(list) | PatternKind::List { elems: list, has_rest: _ } => {
+                PatternKind::Tuple(list) => {
                     let mut stmts = Vec::new();
                     for (idx, p) in list.into_iter().enumerate() {
                         match p.expr() {
                             Ok(p) => stmts.push(Self::get_idx_assign(p, idx, expr.clone())),
                             Err(e) => return Err(e),
                         }
+                    }
+                    Self::new(StmtKind::Block(stmts), self.span)
+                }
+                PatternKind::List { elems, has_rest } => {
+                    let mut stmts = Vec::new();
+                    let prefix_count = if has_rest { elems.len() - 1 } else { elems.len() };
+                    for (idx, p) in elems.iter().take(prefix_count).enumerate() {
+                        match p.expr() {
+                            Ok(p) => stmts.push(Self::get_idx_assign(p, idx, expr.clone())),
+                            Err(e) => return Err(e),
+                        }
+                    }
+                    if has_rest {
+                        // 最后一个元素是 `..rest`,把它绑定为 expr[prefix_count..] 的切片。
+                        let rest_pat = elems.last().unwrap();
+                        let rest_expr = match &rest_pat.kind {
+                            PatternKind::Ident { name, .. } => Expr::new(ExprKind::Ident(name.clone()), rest_pat.span),
+                            PatternKind::Var { idx, .. } => Expr::new(ExprKind::Var(*idx), rest_pat.span),
+                            _ => return Err(anyhow!("..rest 后的模式必须是标识符")),
+                        };
+                        let from = Expr::new(ExprKind::Value((prefix_count as u32).into()), rest_pat.span);
+                        let slice_idx = Expr::new(
+                            ExprKind::Binary {
+                                left: Box::new(expr.clone()),
+                                op: crate::BinaryOp::Idx,
+                                right: Box::new(Expr::new(
+                                    ExprKind::Binary { left: Box::new(from), op: crate::BinaryOp::RangeOpen, right: Box::new(Expr::new(ExprKind::Value(Dynamic::Null), rest_pat.span)) },
+                                    rest_pat.span,
+                                )),
+                            },
+                            rest_pat.span,
+                        );
+                        stmts.push(Self::get_assign_expr(rest_expr, slice_idx));
                     }
                     Self::new(StmtKind::Block(stmts), self.span)
                 }
@@ -211,7 +249,8 @@ impl Parser {
         self.whitespace()?;
         let else_body = if self.keyword("else").is_ok() {
             self.whitespace()?;
-            if self.keyword("if").is_ok() { self.if_block().map(Box::new).ok() } else { self.block().map(Box::new).ok() }
+            let body = if self.keyword("if").is_ok() { self.if_block()? } else { self.block()? };
+            Some(Box::new(body))
         } else {
             None
         };
@@ -223,6 +262,23 @@ impl Parser {
         self.whitespace()?;
         self.spans.push(self.pos);
         let start = self.current_pos();
+        // 函数体内不允许 fn / struct / impl / const / static 顶层声明。
+        // 编译器对这些位置直接 panic，这里前置到 parser，让错误落到用户可见的地方。
+        if self.fn_body_depth > 0 {
+            for kw in &["fn", "struct", "impl", "const", "static"] {
+                if self.keyword(kw).is_ok() {
+                    return Err(anyhow!("函数体内不能定义 {}；请移到顶层或改用闭包", kw));
+                }
+            }
+        }
+        // impl body 允许 fn(方法)和 pub fn,但拒绝嵌套 struct / impl / const / static。
+        if self.impl_body_depth > 0 {
+            for kw in &["struct", "impl", "const", "static"] {
+                if self.keyword(kw).is_ok() {
+                    return Err(anyhow!("impl 体内不能定义 {}；请移到顶层", kw));
+                }
+            }
+        }
         let stmt = if self.keyword("let").is_ok() {
             let pat = self.pattern()?;
             self.declare_pattern_symbols(&pat)?;
@@ -232,7 +288,10 @@ impl Parser {
                 if self.looks_like_dict() {
                     self.get_expr()?
                 } else {
-                    return Err(anyhow!("代码块不能直接作为表达式，请使用 || {{ ... }} 包装为匿名函数"));
+                    // 块作为表达式:{ stmts; expr } 的值是最后一条语句的值。
+                    let span = self.current_pos();
+                    let block_stmt = self.block()?;
+                    Expr::new(ExprKind::Stmt(Box::new(block_stmt)), Span::new(span, self.current_pos()))
                 }
             } else {
                 self.get_expr()?

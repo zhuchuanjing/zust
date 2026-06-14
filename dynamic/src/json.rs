@@ -83,8 +83,9 @@ pub trait ToJson {
 }
 
 use indexmap::IndexMap;
+use parking_lot::RwLock;
 use smol_str::SmolStr;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 
 impl FromJson for Dynamic {
     fn from_json(buf: &[u8]) -> Result<(Self, usize)> {
@@ -200,6 +201,7 @@ impl ToJson for Dynamic {
                     buf.push_str("false")
                 }
             }
+            Self::F16(bits) => buf.push_str(&super::f16_to_f64(*bits).to_string()),
             Self::F32(f) => buf.push_str(&f.to_string()),
             Self::F64(f) => buf.push_str(&f.to_string()),
             Self::I8(i) => buf.push_str(&i.to_string()),
@@ -226,7 +228,7 @@ impl ToJson for Dynamic {
             Self::List(a) => {
                 buf.push('[');
                 let mut once = ZOnce::new("", ",\n");
-                a.read().unwrap().iter().for_each(|item| {
+                a.read().iter().for_each(|item| {
                     buf.push_str(once.take());
                     item.to_json(buf);
                 });
@@ -235,7 +237,7 @@ impl ToJson for Dynamic {
             Self::Map(map) => {
                 buf.push('{');
                 let mut once = ZOnce::new("", ",\n");
-                map.read().unwrap().iter().for_each(|(k, v)| {
+                map.read().iter().for_each(|(k, v)| {
                     buf.push_str(once.take());
                     k.as_str().to_json(buf);
                     buf.push_str(": ");

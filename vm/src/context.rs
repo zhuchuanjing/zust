@@ -4,6 +4,7 @@ use cranelift::codegen::ir::FuncRef;
 use cranelift::prelude::{FunctionBuilder, InstBuilder, Value, Variable, types};
 use cranelift_module::FuncId;
 use dynamic::{Dynamic, Type};
+use smol_str::SmolStr;
 
 #[derive(Clone, Debug)]
 pub enum LocalVar {
@@ -96,6 +97,7 @@ pub struct BuildContext<'a> {
     pub builder: FunctionBuilder<'a>,
     pub(crate) vars: Vec<LocalVar>,
     pub(crate) local_type_hints: Vec<Option<Type>>,
+    pub(crate) fn_name: Option<SmolStr>,
     pub(crate) fn_refs: Vec<(FuncId, FuncRef)>,
     pub(crate) ret_ty: Type,
 }
@@ -113,7 +115,7 @@ impl<'a> BuildContext<'a> {
         for (idx, ty) in arg_tys.iter().enumerate() {
             vars.push(LocalVar::Value { val: builder.block_params(entry_block)[idx], ty: ty.clone() });
         }
-        Ok(Self { builder, vars, local_type_hints, fn_refs: Vec::new(), ret_ty })
+        Ok(Self { builder, vars, local_type_hints, fn_name: None, fn_refs: Vec::new(), ret_ty })
     }
 
     pub fn get_fn_ref(&mut self, fn_id: FuncId) -> Option<FuncRef> {

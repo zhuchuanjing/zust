@@ -1,5 +1,6 @@
 use super::FnVariant;
 use crate::JITRunTime;
+use crate::RwLock;
 use crate::memory::{alloc_dynamic, alloc_struct_bytes, take_dynamic_return};
 use anyhow::{Result, anyhow};
 use cranelift::prelude::AbiParam;
@@ -10,7 +11,7 @@ use rand::RngExt;
 use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
-use std::sync::{RwLock, Weak};
+use std::sync::Weak;
 
 #[derive(Clone, Debug)]
 pub struct ZustCallback {
@@ -333,7 +334,7 @@ pub(crate) extern "C" fn spawn_with_vm(context: *const Weak<RwLock<JITRunTime>>,
 fn spawn_args(args: Dynamic) -> Vec<Dynamic> {
     match args {
         Dynamic::Null => Vec::new(),
-        Dynamic::List(values) => values.read().unwrap().iter().map(Dynamic::deep_clone).collect(),
+        Dynamic::List(values) => values.read().iter().map(Dynamic::deep_clone).collect(),
         value => vec![value],
     }
 }
@@ -344,7 +345,7 @@ fn spawn_run(context: Weak<RwLock<JITRunTime>>, fn_name: &str, args: Dynamic) ->
         anyhow::bail!("spawn supports at most 16 args, got {}", args.len());
     }
     let arg_tys = vec![Type::Any; args.len()];
-    let (ptr, ret_ty) = super::with_vm_context(&context as *const Weak<RwLock<JITRunTime>>, |vm| vm.jit.write().unwrap().get_fn_ptr(fn_name, &arg_tys))?;
+    let (ptr, ret_ty) = super::with_vm_context(&context as *const Weak<RwLock<JITRunTime>>, |vm| vm.jit.write().get_fn_ptr(fn_name, &arg_tys))?;
     let args: Vec<Box<Dynamic>> = args.into_iter().map(Box::new).collect();
     let ptrs: Vec<*const Dynamic> = args.iter().map(|arg| arg.as_ref() as *const Dynamic).collect();
     call_jit_isolated(|| unsafe { call_spawned(ptr, &ret_ty, &ptrs) })
@@ -379,7 +380,7 @@ pub(crate) extern "C" fn callback_new(fn_ptr: i64, ret_ty: i64, explicit_arg_len
         // 闭包捕获按引用共享:浅 clone 只复制 Arc 句柄,多个闭包捕获同一个
         // Map/List 时读写同一份数据(spawn 跨线程才需要 deep_clone 隔离)。
         match unsafe { &*captures } {
-            Dynamic::List(values) => values.read().unwrap().to_vec(),
+            Dynamic::List(values) => values.read().to_vec(),
             value => vec![value.clone()],
         }
     };
@@ -863,7 +864,7 @@ extern "C" fn any_keys(addr: *const Dynamic) -> *const Dynamic {
         return alloc_dynamic(Dynamic::list(Vec::new()));
     }
     let keys = match unsafe { &*addr } {
-        Dynamic::Map(map) => map.read().unwrap().keys().map(|key| Dynamic::from(key.as_str())).collect(),
+        Dynamic::Map(map) => map.read().keys().map(|key| Dynamic::from(key.as_str())).collect(),
         _ => Vec::new(),
     };
     alloc_dynamic(Dynamic::list(keys))
@@ -1157,7 +1158,7 @@ extern "C" fn slice(addr: *const Dynamic, start: i64, stop: *const Dynamic, incl
         Dynamic::from(value.as_str().chars().skip(start).take(stop.saturating_sub(start)).collect::<String>())
     } else {
         match value {
-            Dynamic::List(list) => Dynamic::list(list.read().unwrap()[start..stop].to_vec()),
+            Dynamic::List(list) => Dynamic::list(list.read()[start..stop].to_vec()),
             _ => Dynamic::Null,
         }
     };
@@ -1301,7 +1302,7 @@ pub const STD: [(&str, &[Type], Type, *const u8); 5] = [
     ("rand", &[Type::Any, Type::Any], Type::Any, random as *const u8),
 ];
 
-pub const ANY: [(&str, &[Type], Type, *const u8); 68] = [
+pub const ANY: [(&str, &[Type], Type, *const u8); 69] = [
     ("Any::null", &[], Type::Any, any_null as *const u8),
     ("Any::is_map", &[Type::Any], Type::Bool, any_is_map as *const u8),
     ("Any::is_list", &[Type::Any], Type::Bool, any_is_list as *const u8),
@@ -1353,6 +1354,7 @@ pub const ANY: [(&str, &[Type], Type, *const u8); 68] = [
     ("Any::slice", &[Type::Any, Type::I64, Type::Any, Type::Bool], Type::Any, slice as *const u8),
     ("Any::contains", &[Type::Any, Type::Any], Type::Bool, contains as *const u8),
     ("Any::starts_with", &[Type::Any, Type::Any], Type::Bool, starts_with as *const u8),
+    ("Any::get", &[Type::Any, Type::Any], Type::Any, get_key as *const u8),
     ("Any::get_key", &[Type::Any, Type::Any], Type::Any, get_key as *const u8),
     ("Any::del_key", &[Type::Any, Type::Any], Type::Any, del_key as *const u8),
     ("Any::set_idx", &[Type::Any, Type::I64, Type::Any], Type::Void, set_idx as *const u8),
@@ -1375,12 +1377,12 @@ pub const ANY: [(&str, &[Type], Type, *const u8); 68] = [
 use std::rc::Rc;
 impl JITRunTime {
     pub fn add_native_ptr(&mut self, full_name: &str, name: &str, arg_tys: &[Type], ret_ty: Type, fn_ptr: *const u8) -> Result<u32> {
-        self.native_symbols.write().unwrap().insert(full_name.to_string(), fn_ptr as usize);
+        self.native_symbols.write().insert(full_name.to_string(), fn_ptr as usize);
         self.add_native(full_name, name, arg_tys, ret_ty)
     }
 
     pub(crate) fn add_context_native_ptr(&mut self, full_name: &str, name: &str, arg_tys: &[Type], ret_ty: Type, fn_ptr: *const u8) -> Result<u32> {
-        self.native_symbols.write().unwrap().insert(full_name.to_string(), fn_ptr as usize);
+        self.native_symbols.write().insert(full_name.to_string(), fn_ptr as usize);
         self.add_context_native(full_name, name, arg_tys, ret_ty)
     }
 

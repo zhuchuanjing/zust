@@ -11,8 +11,9 @@ use cranelift_jit::{JITBuilder, JITModule};
 use cranelift_module::{FuncId, Module};
 
 use anyhow::{Result, anyhow};
+use parking_lot::RwLock;
 use smol_str::SmolStr;
-use std::sync::{Arc, RwLock, Weak};
+use std::sync::{Arc, Weak};
 
 pub struct JITRunTime {
     pub compiler: Compiler,
@@ -144,7 +145,11 @@ impl JITRunTime {
     }
 
     pub fn get_dynamic(&self, expr: &Expr) -> Option<Dynamic> {
-        if let ExprKind::Const(idx) = &expr.kind { self.compiler.consts.get(*idx).cloned() } else { None }
+        if let ExprKind::Const(idx) = &expr.kind { self.compiler.consts.get_index(*idx).map(|(_, v)| v.clone()) } else { None }
+    }
+
+    fn compile_error(&self, ctx: &BuildContext, span: Span, message: impl AsRef<str>) -> anyhow::Error {
+        if let Some(fn_name) = &ctx.fn_name { anyhow!("{}", self.compiler.format_source_span(fn_name.as_str(), span, message.as_ref())) } else { anyhow!("{}", message.as_ref()) }
     }
 
     pub fn get_method(&self, ty: &Type, name: &str) -> Result<FnInfo> {
@@ -184,7 +189,7 @@ impl JITRunTime {
         let native_symbols = Arc::new(RwLock::new(HashMap::<String, usize>::new()));
         let lookup_symbols = native_symbols.clone();
         let mut builder = JITBuilder::new(cranelift_module::default_libcall_names()).unwrap();
-        builder.symbol_lookup_fn(Box::new(move |name| lookup_symbols.read().unwrap().get(name).copied().map(|ptr| ptr as *const u8)));
+        builder.symbol_lookup_fn(Box::new(move |name| lookup_symbols.read().get(name).copied().map(|ptr| ptr as *const u8)));
         f(&mut builder);
         let module = JITModule::new(builder);
         PTR_TYPE.get_or_init(|| module.isa().pointer_type());
@@ -277,7 +282,7 @@ impl JITRunTime {
                 let call_inst = ctx.builder.ins().call(fn_ref, &args);
                 if !ret.is_void() { Ok((ctx.builder.inst_results(call_inst)[0], ret)) } else { Err(anyhow!("没有返回值")) }
             }
-            FnInfo::Inline { fn_ptr, arg_tys: _ } => fn_ptr(Some(ctx), args).map(|(v, t)| (v.unwrap(), t)),
+            FnInfo::Inline { fn_ptr, arg_tys: _ } => fn_ptr(Some(ctx), args).and_then(|(v, t)| v.map(|value| (value, t)).ok_or_else(|| anyhow!("inlined native callback returned no value"))),
         }
     }
 
@@ -426,7 +431,7 @@ impl JITRunTime {
     }
 
     fn struct_field_index(&self, struct_ty: &Type, right: &Expr) -> Result<usize> {
-        let value = if let ExprKind::Const(idx) = right.kind { self.compiler.consts.get(idx).cloned().ok_or_else(|| anyhow!("missing const {}", idx))? } else { right.clone().value()? };
+        let value = if let ExprKind::Const(idx) = right.kind { self.compiler.consts.get_index(idx).map(|(_, v)| v.clone()).ok_or_else(|| anyhow!("missing const {}", idx))? } else { right.clone().value()? };
         if let Some(idx) = value.as_int() {
             return usize::try_from(idx).map_err(|_| anyhow!("结构字段索引越界 {}", idx));
         }
@@ -903,7 +908,7 @@ impl JITRunTime {
     fn expr_is_empty_list(&self, expr: &Expr) -> bool {
         match &expr.kind {
             ExprKind::Value(value) => value.is_list() && value.len() == 0,
-            ExprKind::Const(idx) => self.compiler.consts.get(*idx).is_some_and(|value| value.is_list() && value.len() == 0),
+            ExprKind::Const(idx) => self.compiler.consts.get_index(*idx).is_some_and(|(_, value)| value.is_list() && value.len() == 0),
             ExprKind::Typed { value, .. } => self.expr_is_empty_list(value),
             _ => false,
         }
@@ -933,7 +938,7 @@ impl JITRunTime {
         match &expr.kind {
             ExprKind::Tuple(items) | ExprKind::List(items) => Some(items.len()),
             ExprKind::Value(value) => value.is_list().then(|| value.len()),
-            ExprKind::Const(idx) => self.compiler.consts.get(*idx).and_then(|value| value.is_list().then(|| value.len())),
+            ExprKind::Const(idx) => self.compiler.consts.get_index(*idx).and_then(|(_, value)| value.is_list().then(|| value.len())),
             ExprKind::Typed { value, .. } => self.spawn_arg_pack_len(value),
             _ => None,
         }
@@ -1134,8 +1139,9 @@ impl JITRunTime {
                     match self.eval_with_expected(ctx, right, expected.as_ref()) {
                         Ok(value) => self.assign(ctx, left, value).map(|v| v.into()),
                         Err(e) => {
-                            log::error!("assign error {:?}", e);
-                            Err(e)
+                            let err = self.compile_error(ctx, right.span, format!("赋值右侧编译失败: {e:#}"));
+                            log::error!("{err:#}");
+                            Err(err)
                         }
                     }
                 } else {
@@ -1244,9 +1250,9 @@ impl JITRunTime {
                             for p in params {
                                 args.push(self.eval(ctx, p)?.get(ctx).ok_or_else(|| anyhow!("动态方法 {:?} 的参数表达式没有值: {:?}", name, p))?);
                             }
-                            let (_, method_ty) = self.compiler.get_field(&ty, name.as_str())?;
+                            let (_, method_ty) = self.compiler.get_field(&ty, name.as_str()).map_err(|e| self.compile_error(ctx, obj.span, format!("类型 {:?} 没有成员方法 `{}`: {e:#}", ty, name.as_str())))?;
                             let Type::Symbol { id, .. } = method_ty else {
-                                return Err(anyhow!("不是成员函数"));
+                                return Err(self.compile_error(ctx, obj.span, format!("`{:?}.{}` 不是成员函数", ty, name.as_str())));
                             };
                             let arg_tys: Vec<Type> = args.iter().map(|(_, ty)| ty.clone()).collect();
                             let method = self.get_fn(id, &arg_tys).or_else(|_| self.gen_fn_with_params(Some(ctx), id, &arg_tys, &[]))?;

@@ -7,9 +7,9 @@ fn main() -> Result<()> {
     let vm = vm::Vm::with_all()?;
     let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
 
-    vm.jit.write().unwrap().compiler.import_file("sieve", dir.join("zs/sieve.zs").to_str().unwrap())?;
+    vm.jit.write().compiler.import_file("sieve", dir.join("zs/sieve.zs").to_str().unwrap())?;
 
-    let (ptr, ret) = vm.jit.write().unwrap().get_fn_ptr("sieve::bench", &[Type::I64])?;
+    let (ptr, ret) = vm.jit.write().get_fn_ptr("sieve::bench", &[Type::I64])?;
     println!("return type: {:?}", ret);
     let f: extern "C" fn(i64) -> i64 = unsafe { std::mem::transmute(ptr) };
 

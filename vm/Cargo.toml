@@ -15,9 +15,14 @@ name = "vm"
 
 [features]
 default = []
+full = ["http", "db", "llm", "gpu"]
 ir-disassembly = []
-vulkan = ["dep:vulkan", "dep:vulkano"]
-metal = ["vm-metal/runtime"]
+http = ["dep:axum", "dep:futures-util", "dep:reqwest", "dep:tokio", "dep:tower-http"]
+db = ["dep:sqlx-core", "dep:sqlx-mysql", "dep:sqlx-postgres", "dep:tokio"]
+llm = ["dep:llm", "dep:tokio"]
+gpu = ["dep:vm-spirv", "dep:vm-metal"]
+vulkan = ["gpu", "dep:vulkan", "dep:vulkano"]
+metal = ["gpu", "vm-metal/runtime"]
 
 [dependencies]
 log = "0.4.29"
@@ -25,8 +30,8 @@ dynamic = { package = "zust-dynamic", version = "0.9.17", path = "../dynamic" }
 parser = { package = "zust-parser", version = "0.9.16", path = "../parser" }
 compiler = { package = "zust-compiler", version = "0.9.35", path = "../compiler" }
 root = { package = "zust-root", version = "0.9.6", path = "../root" }
-llm = { package = "zust-llm", version = "0.9.15", path = "../llm" }
-vm-spirv = { package = "zust-vm-spirv", version = "0.9.8", path = "../vm-spirv" }
+llm = { package = "zust-llm", version = "0.9.15", path = "../llm", optional = true }
+vm-spirv = { package = "zust-vm-spirv", version = "0.9.8", path = "../vm-spirv", optional = true }
 vulkan = { package = "zust-vulkan", version = "0.9.4", path = "../vulkan", optional = true }
 
 anyhow = "1.0.102"
@@ -39,21 +44,20 @@ cranelift = "0.131.1"
 cranelift-module = "0.131.1"
 cranelift-jit = "0.131.1"
 
-tokio = {version = "1.52.3", features = ["full"]}
+tokio = {version = "1.52.3", features = ["full"], optional = true}
 uuid = { version = "1.23.1", features = ["v4"]}
 rand = "0.10.1"
-reqwest = "0.13.3"
-base64 = "0.22.1"
-axum = { version = "0.8.9", features = ["ws"] }
-tower-http = { version = "0.6.10", features = ["cors", "fs"] }
-futures-util = "0.3.32"
-sqlx-core = { version = "0.8.6", default-features = false, features = ["_rt-tokio", "_tls-rustls-ring-webpki", "any"] }
-sqlx-mysql = { version = "0.8.6", default-features = false, features = ["any"] }
-sqlx-postgres = { version = "0.8.6", default-features = false, features = ["any"] }
+reqwest = { version = "0.13.3", optional = true }
+axum = { version = "0.8.9", features = ["ws"], optional = true }
+tower-http = { version = "0.6.10", features = ["cors", "fs"], optional = true }
+futures-util = { version = "0.3.32", optional = true }
+sqlx-core = { version = "0.8.6", default-features = false, features = ["_rt-tokio", "_tls-rustls-ring-webpki", "any"], optional = true }
+sqlx-mysql = { version = "0.8.6", default-features = false, features = ["any"], optional = true }
+sqlx-postgres = { version = "0.8.6", default-features = false, features = ["any"], optional = true }
 parking_lot = "0.12.3"
 
 [target.'cfg(target_os = "macos")'.dependencies]
-vm-metal = { package = "zust-vm-metal", version = "0.9.10", path = "../vm-metal", default-features = false }
+vm-metal = { package = "zust-vm-metal", version = "0.9.10", path = "../vm-metal", default-features = false, optional = true }
 
 [dev-dependencies]
 num-bigint = "0.4.6"

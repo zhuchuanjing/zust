@@ -326,7 +326,9 @@ See [zusts/bigfloat.zs](zusts/bigfloat.zs) and the GPU Mandelbrot examples under
 
 ## Runtime Modules
 
-`Vm::with_all()` registers the standard runtime modules listed below. These functions use `Dynamic` at the boundary, so maps, lists, strings, bytes, and numbers can be passed directly from Zust scripts.
+`zust-vm` enables no extension features by default. `Vm::new()` registers core runtime support: VM memory, `std`, `Any`, `Vec`, and `root`. `Vm::with_all()` registers every capability compiled into the crate; enabling `full` includes `http`, `db`, `llm`, and `gpu`. `oss` is registered with the `llm` feature, and `http::upload` is available only when both `http` and `llm` are enabled. `vulkan` and `metal` are GPU runtime backend features built on top of `gpu`.
+
+The runtime modules and helper types below use `Dynamic` at the boundary, so maps, lists, strings, bytes, and numbers can be passed directly from Zust scripts.
 
 ### `std`
 

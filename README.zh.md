@@ -319,7 +319,9 @@ pub struct BigFloat<N> {
 
 ## 运行时 Native 模块
 
-`Vm::with_all()` 会注册下面这些 native 模块和辅助类型。它们以 `Dynamic` 作为主要边界，因此 Zust 脚本可以直接传 map、list、字符串、数字和 bytes。
+`zust-vm` 默认不启用扩展 feature。`Vm::new()` 注册 core 能力：VM 内存运行时、`std`、`Any`、`Vec` 和 `root`。`Vm::with_all()` 会注册当前编译进来的全部能力；启用 `full` 时会包含 `http`、`db`、`llm` 和 `gpu`。`oss` 跟随 `llm` feature 注册；`http::upload` 只有同时启用 `http` 和 `llm` 时可用。`vulkan` 和 `metal` 是 GPU 运行后端 feature，分别建立在 `gpu` 之上。
+
+下面这些 native 模块和辅助类型都以 `Dynamic` 作为主要边界，因此 Zust 脚本可以直接传 map、list、字符串、数字和 bytes。
 
 ### 标准函数
 

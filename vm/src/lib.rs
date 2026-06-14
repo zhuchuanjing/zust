@@ -14,11 +14,16 @@ mod rt;
 use cranelift::prelude::types;
 use dynamic::{Dynamic, Type};
 pub use rt::JITRunTime;
+#[cfg(feature = "db")]
 mod db_module;
 mod gpu_layout;
+#[cfg(feature = "gpu")]
 mod gpu_module;
+#[cfg(feature = "http")]
 mod http_module;
+#[cfg(feature = "llm")]
 mod llm_module;
+#[cfg(feature = "llm")]
 mod oss_module;
 mod root_module;
 pub use gpu_layout::{GpuFieldLayout, GpuStructLayout};
@@ -223,6 +228,9 @@ impl JITRunTime {
     }
 
     pub fn add_vec(&mut self) -> Result<()> {
+        if self.compiler.symbols.get_id("Vec::get_idx").is_ok() {
+            return Ok(());
+        }
         self.add_empty_type("Vec")?;
         let vec_def = Type::Symbol { id: self.get_id("Vec")?, params: Vec::new() };
         self.add_inline("Vec::swap", vec![vec_def.clone(), Type::I64, Type::I64], Type::Void, |ctx: Option<&mut BuildContext>, args: Vec<Value>| {
@@ -253,30 +261,46 @@ impl JITRunTime {
         Ok(())
     }
 
+    #[cfg(feature = "llm")]
     pub fn add_llm(&mut self) -> Result<()> {
-        add_native_module_fns(self, "llm", &llm_module::LLM_NATIVE)
+        if self.compiler.symbols.get_id("llm::complete").is_ok() {
+            return Ok(());
+        }
+        add_native_module_fns(self, "llm", &llm_module::LLM_NATIVE)?;
+        add_native_module_fns(self, "oss", &oss_module::OSS_NATIVE)
     }
 
     pub fn add_root(&mut self) -> Result<()> {
+        if self.compiler.symbols.get_id("root::get").is_ok() {
+            return Ok(());
+        }
         add_native_module_fns(self, "root", &root_module::ROOT_NATIVE)?;
         self.add_native_module_context_ptr("root", "add_fn", &[Type::Any, Type::Any], Type::Bool, root_module::root_add_fn_with_vm as *const u8)?;
         Ok(())
     }
 
+    #[cfg(feature = "http")]
     pub fn add_http(&mut self) -> Result<()> {
+        if self.compiler.symbols.get_id("http::request").is_ok() {
+            return Ok(());
+        }
         add_native_module_fns(self, "http", &http_module::HTTP_NATIVE)?;
         http_module::add_root_handlers()
     }
 
-    pub fn add_oss(&mut self) -> Result<()> {
-        add_native_module_fns(self, "oss", &oss_module::OSS_NATIVE)
-    }
-
+    #[cfg(feature = "db")]
     pub fn add_db(&mut self) -> Result<()> {
+        if self.compiler.symbols.get_id("db::select").is_ok() {
+            return Ok(());
+        }
         add_native_module_fns(self, "db", &db_module::DB_NATIVE)
     }
 
+    #[cfg(feature = "gpu")]
     pub fn add_gpu(&mut self) -> Result<()> {
+        if self.compiler.symbols.get_id("gpu::spirv_check").is_ok() {
+            return Ok(());
+        }
         add_native_module_fns(self, "gpu", &gpu_module::GPU_NATIVE)
     }
 
@@ -284,11 +308,14 @@ impl JITRunTime {
         self.add_std()?;
         self.add_any()?;
         self.add_vec()?;
-        self.add_llm()?;
         self.add_root()?;
+        #[cfg(feature = "llm")]
+        self.add_llm()?;
+        #[cfg(feature = "http")]
         self.add_http()?;
-        self.add_oss()?;
+        #[cfg(feature = "db")]
         self.add_db()?;
+        #[cfg(feature = "gpu")]
         self.add_gpu()?;
         Ok(())
     }
@@ -309,6 +336,8 @@ impl Vm {
             guard.add_memory_runtime().expect("register VM memory runtime");
             guard.add_std().expect("register VM std runtime");
             guard.add_any().expect("register VM Any runtime");
+            guard.add_vec().expect("register VM Vec runtime");
+            guard.add_root().expect("register VM root runtime");
         }
         Self { jit }
     }
@@ -3102,6 +3131,7 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(feature = "http")]
     #[test]
     fn http_serve_accepts_inline_config_map() -> anyhow::Result<()> {
         let vm = Vm::with_all()?;
@@ -3121,6 +3151,7 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(feature = "http")]
     #[test]
     fn http_serve_accepts_variable_and_quoted_static_key() -> anyhow::Result<()> {
         let vm = Vm::with_all()?;
@@ -3148,6 +3179,7 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(all(feature = "http", feature = "llm"))]
     #[test]
     fn oss_helpers_accept_explicit_config() -> anyhow::Result<()> {
         let vm = Vm::with_all()?;
@@ -3175,6 +3207,7 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(feature = "http")]
     #[test]
     fn load_script_accepts_http_serve_inline_config() -> anyhow::Result<()> {
         let vm = Vm::with_all()?;

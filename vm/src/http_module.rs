@@ -61,6 +61,7 @@ extern "C" fn http_serve(input: *const Dynamic) -> *const Dynamic {
     alloc_dynamic(start_server(input))
 }
 
+#[cfg(feature = "llm")]
 extern "C" fn http_upload(config: *const Dynamic, object_name: *const Dynamic, bytes: *const Dynamic) -> *const Dynamic {
     if config.is_null() || object_name.is_null() || bytes.is_null() {
         return alloc_dynamic(Dynamic::Null);
@@ -280,6 +281,7 @@ fn dynamic_to_text(value: &Dynamic) -> String {
     if value.is_str() { value.as_str().to_string() } else { value.to_string() }
 }
 
+#[cfg(feature = "llm")]
 fn upload_bytes(config: Dynamic, object_name: Dynamic, bytes: Dynamic) -> Dynamic {
     match upload_bytes_result(config, object_name, bytes) {
         Ok(result) => result,
@@ -287,6 +289,7 @@ fn upload_bytes(config: Dynamic, object_name: Dynamic, bytes: Dynamic) -> Dynami
     }
 }
 
+#[cfg(feature = "llm")]
 fn upload_bytes_result(config: Dynamic, object_name: Dynamic, bytes: Dynamic) -> Result<Dynamic> {
     let object_name = object_name.as_str().to_string();
     if object_name.trim().is_empty() {
@@ -979,10 +982,11 @@ fn body_to_dynamic(body: Bytes) -> Dynamic {
     std::str::from_utf8(&body).map(Dynamic::from).unwrap_or_else(|_| Dynamic::Bytes(body.to_vec()))
 }
 
-pub const HTTP_NATIVE: [(&str, &[Type], Type, *const u8); 5] = [
+pub const HTTP_NATIVE: &[(&str, &[Type], Type, *const u8)] = &[
     ("request", &[Type::Any], Type::Any, http_request as *const u8),
     ("get", &[Type::Any], Type::Any, http_get as *const u8),
     ("post", &[Type::Any, Type::Any], Type::Any, http_post as *const u8),
+    #[cfg(feature = "llm")]
     ("upload", &[Type::Any, Type::Any, Type::Any], Type::Any, http_upload as *const u8),
     ("serve", &[Type::Any], Type::Any, http_serve as *const u8),
 ];

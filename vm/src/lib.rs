@@ -122,7 +122,7 @@ impl JITRunTime {
         let dynamic_sig = self.get_sig(&[Type::Any], Type::Any)?;
         self.scope_exit_dynamic_fn = Some(self.module.declare_function("__vm_scope_exit_dynamic", cranelift_module::Linkage::Import, &dynamic_sig)?);
 
-        let bytes_sig = self.get_sig(&[Type::Any, Type::I64], Type::Any)?;
+        let bytes_sig = self.get_sig(&[Type::Any, Type::I64, Type::I64], Type::Any)?;
         self.scope_exit_bytes_fn = Some(self.module.declare_function("__vm_scope_exit_bytes", cranelift_module::Linkage::Import, &bytes_sig)?);
 
         let struct_alloc_sig = self.get_sig(&[Type::I64], Type::Any)?;
@@ -635,6 +635,64 @@ mod tests {
         assert_eq!(compiled.ret_ty(), &Type::I64);
         let bound: extern "C" fn() -> i64 = unsafe { std::mem::transmute(compiled.ptr()) };
         assert_eq!(bound(), 9);
+        Ok(())
+    }
+
+    #[test]
+    fn returned_nested_struct_dynamic_fields_are_read_inline() -> anyhow::Result<()> {
+        let vm = Vm::with_all()?;
+        vm.import_code(
+            "vm_returned_nested_struct_dynamic",
+            br#"
+            pub struct Inner {
+                value: i64,
+            }
+
+            pub struct Outer {
+                inner: Inner,
+                tag: i64,
+            }
+
+            pub fn make() {
+                Outer{inner: Inner{value: 17}, tag: 3}
+            }
+            "#
+            .to_vec(),
+        )?;
+
+        let compiled = vm.get_fn("vm_returned_nested_struct_dynamic::make", &[])?;
+        let make: extern "C" fn() -> *const u8 = unsafe { std::mem::transmute(compiled.ptr()) };
+        let ty = compiled.ret_ty().clone();
+        let value = Dynamic::struct_view(make() as usize, ty);
+        let inner = value.get_dynamic("inner").expect("inner field");
+        assert_eq!(inner.get_dynamic("value").and_then(|value| value.as_int()), Some(17));
+        assert_eq!(value.get_dynamic("tag").and_then(|value| value.as_int()), Some(3));
+        Ok(())
+    }
+
+    #[test]
+    fn returned_struct_with_dynamic_field_survives_scope_exit() -> anyhow::Result<()> {
+        let vm = Vm::with_all()?;
+        vm.import_code(
+            "vm_returned_struct_dynamic_field",
+            br#"
+            pub struct Bag {
+                name: string,
+                value: string,
+            }
+
+            pub fn make() {
+                Bag{name: "alpha", value: "omega"}
+            }
+            "#
+            .to_vec(),
+        )?;
+
+        let compiled = vm.get_fn("vm_returned_struct_dynamic_field::make", &[])?;
+        let make: extern "C" fn() -> *const u8 = unsafe { std::mem::transmute(compiled.ptr()) };
+        let value = Dynamic::struct_view(make() as usize, compiled.ret_ty().clone());
+        assert_eq!(value.get_dynamic("name").map(|value| value.as_str().to_string()), Some("alpha".to_string()));
+        assert_eq!(value.get_dynamic("value").map(|value| value.as_str().to_string()), Some("omega".to_string()));
         Ok(())
     }
 

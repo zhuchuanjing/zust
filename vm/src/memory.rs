@@ -1,4 +1,4 @@
-use dynamic::Dynamic;
+use dynamic::{Dynamic, Type};
 use std::cell::RefCell;
 use std::mem::{MaybeUninit, align_of, size_of};
 use std::ptr;
@@ -164,9 +164,43 @@ pub(crate) extern "C" fn scope_exit_dynamic(value: *const Dynamic) -> *const Dyn
     alloc_dynamic(promoted)
 }
 
-pub(crate) extern "C" fn scope_exit_bytes(value: *const u8, size: i64) -> *mut u8 {
+fn clone_dynamic_ptr_fields(bytes: &mut [u8], src_base: *const u8, ty: &Type, offset: usize) {
+    match ty {
+        Type::Bool | Type::I8 | Type::U8 | Type::I16 | Type::U16 | Type::I32 | Type::U32 | Type::I64 | Type::U64 | Type::F16 | Type::F32 | Type::F64 | Type::Void => {}
+        Type::Struct { fields, .. } => {
+            let (_, offsets) = Type::struct_layout(fields);
+            for ((_, field_ty), field_offset) in fields.iter().zip(offsets) {
+                clone_dynamic_ptr_fields(bytes, unsafe { src_base.add(field_offset as usize) }, field_ty, offset + field_offset as usize);
+            }
+        }
+        Type::Array(elem_ty, len) | Type::Vec(elem_ty, len) => {
+            let width = elem_ty.storage_width() as usize;
+            for idx in 0..*len as usize {
+                clone_dynamic_ptr_fields(bytes, unsafe { src_base.add(idx * width) }, elem_ty, offset + idx * width);
+            }
+        }
+        _ => {
+            if offset + std::mem::size_of::<usize>() > bytes.len() {
+                return;
+            }
+            let ptr = unsafe { std::ptr::read_unaligned(src_base as *const usize) };
+            if ptr == 0 {
+                return;
+            }
+            let cloned = unsafe { (&*(ptr as *const Dynamic)).deep_clone() };
+            let boxed = Box::into_raw(Box::new(cloned)) as usize;
+            bytes[offset..offset + std::mem::size_of::<usize>()].copy_from_slice(&boxed.to_ne_bytes());
+        }
+    }
+}
+
+pub(crate) extern "C" fn scope_exit_bytes(value: *const u8, size: i64, ty: i64) -> *mut u8 {
     let size = size.max(0) as usize;
-    let bytes = if value.is_null() || size == 0 { Vec::new() } else { unsafe { std::slice::from_raw_parts(value, size).to_vec() } };
+    let mut bytes = if value.is_null() || size == 0 { Vec::new() } else { unsafe { std::slice::from_raw_parts(value, size).to_vec() } };
+    if !value.is_null() && ty != 0 {
+        let ty = unsafe { &*(ty as *const Type) };
+        clone_dynamic_ptr_fields(&mut bytes, value, ty, 0);
+    }
     VM_MEMORY.with(|memory| memory.borrow_mut().exit_scope());
     let dst = alloc_struct_bytes(size);
     if !bytes.is_empty() {

@@ -245,7 +245,7 @@ impl ToJson for Dynamic {
                 });
                 buf.push_str("}\n");
             }
-            Self::Struct { .. } => {
+            Self::StructView { .. } | Self::StructOwned { .. } => {
                 buf.push('{');
                 let mut once = ZOnce::new("", ",\n");
                 self.keys().iter().for_each(|k| {

@@ -57,6 +57,7 @@ impl Symbol {
 
 use anyhow::{Result, anyhow};
 use indexmap::IndexMap;
+use std::{cell::RefCell, collections::HashMap};
 
 pub fn eval_const_int_type(ty: &Type) -> Option<i64> {
     match ty {
@@ -109,10 +110,27 @@ pub struct SymbolTable {
     // 双 IndexMap:按模块名 + 模块内符号名 O(1) 查找;按插入顺序遍历。
     modules: IndexMap<SmolStr, IndexMap<SmolStr, u32>>,
     pub roots: Vec<SmolStr>,
+    lookup_cache: RefCell<HashMap<SmolStr, (u64, u32)>>,
+    lookup_epoch: u64,
 }
 
 impl SymbolTable {
+    fn invalidate_lookup_cache(&mut self) {
+        self.lookup_epoch = self.lookup_epoch.wrapping_add(1);
+        self.lookup_cache.get_mut().clear();
+    }
+
+    fn cached_id(&self, name: &str) -> Option<u32> {
+        let key = SmolStr::new(name);
+        self.lookup_cache.borrow().get(&key).and_then(|(epoch, id)| (*epoch == self.lookup_epoch).then_some(*id))
+    }
+
+    fn cache_id(&self, name: &str, id: u32) {
+        self.lookup_cache.borrow_mut().insert(SmolStr::new(name), (self.lookup_epoch, id));
+    }
+
     pub fn add_to_module(&mut self, module: &str, name: SmolStr, s: Symbol) -> Result<u32> {
+        self.invalidate_lookup_cache();
         let full_name: SmolStr = format!("{}::{}", module, name).into();
         let id = self.symbols.insert_full(full_name, s).0 as u32;
         let module_symbols = self.modules.get_mut(module).ok_or_else(|| anyhow!("模块 {} 不存在", module))?;
@@ -276,6 +294,7 @@ impl SymbolTable {
     }
 
     pub fn add_module(&mut self, name: SmolStr) {
+        self.invalidate_lookup_cache();
         let len = self.roots.len();
         if let Some(pos) = self.roots.iter().position(|r| r.as_str() == name.as_str()) {
             if pos != len - 1 {
@@ -288,14 +307,17 @@ impl SymbolTable {
     }
 
     pub fn push_module_scope(&mut self, name: SmolStr) {
+        self.invalidate_lookup_cache();
         self.roots.push(name);
     }
 
     pub fn pop_module_scope(&mut self) {
+        self.invalidate_lookup_cache();
         self.roots.pop();
     }
 
     pub fn pop_module(&mut self) {
+        self.invalidate_lookup_cache();
         //如果不想模块成为全局的 add_module 之后调用 pop_module
         if let Some(last) = self.roots.pop() {
             if let Some(names) = self.modules.get(&last).map(|m| {
@@ -312,19 +334,27 @@ impl SymbolTable {
     }
 
     pub fn get_id(&self, name: &str) -> Result<u32> {
+        if let Some(id) = self.cached_id(name) {
+            return Ok(id);
+        }
         // 1) 全名命中 (含 :: 的 id 或 add_global 注册过的全局符号)。
         if let Some(idx) = self.symbols.get_index_of(name) {
-            return Ok(idx as u32);
+            let id = idx as u32;
+            self.cache_id(name, id);
+            return Ok(id);
         }
         // 2) 含 :: 的名字拆分按模块查找,O(1)。
         if let Some((mod_name, sym_name)) = name.split_once("::") {
             if let Some(&id) = self.modules.get(mod_name).and_then(|m| m.get(sym_name)) {
+                self.cache_id(name, id);
                 return Ok(id);
             }
             // 即使 modules 里被 pop_module 移除,完整名仍可能在 symbols IndexMap 里。
             let full = format!("{mod_name}::{sym_name}");
             if let Some(idx) = self.symbols.get_index_of(full.as_str()) {
-                return Ok(idx as u32);
+                let id = idx as u32;
+                self.cache_id(name, id);
+                return Ok(id);
             }
         }
         // 3) 不含 :: 的短名,按 roots 倒序查找第一个匹配的模块。O(M)。
@@ -332,16 +362,20 @@ impl SymbolTable {
         let short_name = name;
         for root in self.roots.iter().rev() {
             if let Some(&id) = self.modules.get(root).and_then(|m| m.get(short_name)) {
+                self.cache_id(name, id);
                 return Ok(id);
             }
             let full = format!("{root}::{short_name}");
             if let Some(idx) = self.symbols.get_index_of(full.as_str()) {
-                return Ok(idx as u32);
+                let id = idx as u32;
+                self.cache_id(name, id);
+                return Ok(id);
             }
         }
         // 4) 兜底:任意模块下的同名短符号。O(M*K),K 为模块内符号数。
         for (_, m) in &self.modules {
             if let Some(&id) = m.get(short_name) {
+                self.cache_id(name, id);
                 return Ok(id);
             }
         }
@@ -349,6 +383,7 @@ impl SymbolTable {
     }
 
     pub fn add(&mut self, name: SmolStr, s: Symbol) -> u32 {
+        self.invalidate_lookup_cache();
         let root = self.roots.last().cloned().unwrap();
         let id = self.symbols.insert_full(format!("{}::{}", root, name).into(), s).0 as u32;
         self.modules.get_mut(&root).map(|m| m.insert(name, id));
@@ -366,6 +401,7 @@ impl SymbolTable {
                 }
             }
         }
+        self.invalidate_lookup_cache();
         let id = self.symbols.insert_full(name.clone(), s).0 as u32;
         if let Some((mod_name, symbol_name)) = name.as_str().split_once("::") {
             if let Some(m) = self.modules.get_mut(mod_name) {
@@ -376,6 +412,7 @@ impl SymbolTable {
     }
 
     pub fn take(&mut self, id: u32) -> Option<Symbol> {
+        self.invalidate_lookup_cache();
         self.symbols.get_index_mut(id as usize).map(|(_, s)| std::mem::take(s))
     }
 }

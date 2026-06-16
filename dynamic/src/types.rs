@@ -405,7 +405,7 @@ impl Dynamic {
             Self::VecF64(_) => Type::Vec(Rc::new(Type::F64), len),
             Self::String(_) | Self::StringBuf(_) => Type::Str,
             Self::Map(_) => Type::Map,
-            Self::Struct { ty, .. } => ty.clone(),
+            Self::StructView { ty, .. } | Self::StructOwned { ty, .. } => ty.as_ref().clone(),
             Self::Custom(_) => Type::Any,
             Self::Null => Type::Void,
             Self::List(items) => {

@@ -31,11 +31,22 @@ impl ZustCallback {
     }
 
     pub fn call0(&self) -> Result<Dynamic> {
+        if matches!(self.explicit_arg_len, usize::MAX | 0) {
+            return self.call_with_arg_ptrs(&[]);
+        }
         self.call(Vec::new())
     }
 
     pub fn call1(&self, arg: Dynamic) -> Result<Dynamic> {
-        self.call(vec![arg])
+        match self.explicit_arg_len {
+            0 => self.call0(),
+            usize::MAX | 1 => {
+                let mut ptrs = Vec::with_capacity(1 + self.captures.len());
+                ptrs.push(&arg as *const Dynamic);
+                self.call_with_arg_ptrs(&ptrs)
+            }
+            _ => self.call(vec![arg]),
+        }
     }
 
     pub fn call(&self, mut args: Vec<Dynamic>) -> Result<Dynamic> {
@@ -45,8 +56,13 @@ impl ZustCallback {
                 args.push(Dynamic::Null);
             }
         }
-        let args: Vec<Box<Dynamic>> = args.into_iter().map(Box::new).collect();
-        let mut ptrs: Vec<*const Dynamic> = args.iter().map(|arg| arg.as_ref() as *const Dynamic).collect();
+        let ptrs: Vec<*const Dynamic> = args.iter().map(|arg| arg as *const Dynamic).collect();
+        self.call_with_arg_ptrs(&ptrs)
+    }
+
+    fn call_with_arg_ptrs(&self, args: &[*const Dynamic]) -> Result<Dynamic> {
+        let mut ptrs = Vec::with_capacity(args.len() + self.captures.len());
+        ptrs.extend_from_slice(args);
         ptrs.extend(self.captures.iter().map(|value| value as *const Dynamic));
         call_jit_isolated(|| unsafe { call_callback(self.fn_ptr as *const u8, &self.ret_ty, &ptrs) })
     }
@@ -205,7 +221,7 @@ pub(crate) extern "C" fn strcat_assign(left: *mut Dynamic, right: *const Dynamic
 
 pub(crate) extern "C" fn struct_from_ptr(addr: i64, ty: i64) -> *const Dynamic {
     let ty = unsafe { (&*(ty as *const Type)).clone() };
-    alloc_dynamic(Dynamic::Struct { addr: addr as usize, ty })
+    alloc_dynamic(Dynamic::owned_struct_from_ptr(addr as usize, ty))
 }
 
 pub(crate) extern "C" fn array_from_ptr(addr: i64, ty: i64) -> *const Dynamic {

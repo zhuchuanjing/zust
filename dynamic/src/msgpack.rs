@@ -186,7 +186,7 @@ impl MsgPack for Dynamic {
                     v.encode(buf);
                 }
             }
-            Dynamic::Struct { .. } => {
+            Dynamic::StructView { .. } | Dynamic::StructOwned { .. } => {
                 let keys = self.keys();
                 let length = keys.len();
                 if length < 16 {

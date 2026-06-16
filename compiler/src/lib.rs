@@ -59,7 +59,9 @@ fn impl_target_name(target: &Type) -> anyhow::Result<SmolStr> {
 #[cfg(test)]
 mod tests {
     use super::{Compiler, Symbol};
-    use dynamic::Type;
+    use dynamic::{Dynamic, Type};
+    use parser::{Pattern, PatternKind, Span};
+    use std::rc::Rc;
 
     #[test]
     fn inferred_function_return_type_is_written_back_to_symbol() -> anyhow::Result<()> {
@@ -234,6 +236,79 @@ mod tests {
         let main_id = compiler.symbols.get_id("compiler_return_check_assoc::main")?;
         assert_eq!(compiler.infer_fn(main_id, &[])?, Type::I32);
         Ok(())
+    }
+
+    #[test]
+    fn top_level_unknown_statement_is_error() {
+        let mut compiler = Compiler::new();
+        let err = compiler
+            .import_code(
+                "compiler_top_level_unknown",
+                br#"
+                let value = 1i32;
+                "#
+                .to_vec(),
+            )
+            .expect_err("top-level let should be rejected");
+        assert!(format!("{err:#}").contains("不支持的顶层语句"));
+    }
+
+    #[test]
+    fn static_initializer_errors_instead_of_disappearing() {
+        let mut compiler = Compiler::new();
+        let err = compiler
+            .import_code(
+                "compiler_static_initializer",
+                br#"
+                pub fn make() {
+                    1i32
+                }
+                pub static VALUE: i32 = make();
+                "#
+                .to_vec(),
+            )
+            .expect_err("static initializer should be compile-time constant");
+        assert!(format!("{err:#}").contains("const 只能使用字面量"));
+    }
+
+    #[test]
+    fn return_expression_compile_error_is_preserved() {
+        let mut compiler = Compiler::new();
+        let err = compiler
+            .import_code(
+                "compiler_return_error",
+                br#"
+                pub fn bad() {
+                    return missing_call();
+                }
+                "#
+                .to_vec(),
+            )
+            .expect_err("return expression error should be reported");
+        assert!(format!("{err:#}").contains("未注册函数"));
+    }
+
+    #[test]
+    fn nested_pattern_errors_are_preserved() {
+        let mut compiler = Compiler::new();
+        let pat = Pattern { kind: PatternKind::List { elems: vec![Pattern { kind: PatternKind::Literal(Dynamic::I32(1)), span: Span::default() }], has_rest: false }, span: Span::default() };
+        let err = compiler.pat_to_var(pat, Type::List(Rc::new(Type::I32))).expect_err("invalid nested pattern should be reported");
+        assert!(format!("{err:#}").contains("未知的模式"));
+    }
+
+    #[test]
+    fn tuple_pattern_length_mismatch_is_error() {
+        let mut compiler = Compiler::new();
+        let pat = Pattern {
+            kind: PatternKind::Tuple(vec![
+                Pattern { kind: PatternKind::Ident { name: "a".into(), ty: Type::Any }, span: Span::default() },
+                Pattern { kind: PatternKind::Ident { name: "b".into(), ty: Type::Any }, span: Span::default() },
+                Pattern { kind: PatternKind::Ident { name: "c".into(), ty: Type::Any }, span: Span::default() },
+            ]),
+            span: Span::default(),
+        };
+        let err = compiler.pat_to_var(pat, Type::Tuple(vec![Type::I32, Type::I32])).expect_err("tuple pattern length mismatch should be rejected");
+        assert!(format!("{err:#}").contains("模式与元组类型不匹配"));
     }
 
     #[test]
@@ -1226,7 +1301,8 @@ impl Compiler {
                     self.symbols.add(name, Symbol::Struct(def, is_pub));
                 }
                 StmtKind::Static { name, ty, value, is_pub } => {
-                    self.symbols.add(name, Symbol::Static { value: value.and_then(|v| v.value().ok()), ty, is_pub });
+                    let value = value.map(|value| self.const_expr_value(&value)).transpose()?;
+                    self.symbols.add(name, Symbol::Static { value, ty, is_pub });
                 }
                 StmtKind::Const { name, ty, value, is_pub } => {
                     let value = self.const_expr_value(&value)?;
@@ -1272,9 +1348,7 @@ impl Compiler {
                     }
                 }
                 StmtKind::Expr(expr, _) if is_top_level_import_expr(&expr) => {}
-                _ => {
-                    log::debug!("未知的顶层语句 {:?}", stmt);
-                }
+                _ => return Err(Self::semantic_error(stmt.span, format!("不支持的顶层语句: {:?}", stmt.kind))),
             }
         }
         let mut fn_ids = Vec::new();
@@ -1314,19 +1388,22 @@ impl Compiler {
             }
             PatternKind::Tuple(pats) => {
                 if let Type::Tuple(tys) = &expr_ty {
-                    let pats: Vec<Pattern> = pats.into_iter().zip(tys).filter_map(|p| self.pat_to_var(p.0, p.1.clone()).ok()).collect();
-                    if pats.len() == tys.len() { Ok(Pattern { kind: PatternKind::Tuple(pats), span: pat.span }) } else { Err(Self::semantic_error(pat.span, format!("模式与元组类型不匹配: {:?}", expr_ty))) }
+                    if pats.len() != tys.len() {
+                        return Err(Self::semantic_error(pat.span, format!("模式与元组类型不匹配: {:?}", expr_ty)));
+                    }
+                    let pats: Vec<Pattern> = pats.into_iter().zip(tys).map(|p| self.pat_to_var(p.0, p.1.clone())).collect::<Result<_>>()?;
+                    Ok(Pattern { kind: PatternKind::Tuple(pats), span: pat.span })
                 } else {
-                    let pats = pats.into_iter().filter_map(|p| self.pat_to_var(p, Type::Any).ok()).collect();
+                    let pats = pats.into_iter().map(|p| self.pat_to_var(p, Type::Any)).collect::<Result<_>>()?;
                     Ok(Pattern { kind: PatternKind::Tuple(pats), span: pat.span })
                 }
             }
             PatternKind::List { elems, has_rest } => {
                 if expr_ty.is_any() {
-                    let elems: Vec<Pattern> = elems.into_iter().filter_map(|p| self.pat_to_var(p, Type::Any).ok()).collect();
+                    let elems: Vec<Pattern> = elems.into_iter().map(|p| self.pat_to_var(p, Type::Any)).collect::<Result<_>>()?;
                     Ok(Pattern { kind: PatternKind::List { elems, has_rest }, span: pat.span })
                 } else if let Type::List(elem_ty) | Type::Array(elem_ty, _) | Type::Vec(elem_ty, _) = &expr_ty {
-                    let elems: Vec<Pattern> = elems.into_iter().filter_map(|p| self.pat_to_var(p, elem_ty.as_ref().clone()).ok()).collect();
+                    let elems: Vec<Pattern> = elems.into_iter().map(|p| self.pat_to_var(p, elem_ty.as_ref().clone())).collect::<Result<_>>()?;
                     Ok(Pattern { kind: PatternKind::List { elems, has_rest }, span: pat.span })
                 } else {
                     Err(Self::semantic_error(pat.span, format!("列表模式 {:?} 与类型 {:?} 不匹配", elems, expr_ty)))
@@ -1336,7 +1413,7 @@ impl Compiler {
                 self.add_ty(expr_ty.clone());
                 Ok(Pattern { kind: PatternKind::Var { idx: self.add_name(SmolStr::new_static("")), ty: expr_ty }, span: pat.span })
             }
-            _ => panic!("未知的模式 {:?}", pat),
+            _ => Err(Self::semantic_error(pat.span, format!("未知的模式 {:?}", pat))),
         }
     }
 
@@ -1825,7 +1902,7 @@ impl Compiler {
                 }
             }
             StmtKind::Return(expr) => {
-                let expr = expr.and_then(|e| self.eval(&e, compiled, cap).ok());
+                let expr = expr.map(|e| self.eval(&e, compiled, cap)).transpose()?;
                 compiled.push(Stmt::new(StmtKind::Return(expr), stmt_span));
             }
             StmtKind::If { cond, then_body, else_body } => {

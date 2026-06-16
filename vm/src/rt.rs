@@ -23,6 +23,7 @@ pub struct JITRunTime {
     pub(crate) owner: Weak<RwLock<JITRunTime>>,
     pub(crate) pending_fns: VecDeque<PendingFn>,
     pub(crate) compile_depth: usize,
+    native_fn_cache: Vec<(SmolStr, Vec<Type>, FnInfo)>,
     #[cfg(feature = "ir-disassembly")]
     pub ir_disassembly: BTreeMap<SmolStr, String>,
     pub module: JITModule,
@@ -177,6 +178,15 @@ impl JITRunTime {
         self.compiler.symbols.get_id(name)
     }
 
+    fn get_native_fn_cached(&mut self, name: &'static str, arg_tys: &[Type]) -> Result<FnInfo> {
+        if let Some((_, _, fn_info)) = self.native_fn_cache.iter().find(|(cached_name, cached_tys, _)| cached_name.as_str() == name && cached_tys.as_slice() == arg_tys) {
+            return Ok(fn_info.clone());
+        }
+        let fn_info = self.get_fn(self.get_id(name)?, arg_tys)?;
+        self.native_fn_cache.push((SmolStr::new(name), arg_tys.to_vec(), fn_info.clone()));
+        Ok(fn_info)
+    }
+
     pub fn get_type(&mut self, name: &str, arg_tys: &[Type]) -> Result<Type> {
         let id = self.get_id(name)?;
         if self.compiler.symbols.symbols.get(name).map(|s| s.is_fn()).unwrap_or(false) {
@@ -202,6 +212,7 @@ impl JITRunTime {
             owner: Weak::new(),
             pending_fns: VecDeque::new(),
             compile_depth: 0,
+            native_fn_cache: Vec::new(),
             #[cfg(feature = "ir-disassembly")]
             ir_disassembly: BTreeMap::new(),
             module,
@@ -324,9 +335,10 @@ impl JITRunTime {
         } else if self.is_aggregate_ty(&ret_ty) {
             let value = self.convert(ctx, (value, value_ty), ret_ty.clone())?;
             let size = ctx.builder.ins().iconst(types::I64, ret_ty.width() as i64);
+            let ty_ptr = Self::type_ptr_const(ctx, &ret_ty);
             let fn_id = self.scope_exit_bytes_fn.ok_or_else(|| anyhow!("VM aggregate return runtime is not registered"))?;
             let fn_ref = self.get_fn_ref(ctx, fn_id);
-            let call_inst = ctx.builder.ins().call(fn_ref, &[value, size]);
+            let call_inst = ctx.builder.ins().call(fn_ref, &[value, size, ty_ptr]);
             let promoted = ctx.builder.inst_results(call_inst)[0];
             ctx.builder.ins().return_(&[promoted]);
         } else {
@@ -784,7 +796,7 @@ impl JITRunTime {
                         && let Some((fn_name, value_ty)) = Self::list_set_idx_shortcut(elem_ty)
                     {
                         let stored = self.convert(ctx, value.clone(), value_ty.clone())?;
-                        let set_idx_fn = self.get_fn(self.get_id(fn_name)?, &[Type::Any, Type::I64, value_ty])?;
+                        let set_idx_fn = self.get_native_fn_cached(fn_name, &[Type::Any, Type::I64, value_ty])?;
                         self.call_for_side_effect(ctx, set_idx_fn, vec![left.0, idx, stored])?;
                         return Ok(value);
                     }
@@ -809,7 +821,7 @@ impl JITRunTime {
                     {
                         let idx = self.convert(ctx, right.clone(), Type::I64)?;
                         let stored = self.convert(ctx, value.clone(), value_ty.clone())?;
-                        let set_idx_fn = self.get_fn(self.get_id(fn_name)?, &[Type::Any, Type::I64, value_ty])?;
+                        let set_idx_fn = self.get_native_fn_cached(fn_name, &[Type::Any, Type::I64, value_ty])?;
                         self.call_for_side_effect(ctx, set_idx_fn, vec![left.0, idx, stored])?;
                         return Ok(value);
                     }
@@ -948,6 +960,10 @@ impl JITRunTime {
         let (ExprKind::Tuple(items) | ExprKind::List(items)) = &expr.kind else {
             return self.eval(ctx, expr)?.get(ctx).ok_or_else(|| anyhow!("spawn closure args expression has no value"));
         };
+        if items.is_empty() {
+            let idx = self.compiler.get_const(Dynamic::Null);
+            return self.get_const_value(ctx, idx);
+        }
         let values = items.iter().map(|item| self.eval(ctx, item)?.get(ctx).ok_or_else(|| anyhow!("spawn closure arg has no value: {:?}", item))).collect::<Result<Vec<_>>>()?;
         self.dynamic_list_from_values(ctx, values)
     }
@@ -981,7 +997,12 @@ impl JITRunTime {
         let FnInfo::Call { fn_id, ret, .. } = fn_info else {
             return Err(anyhow!("callback target must be compiled function"));
         };
-        let captures = self.dynamic_list_from_values(ctx, captures)?;
+        let captures = if captures.is_empty() {
+            let idx = self.compiler.get_const(Dynamic::Null);
+            self.get_const_value(ctx, idx)?
+        } else {
+            self.dynamic_list_from_values(ctx, captures)?
+        };
         let fn_ref = self.get_fn_ref(ctx, fn_id);
         let fn_addr = ctx.builder.ins().func_addr(ptr_type(), fn_ref);
         let ret_ty = Self::type_ptr_const(ctx, &ret);
@@ -1053,7 +1074,7 @@ impl JITRunTime {
             && let Some((fn_name, value_ty)) = Self::list_push_shortcut(elem_ty)
         {
             let value = self.convert(ctx, (value.0, value.1.clone()), value_ty.clone())?;
-            let push_fn = self.get_fn(self.get_id(fn_name)?, &[Type::Any, value_ty])?;
+            let push_fn = self.get_native_fn_cached(fn_name, &[Type::Any, value_ty])?;
             self.call_for_side_effect(ctx, push_fn, vec![list.0, value])?;
             return Ok(LocalVar::None);
         }
@@ -1063,7 +1084,7 @@ impl JITRunTime {
             && let Some((fn_name, _ret_ty)) = Self::list_get_idx_shortcut(elem_ty)
         {
             let idx = self.convert(ctx, (idx.0, idx.1.clone()), Type::I64)?;
-            let get_idx_fn = self.get_fn(self.get_id(fn_name)?, &[Type::Any, Type::I64])?;
+            let get_idx_fn = self.get_native_fn_cached(fn_name, &[Type::Any, Type::I64])?;
             return self.call(ctx, get_idx_fn, vec![list.0, idx]).map(|value| value.into());
         }
         if fn_name.as_str().ends_with("Vec::swap")
@@ -1212,7 +1233,7 @@ impl JITRunTime {
                                 if let Type::List(elem_ty) = &left.1
                                     && let Some((fn_name, _ret_ty)) = Self::list_get_idx_shortcut(elem_ty)
                                 {
-                                    let get_idx_fn = self.get_fn(self.get_id(fn_name)?, &[Type::Any, Type::I64])?;
+                                    let get_idx_fn = self.get_native_fn_cached(fn_name, &[Type::Any, Type::I64])?;
                                     return self.call(ctx, get_idx_fn, vec![left.0, right]).map(|r| r.into());
                                 }
                                 self.call(ctx, self.get_method(&left.1, "get_idx")?, vec![left.0, right]).map(|r| r.into())
@@ -1511,14 +1532,14 @@ impl JITRunTime {
                 } else if let PatternKind::Var { idx, .. } = &pat.kind {
                     let vt = self.eval(ctx, range)?.get(ctx).unwrap();
                     if let Type::List(elem_ty) = &vt.1 {
-                        let len_fn = self.get_fn(self.get_id("Any::len")?, &[Type::Any])?;
+                        let len_fn = self.get_native_fn_cached("Any::len", &[Type::Any])?;
                         let len = self.call(ctx, len_fn, vec![vt.0])?;
                         let len = self.convert(ctx, len.into(), Type::I64)?;
                         let zero = ctx.builder.ins().iconst(types::I64, 0);
                         let get_idx_fn = if let Some((fn_name, _)) = Self::list_get_idx_shortcut(elem_ty) {
-                            self.get_fn(self.get_id(fn_name)?, &[Type::Any, Type::I64])?
+                            self.get_native_fn_cached(fn_name, &[Type::Any, Type::I64])?
                         } else {
-                            self.get_fn(self.get_id("Any::get_idx")?, &[Type::Any, Type::I64])?
+                            self.get_native_fn_cached("Any::get_idx", &[Type::Any, Type::I64])?
                         };
                         let get_idx_ret_ty = get_idx_fn.get_type()?;
                         let get_idx_id = get_idx_fn.get_id()?;

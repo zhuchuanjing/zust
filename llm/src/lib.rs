@@ -1078,7 +1078,15 @@ fn decode_llm_response(t: Dynamic, raw_text: &str) -> Result<Dynamic> {
         return decode_text_content(content, raw_text);
     }
     let choice = t.remove_dynamic("choices").and_then(|c| c.into_vec::<Dynamic>()).and_then(|v| v.into_iter().next()).ok_or_else(|| anyhow!("LLM 响应缺少 data[0] 或 choices[0]: {raw_text}"))?;
-    if let Some(content) = choice.remove_dynamic("message").and_then(|m| m.remove_dynamic("content")) { decode_text_content(content, raw_text) } else { Err(anyhow!("结果不是 json")) }
+    if let Some(message) = choice.remove_dynamic("message") {
+        if message.contains("tool_calls") {
+            return Ok(message);
+        }
+        if let Some(content) = message.remove_dynamic("content") {
+            return decode_text_content(content, raw_text);
+        }
+    }
+    Err(anyhow!("结果不是 json"))
 }
 
 fn decode_output(output: Dynamic) -> Option<Dynamic> {
@@ -1286,6 +1294,21 @@ mod test {
 
         assert!(message.contains("缺少 data[0] 或 choices[0]"));
         assert!(message.contains("bad api key"));
+        Ok(())
+    }
+
+    #[test]
+    fn decode_chat_tool_calls_returns_message() -> anyhow::Result<()> {
+        let raw = r#"{"choices":[{"message":{"role":"assistant","content":"","tool_calls":[{"id":"call_1","type":"function","function":{"name":"search_google_maps","arguments":"{\"address\":\"大阪府大阪市北区梅田3丁目1-1\"}"}}]}}]}"#;
+        let (body, _) = Dynamic::from_json(raw.as_bytes())?;
+        let decoded = super::decode_llm_response(body, raw)?;
+
+        assert!(decoded.contains("tool_calls"));
+        assert_eq!(decoded.get_dynamic("role").unwrap().as_str(), "assistant");
+        let tool_calls = decoded.get_dynamic("tool_calls").unwrap();
+        assert_eq!(tool_calls.len(), 1);
+        let call = tool_calls.get_idx(0).unwrap();
+        assert_eq!(call.get_dynamic("function").unwrap().get_dynamic("name").unwrap().as_str(), "search_google_maps");
         Ok(())
     }
 

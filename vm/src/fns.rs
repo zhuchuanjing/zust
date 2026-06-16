@@ -30,7 +30,7 @@ use cranelift_module::Linkage;
 use parser::{Expr, ExprKind, Span, Stmt, StmtKind};
 use smol_str::SmolStr;
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum FnInfo {
     //用来调用的函数信息
     Call { fn_id: FuncId, arg_tys: Vec<Type>, caps: Vec<usize>, ret: Type, context: Option<usize> },

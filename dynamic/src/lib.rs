@@ -1,4 +1,6 @@
 use bytemuck::{AnyBitPattern, NoUninit, cast_slice, cast_slice_mut};
+use half::f16;
+use indexmap::IndexMap;
 use smol_str::SmolStr;
 use std::any::Any;
 use std::collections::BTreeMap;
@@ -6,6 +8,19 @@ use std::mem;
 use tinyvec::TinyVec;
 const TINY_SIZE: usize = 28;
 pub mod json;
+
+/// IEEE 754 half-precision bits -> f64. Delegates to `half::f16` for proper
+/// signaling NaN, subnormal, and rounding semantics.
+#[inline]
+pub fn f16_to_f64(bits: u16) -> f64 {
+    f16::from_bits(bits).to_f64()
+}
+
+/// f64 -> IEEE 754 half-precision bits, via `half::f16`.
+#[inline]
+pub fn f64_to_f16(value: f64) -> u16 {
+    f16::from_f64(value).to_bits()
+}
 #[derive(Debug, Default, Clone, PartialEq)]
 pub struct MyVec<T> {
     pub(crate) data: TinyVec<[u8; TINY_SIZE]>,
@@ -138,7 +153,8 @@ pub enum DynamicErr {
     OutOfRange,
 }
 
-use std::sync::{Arc, RwLock};
+pub use parking_lot::RwLock;
+use std::sync::Arc;
 
 pub trait CustomProperty: Any + Send + Sync {
     fn get_key(&self, key: &str) -> Option<Dynamic>;
@@ -231,6 +247,81 @@ impl std::fmt::Debug for CustomValue {
     }
 }
 
+#[derive(Debug)]
+pub struct StructBytes {
+    bytes: RwLock<Vec<u8>>,
+    dynamic_fields: RwLock<BTreeMap<usize, Box<Dynamic>>>,
+}
+
+impl StructBytes {
+    fn new(size: usize) -> Arc<Self> {
+        Arc::new(Self { bytes: RwLock::new(vec![0; size]), dynamic_fields: RwLock::new(BTreeMap::new()) })
+    }
+
+    fn addr(&self) -> usize {
+        self.bytes.read().as_ptr() as usize
+    }
+
+    fn copy_from_ptr(addr: usize, ty: &Type) -> Arc<Self> {
+        let size = ty.storage_width() as usize;
+        let storage = Self::new(size);
+        if addr != 0 && size > 0 {
+            unsafe {
+                std::ptr::copy_nonoverlapping(addr as *const u8, storage.addr() as *mut u8, size);
+            }
+            storage.clone_dynamic_fields_from(addr, ty, 0);
+        }
+        storage
+    }
+
+    fn clone_dynamic_fields_from(&self, src_addr: usize, ty: &Type, dst_offset: usize) {
+        match ty {
+            Type::Bool | Type::I8 | Type::U8 | Type::I16 | Type::U16 | Type::I32 | Type::U32 | Type::I64 | Type::U64 | Type::F16 | Type::F32 | Type::F64 | Type::Void => {}
+            Type::Struct { fields, .. } => {
+                let (_, offsets) = Type::struct_layout(fields);
+                for ((_, field_ty), offset) in fields.iter().zip(offsets) {
+                    self.clone_dynamic_fields_from(src_addr + offset as usize, field_ty, dst_offset + offset as usize);
+                }
+            }
+            Type::Array(elem_ty, len) | Type::Vec(elem_ty, len) => {
+                let width = elem_ty.storage_width() as usize;
+                for idx in 0..*len as usize {
+                    self.clone_dynamic_fields_from(src_addr + idx * width, elem_ty, dst_offset + idx * width);
+                }
+            }
+            _ => {
+                let ptr = unsafe { std::ptr::read_unaligned(src_addr as *const usize) };
+                if ptr != 0 {
+                    let value = unsafe { (&*(ptr as *const Dynamic)).deep_clone() };
+                    self.write_dynamic_ptr_at(dst_offset, value);
+                }
+            }
+        }
+    }
+
+    fn clear_dynamic_fields_in(&self, start: usize, width: usize) {
+        let end = start.saturating_add(width);
+        self.dynamic_fields.write().retain(|offset, _| *offset < start || *offset >= end);
+    }
+
+    fn read_dynamic_ptr_at(&self, offset: usize) -> Option<Dynamic> {
+        if let Some(value) = self.dynamic_fields.read().get(&offset) {
+            return Some(value.as_ref().clone());
+        }
+        let ptr = unsafe { std::ptr::read_unaligned((self.addr() + offset) as *const usize) };
+        if ptr == 0 { None } else { Some(unsafe { (&*(ptr as *const Dynamic)).clone() }) }
+    }
+
+    fn write_dynamic_ptr_at(&self, offset: usize, value: Dynamic) {
+        let mut boxed = Box::new(value);
+        let ptr = boxed.as_mut() as *mut Dynamic as usize;
+        self.dynamic_fields.write().insert(offset, boxed);
+        unsafe {
+            std::ptr::write_unaligned((self.addr() + offset) as *mut usize, ptr);
+        }
+    }
+}
+
 #[derive(Debug, Default, Clone)]
 pub enum Dynamic {
     #[default]
@@ -244,6 +335,7 @@ pub enum Dynamic {
     I32(i32), //默认整数类型
     U64(u64),
     I64(i64),
+    F16(u16), //IEEE 754 half-precision bits
     F32(f32), //默认浮点类型
     F64(f64),
     String(SmolStr),
@@ -259,12 +351,16 @@ pub enum Dynamic {
     VecI64(Vec<i64>),
     VecF64(Vec<f64>),
     List(Arc<RwLock<Vec<Dynamic>>>),
-    Map(Arc<RwLock<BTreeMap<SmolStr, Dynamic>>>),
-    Struct {
+    Map(Arc<RwLock<IndexMap<SmolStr, Dynamic>>>),
+    StructView {
         addr: usize,
-        ty: Type,
+        ty: Arc<Type>,
     },
-    Custom(CustomValue),
+    StructOwned {
+        storage: Arc<StructBytes>,
+        ty: Arc<Type>,
+    },
+    Custom(Box<CustomValue>),
     Iter {
         idx: usize,
         keys: Vec<SmolStr>,
@@ -294,9 +390,10 @@ impl PartialEq for Dynamic {
             // Mixed integer types - compare as i64
             (a, b) if a.is_int() && b.is_int() => a.as_int() == b.as_int(),
             // Float types
+            (Self::F16(a), Self::F16(b)) => a == b,
             (Self::F32(a), Self::F32(b)) => a.to_bits() == b.to_bits(),
             (Self::F64(a), Self::F64(b)) => a.to_bits() == b.to_bits(),
-            (a, b) if (a.is_f32() || a.is_f64()) && (b.is_f32() || b.is_f64()) => a.as_float() == b.as_float(),
+            (a, b) if (a.is_f16() || a.is_f32() || a.is_f64()) && (b.is_f16() || b.is_f32() || b.is_f64()) => a.as_float() == b.as_float(),
             // Typed vectors
             (Self::VecI8(a), Self::VecI8(b)) => a.data == b.data,
             (Self::VecU16(a), Self::VecU16(b)) => a.data == b.data,
@@ -309,8 +406,8 @@ impl PartialEq for Dynamic {
             (Self::VecF64(a), Self::VecF64(b)) => a == b,
             // List - compare inner values
             (Self::List(a), Self::List(b)) => {
-                let a_guard = a.read().unwrap();
-                let b_guard = b.read().unwrap();
+                let a_guard = a.read();
+                let b_guard = b.read();
                 if a_guard.len() != b_guard.len() {
                     return false;
                 }
@@ -318,8 +415,8 @@ impl PartialEq for Dynamic {
             }
             // Map - compare key-value pairs
             (Self::Map(a), Self::Map(b)) => {
-                let a_guard = a.read().unwrap();
-                let b_guard = b.read().unwrap();
+                let a_guard = a.read();
+                let b_guard = b.read();
                 if a_guard.len() != b_guard.len() {
                     return false;
                 }
@@ -334,8 +431,9 @@ impl PartialEq for Dynamic {
                 }
                 true
             }
-            // Struct - compare addresses and types
-            (Self::Struct { addr: a_addr, ty: a_ty }, Self::Struct { addr: b_addr, ty: b_ty }) => a_addr == b_addr && a_ty == b_ty,
+            // StructView compares by address, StructOwned by bytes.
+            (Self::StructView { addr: a_addr, ty: a_ty }, Self::StructView { addr: b_addr, ty: b_ty }) => a_addr == b_addr && a_ty == b_ty,
+            (Self::StructOwned { storage: a, ty: a_ty }, Self::StructOwned { storage: b, ty: b_ty }) => a_ty == b_ty && *a.bytes.read() == *b.bytes.read(),
             (Self::Custom(a), Self::Custom(b)) => a.ptr_eq(b),
             _ => false,
         }
@@ -361,7 +459,7 @@ impl Ord for Dynamic {
         } else if self.is_uint() || other.is_uint() {
             self.as_uint().unwrap_or(0).cmp(&other.as_uint().unwrap_or(0))
         } else if self.is_false() && other.is_true() {
-            Ordering::Less    // false < true
+            Ordering::Less // false < true
         } else if self.is_true() && other.is_false() {
             Ordering::Greater // true > false
         } else if self.is_null() && other.is_null() {
@@ -621,28 +719,28 @@ impl Dynamic {
     where
         T: Any + Send + Sync + 'static,
     {
-        Self::Custom(CustomValue::new(value))
+        Self::Custom(Box::new(CustomValue::new(value)))
     }
 
     pub fn custom_arc<T>(value: Arc<T>) -> Self
     where
         T: Any + Send + Sync + 'static,
     {
-        Self::Custom(CustomValue::from_arc(value))
+        Self::Custom(Box::new(CustomValue::from_arc(value)))
     }
 
     pub fn custom_with_properties<T>(value: T) -> Self
     where
         T: CustomProperty + 'static,
     {
-        Self::Custom(CustomValue::new_with_properties(value))
+        Self::Custom(Box::new(CustomValue::new_with_properties(value)))
     }
 
     pub fn custom_property_arc<T>(value: Arc<T>) -> Self
     where
         T: CustomProperty + 'static,
     {
-        Self::Custom(CustomValue::from_property_arc(value))
+        Self::Custom(Box::new(CustomValue::from_property_arc(value)))
     }
 
     pub fn is_custom(&self) -> bool {
@@ -663,15 +761,39 @@ impl Dynamic {
     pub fn deep_clone(&self) -> Self {
         match self {
             Self::Map(m) => {
-                let m = m.read().unwrap().iter().map(|(k, v)| (k.clone(), v.deep_clone())).collect();
+                let m = m.read().iter().map(|(k, v)| (k.clone(), v.deep_clone())).collect();
                 Self::map(m)
             }
             Self::List(l) => {
-                let l = l.read().unwrap().iter().map(|item| item.deep_clone()).collect();
+                let l = l.read().iter().map(|item| item.deep_clone()).collect();
                 Self::list(l)
             }
-            Self::Struct { addr, ty } => Self::Struct { addr: *addr, ty: ty.clone() },
+            Self::StructView { addr, ty } => Self::owned_struct_from_ptr(*addr, ty.as_ref().clone()),
+            Self::StructOwned { storage, ty } => Self::owned_struct_from_ptr(storage.addr(), ty.as_ref().clone()),
             _ => self.clone(),
+        }
+    }
+
+    pub fn struct_view(addr: usize, ty: Type) -> Self {
+        Self::StructView { addr, ty: Arc::new(ty) }
+    }
+
+    pub fn owned_struct_from_ptr(addr: usize, ty: Type) -> Self {
+        Self::StructOwned { storage: StructBytes::copy_from_ptr(addr, &ty), ty: Arc::new(ty) }
+    }
+
+    fn struct_addr_ty(&self) -> Option<(usize, &Type)> {
+        match self {
+            Self::StructView { addr, ty } => Some((*addr, ty.as_ref())),
+            Self::StructOwned { storage, ty } => Some((storage.addr(), ty.as_ref())),
+            _ => None,
+        }
+    }
+
+    fn struct_storage(&self) -> Option<&StructBytes> {
+        match self {
+            Self::StructOwned { storage, .. } => Some(storage),
+            _ => None,
         }
     }
 
@@ -757,13 +879,13 @@ impl Dynamic {
         match (self, other) {
             (Self::List(left), rhs) => {
                 if let Self::List(right) = rhs {
-                    left.write().unwrap().append(&mut right.write().unwrap());
+                    left.write().append(&mut right.write());
                 } else {
-                    left.write().unwrap().push(rhs);
+                    left.write().push(rhs);
                 }
             }
             (Self::Map(left), Self::Map(right)) => {
-                left.write().unwrap().append(&mut right.write().unwrap());
+                left.write().append(&mut right.write());
             }
             (_, _) => {}
         }
@@ -772,12 +894,10 @@ impl Dynamic {
     pub fn into_vec<T: TryFrom<Self> + 'static>(self) -> Option<Vec<T>> {
         if std::any::TypeId::of::<T>() == std::any::TypeId::of::<Dynamic>() {
             match self {
-                Dynamic::List(list) => {
-                    match Arc::try_unwrap(list) {
-                        Ok(vec) => vec.into_inner().map(|v| unsafe { mem::transmute::<Vec<Dynamic>, Vec<T>>(v) }).ok(), // 成功：直接返回 Vec
-                        Err(_) => None,                                                                                 // 失败：有其他引用，无法移动所有权
-                    }
-                }
+                Dynamic::List(list) => match Arc::try_unwrap(list) {
+                    Ok(vec) => Some(unsafe { mem::transmute::<Vec<Dynamic>, Vec<T>>(vec.into_inner()) }),
+                    Err(_) => None,
+                },
                 _ => {
                     let mut vec = Vec::with_capacity(self.len());
                     for idx in 0..self.len() {
@@ -790,7 +910,7 @@ impl Dynamic {
             }
         } else {
             match self {
-                Dynamic::List(list) => Arc::try_unwrap(list).ok().and_then(|l| l.into_inner().map(|l| l.into_iter().filter_map(|l| T::try_from(l).ok()).collect()).ok()),
+                Dynamic::List(list) => Arc::try_unwrap(list).ok().map(|l| l.into_inner().into_iter().filter_map(|l| T::try_from(l).ok()).collect()),
                 Dynamic::Bytes(vec) => {
                     if std::any::TypeId::of::<T>() == std::any::TypeId::of::<u8>() {
                         let bytes_vec: Vec<u8> = Vec::from(vec);
@@ -876,7 +996,7 @@ impl Dynamic {
     pub fn push<T: Into<Dynamic> + 'static>(&mut self, value: T) -> bool {
         match self {
             Self::List(list) => {
-                list.write().unwrap().push(value.into());
+                list.write().push(value.into());
                 true
             }
             Self::Bytes(vec) => {
@@ -966,7 +1086,7 @@ impl Dynamic {
     pub fn push_dynamic(&mut self, value: Dynamic) -> bool {
         match self {
             Self::List(list) => {
-                list.write().unwrap().push(value);
+                list.write().push(value);
                 true
             }
             Self::Bytes(vec) => value.try_into().map(|value| vec.push(value)).is_ok(),
@@ -985,7 +1105,7 @@ impl Dynamic {
 
     pub fn pop(&mut self) -> Option<Dynamic> {
         match self {
-            Self::List(list) => list.write().unwrap().pop(),
+            Self::List(list) => list.write().pop(),
             Self::Bytes(vec) => vec.pop().map(Dynamic::U8),
             Self::VecI8(vec) => vec.pop().map(Dynamic::I8),
             Self::VecU16(vec) => vec.pop().map(Dynamic::U16),
@@ -1068,6 +1188,10 @@ impl Dynamic {
         if let Self::F32(_) = self { true } else { false }
     }
 
+    pub fn is_f16(&self) -> bool {
+        if let Self::F16(_) = self { true } else { false }
+    }
+
     pub fn is_str(&self) -> bool {
         if let Self::String(_) | Self::StringBuf(_) = self { true } else { false }
     }
@@ -1086,6 +1210,7 @@ impl Dynamic {
             Self::I16(i) => Some(*i as f64),
             Self::I32(i) => Some(*i as f64),
             Self::I64(i) => Some(*i as f64),
+            Self::F16(bits) => Some(f16_to_f64(*bits)),
             Self::F32(f) => Some(*f as f64),
             Self::F64(f) => Some(*f),
             _ => None,
@@ -1094,7 +1219,7 @@ impl Dynamic {
 
     pub fn is_signed(&self) -> bool {
         match self {
-            Self::I8(_) | Self::I16(_) | Self::I32(_) | Self::I64(_) | Self::F32(_) | Self::F64(_) => true,
+            Self::I8(_) | Self::I16(_) | Self::I32(_) | Self::I64(_) | Self::F16(_) | Self::F32(_) | Self::F64(_) => true,
             _ => false,
         }
     }
@@ -1105,6 +1230,7 @@ impl Dynamic {
             Self::I16(_) | Self::U16(_) => 2,
             Self::I32(_) | Self::U32(_) | Self::F32(_) => 4,
             Self::I64(_) | Self::U64(_) | Self::F64(_) => 8,
+            Self::F16(_) => 2,
             Self::String(s) => s.len(),
             Self::StringBuf(s) => s.len(),
             Self::Bytes(bytes) => bytes.len(),
@@ -1117,9 +1243,9 @@ impl Dynamic {
             Self::VecI64(vec) => vec.len(),
             Self::VecU64(vec) => vec.len(),
             Self::VecF64(vec) => vec.len(),
-            Self::List(list) => list.read().unwrap().len(),
-            Self::Map(obj) => obj.read().unwrap().len(),
-            Self::Struct { ty, .. } => ty.len(),
+            Self::List(list) => list.read().len(),
+            Self::Map(obj) => obj.read().len(),
+            Self::StructView { ty, .. } | Self::StructOwned { ty, .. } => ty.len(),
             Self::Custom(_) => 0,
             _ => 1,
         }
@@ -1132,6 +1258,7 @@ impl Dynamic {
     pub fn is_list(&self) -> bool {
         match self {
             Self::List(_) | Self::VecF32(_) | Self::VecF64(_) | Self::VecI16(_) | Self::VecI32(_) | Self::VecI64(_) | Self::VecU16(_) | Self::VecU32(_) | Self::VecU64(_) => true,
+            Self::StructView { ty, .. } | Self::StructOwned { ty, .. } => ty.is_array() || ty.is_vec(),
             _ => false,
         }
     }
@@ -1145,21 +1272,23 @@ impl Dynamic {
     }
 
     pub fn map(m: BTreeMap<SmolStr, Dynamic>) -> Self {
-        Dynamic::Map(Arc::new(RwLock::new(m)))
+        // 入参保持 BTreeMap 以兼容已有调用点;底层用 IndexMap(O(1) 访问)。
+        // BTreeMap 已按 key 排序,转入后即为初始(有序)插入序。
+        Dynamic::Map(Arc::new(RwLock::new(m.into_iter().collect())))
     }
 
-    pub fn into_map(self) -> Option<BTreeMap<SmolStr, Dynamic>> {
-        if let Self::Map(map) = self { Arc::try_unwrap(map).ok().and_then(|m| m.into_inner().ok()) } else { None }
+    pub fn into_map(self) -> Option<IndexMap<SmolStr, Dynamic>> {
+        if let Self::Map(map) = self { Arc::try_unwrap(map).ok().map(|m| m.into_inner()) } else { None }
     }
 
     pub fn is_map(&self) -> bool {
-        if let Self::Map(_) | Self::Struct { .. } = self { true } else { false }
+        if let Self::Map(_) | Self::StructView { .. } | Self::StructOwned { .. } = self { true } else { false }
     }
 
     pub fn insert<K: Into<SmolStr>, T: Into<Self>>(&self, key: K, value: T) {
         match self {
             Self::Map(obj) => {
-                obj.write().unwrap().insert(key.into(), value.into());
+                obj.write().insert(key.into(), value.into());
             }
             _ => {}
         }
@@ -1169,7 +1298,7 @@ impl Dynamic {
         match self {
             Self::String(value) => value.len(),
             Self::StringBuf(value) => value.len(),
-            Self::List(list) => list.read().unwrap().len(),
+            Self::List(list) => list.read().len(),
             Self::Bytes(bytes) => bytes.len(),
             Self::VecI8(vec) => vec.len(),
             Self::VecU16(vec) => vec.len(),
@@ -1180,7 +1309,7 @@ impl Dynamic {
             Self::VecI64(vec) => vec.len(),
             Self::VecU64(vec) => vec.len(),
             Self::VecF64(vec) => vec.len(),
-            Self::Map(obj) => obj.read().unwrap().len(),
+            Self::Map(obj) => obj.read().len(),
             Self::Custom(_) => 0,
             _ => 0,
         }
@@ -1188,8 +1317,8 @@ impl Dynamic {
 
     pub fn keys(&self) -> Vec<SmolStr> {
         if let Self::Map(map) = self {
-            map.read().unwrap().keys().cloned().collect()
-        } else if let Self::Struct { ty: Type::Struct { params: _, fields }, .. } = self {
+            map.read().keys().cloned().collect()
+        } else if let Some((_, Type::Struct { params: _, fields })) = self.struct_addr_ty() {
             fields.iter().map(|(name, _)| name.clone()).collect()
         } else {
             Vec::new()
@@ -1198,11 +1327,11 @@ impl Dynamic {
 
     pub fn contains(&self, key: &str) -> bool {
         if let Self::Map(map) = self {
-            map.read().unwrap().get(key).is_some_and(|value| !value.is_null())
-        } else if let Self::Struct { ty, .. } = self {
+            map.read().get(key).is_some_and(|value| !value.is_null())
+        } else if let Self::StructView { ty, .. } | Self::StructOwned { ty, .. } = self {
             ty.get_field(key).is_ok()
         } else if let Self::List(list) = self {
-            list.read().unwrap().iter().find(|l| l.as_str() == key).is_some()
+            list.read().iter().find(|l| l.as_str() == key).is_some()
         } else if let Self::String(s) = self {
             s.contains(key)
         } else if let Self::StringBuf(s) = self {
@@ -1226,10 +1355,10 @@ impl Dynamic {
 
     pub fn get_dynamic(&self, key: &str) -> Option<Dynamic> {
         if let Self::Map(map) = self {
-            map.read().unwrap().get(key).cloned()
-        } else if let Self::Struct { addr, ty } = self {
+            map.read().get(key).cloned()
+        } else if let Some((addr, ty)) = self.struct_addr_ty() {
             let (idx, field_ty) = ty.get_field(key).ok()?;
-            Self::read_struct_field(*addr, idx, field_ty, ty)
+            Self::read_struct_field(addr, idx, field_ty, ty, self.struct_storage())
         } else if let Self::Custom(value) = self {
             value.get_key(key)
         } else {
@@ -1239,11 +1368,11 @@ impl Dynamic {
 
     pub fn set_dynamic(&self, key: SmolStr, value: impl Into<Dynamic>) {
         if let Self::Map(map) = self {
-            map.write().unwrap().insert(key, value.into());
-        } else if let Self::Struct { addr, ty } = self
+            map.write().insert(key, value.into());
+        } else if let Some((addr, ty)) = self.struct_addr_ty()
             && let Ok((idx, field_ty)) = ty.get_field(key.as_str())
         {
-            Self::write_struct_field(*addr, idx, field_ty, ty, value.into());
+            Self::write_struct_field(addr, idx, field_ty, ty, value.into(), self.struct_storage());
         } else if let Self::Custom(custom) = self {
             custom.set_key(key.as_str(), value.into());
         }
@@ -1253,20 +1382,28 @@ impl Dynamic {
         struct_ty.field_offset(idx).map(|offset| addr + offset as usize)
     }
 
-    fn read_dynamic_ptr(addr: usize) -> Option<Dynamic> {
+    fn read_dynamic_ptr(addr: usize, storage: Option<&StructBytes>, offset: usize) -> Option<Dynamic> {
+        if let Some(storage) = storage {
+            return storage.read_dynamic_ptr_at(offset);
+        }
         let ptr = unsafe { std::ptr::read_unaligned(addr as *const usize) };
         if ptr == 0 { None } else { Some(unsafe { (&*(ptr as *const Dynamic)).clone() }) }
     }
 
-    fn write_dynamic_ptr(addr: usize, value: Dynamic) {
-        let ptr = Box::into_raw(Box::new(value)) as usize;
-        unsafe {
-            std::ptr::write_unaligned(addr as *mut usize, ptr);
+    fn write_dynamic_ptr(addr: usize, value: Dynamic, storage: Option<&StructBytes>, offset: usize) {
+        if let Some(storage) = storage {
+            storage.write_dynamic_ptr_at(offset, value);
+        } else {
+            let ptr = Box::into_raw(Box::new(value)) as usize;
+            unsafe {
+                std::ptr::write_unaligned(addr as *mut usize, ptr);
+            }
         }
     }
 
-    fn read_struct_field(addr: usize, idx: usize, field_ty: &Type, struct_ty: &Type) -> Option<Dynamic> {
+    fn read_struct_field(addr: usize, idx: usize, field_ty: &Type, struct_ty: &Type, storage: Option<&StructBytes>) -> Option<Dynamic> {
         let field_addr = Self::field_addr(addr, idx, struct_ty)?;
+        let offset = field_addr.saturating_sub(addr);
         match field_ty {
             Type::Bool => Some(Dynamic::Bool(unsafe { std::ptr::read_unaligned(field_addr as *const u8) } != 0)),
             Type::I8 => Some(Dynamic::I8(unsafe { std::ptr::read_unaligned(field_addr as *const i8) })),
@@ -1279,18 +1416,25 @@ impl Dynamic {
             Type::U64 => Some(Dynamic::U64(unsafe { std::ptr::read_unaligned(field_addr as *const u64) })),
             Type::F32 => Some(Dynamic::F32(unsafe { std::ptr::read_unaligned(field_addr as *const f32) })),
             Type::F64 => Some(Dynamic::F64(unsafe { std::ptr::read_unaligned(field_addr as *const f64) })),
-            Type::Struct { .. } => {
-                let ptr = unsafe { std::ptr::read_unaligned(field_addr as *const usize) };
-                Some(Dynamic::Struct { addr: ptr, ty: field_ty.clone() })
+            ty if ty.is_struct() || ty.is_array() || ty.is_vec() => {
+                if storage.is_some() {
+                    Some(Dynamic::owned_struct_from_ptr(field_addr, field_ty.clone()))
+                } else {
+                    Some(Dynamic::struct_view(field_addr, field_ty.clone()))
+                }
             }
-            _ => Self::read_dynamic_ptr(field_addr),
+            _ => Self::read_dynamic_ptr(field_addr, storage, offset),
         }
     }
 
-    fn write_struct_field(addr: usize, idx: usize, field_ty: &Type, struct_ty: &Type, value: Dynamic) {
+    fn write_struct_field(addr: usize, idx: usize, field_ty: &Type, struct_ty: &Type, value: Dynamic, storage: Option<&StructBytes>) {
         let Some(field_addr) = Self::field_addr(addr, idx, struct_ty) else {
             return;
         };
+        let offset = field_addr.saturating_sub(addr);
+        if let Some(storage) = storage {
+            storage.clear_dynamic_fields_in(offset, field_ty.storage_width() as usize);
+        }
         match field_ty {
             Type::Bool => unsafe {
                 std::ptr::write_unaligned(field_addr as *mut u8, if value.is_true() { 1 } else { 0 });
@@ -1325,24 +1469,32 @@ impl Dynamic {
             Type::F64 => unsafe {
                 std::ptr::write_unaligned(field_addr as *mut f64, f64::try_from(value).unwrap_or_default());
             },
-            Type::Struct { .. } => {
-                if let Dynamic::Struct { addr, ty: _ } = value {
-                    unsafe {
-                        std::ptr::write_unaligned(field_addr as *mut usize, addr);
+            ty if ty.is_struct() || ty.is_array() || ty.is_vec() => {
+                if let Some((src_addr, _)) = value.struct_addr_ty() {
+                    if let Some(storage) = storage {
+                        unsafe {
+                            std::ptr::copy_nonoverlapping(src_addr as *const u8, field_addr as *mut u8, field_ty.storage_width() as usize);
+                        }
+                        storage.clone_dynamic_fields_from(src_addr, field_ty, offset);
+                    } else {
+                        unsafe {
+                            std::ptr::copy_nonoverlapping(src_addr as *const u8, field_addr as *mut u8, field_ty.storage_width() as usize);
+                        }
                     }
                 }
             }
-            _ => Self::write_dynamic_ptr(field_addr, value),
+            _ => Self::write_dynamic_ptr(field_addr, value, storage, offset),
         }
     }
 
     pub fn remove_dynamic(&self, key: &str) -> Option<Dynamic> {
-        if let Self::Map(map) = self { map.write().unwrap().remove(key) } else { None }
+        // shift_remove 保留插入顺序(swap_remove 会打乱),与原 BTreeMap 删除后仍有序的语义最接近
+        if let Self::Map(map) = self { map.write().shift_remove(key) } else { None }
     }
 
     pub fn get_idx(&self, idx: usize) -> Option<Self> {
         match self {
-            Self::List(list) => list.read().unwrap().get(idx).cloned(),
+            Self::List(list) => list.read().get(idx).cloned(),
             Self::VecI8(vec) => vec.get(idx).map(Self::I8),
             Self::VecU16(vec) => vec.get(idx).map(Self::U16),
             Self::VecI16(vec) => vec.get(idx).map(Self::I16),
@@ -1352,14 +1504,53 @@ impl Dynamic {
             Self::VecI64(vec) => vec.get(idx).cloned().map(Self::I64),
             Self::VecU64(vec) => vec.get(idx).cloned().map(Self::U64),
             Self::VecF64(vec) => vec.get(idx).cloned().map(Self::F64),
-            Self::Struct { addr, ty } => {
-                if let Type::Struct { params: _, fields } = ty {
-                    fields.get(idx).and_then(|(_, field_ty)| Self::read_struct_field(*addr, idx, field_ty, ty))
+            Self::StructView { addr, ty } => {
+                if let Type::Struct { params: _, fields } = ty.as_ref() {
+                    fields.get(idx).and_then(|(_, field_ty)| Self::read_struct_field(*addr, idx, field_ty, ty.as_ref(), None))
                 } else {
-                    None
+                    Self::read_aggregate_index(*addr, idx, ty.as_ref(), None)
                 }
             }
+            Self::StructOwned { storage, ty } => Self::read_aggregate_index(storage.addr(), idx, ty.as_ref(), Some(storage)),
             _ => None,
+        }
+    }
+
+    fn read_aggregate_index(addr: usize, idx: usize, ty: &Type, storage: Option<&StructBytes>) -> Option<Self> {
+        match ty {
+            Type::Struct { fields, .. } => fields.get(idx).and_then(|(_, field_ty)| Self::read_struct_field(addr, idx, field_ty, ty, storage)),
+            Type::Array(elem_ty, len) | Type::Vec(elem_ty, len) => {
+                if idx >= *len as usize {
+                    return None;
+                }
+                let elem_addr = addr + idx * elem_ty.storage_width() as usize;
+                Some(Self::read_aggregate_value(elem_addr, elem_ty, storage, elem_addr.saturating_sub(addr)))
+            }
+            _ => None,
+        }
+    }
+
+    fn read_aggregate_value(addr: usize, ty: &Type, storage: Option<&StructBytes>, offset: usize) -> Self {
+        match ty {
+            Type::Bool => Dynamic::Bool(unsafe { std::ptr::read_unaligned(addr as *const u8) } != 0),
+            Type::I8 => Dynamic::I8(unsafe { std::ptr::read_unaligned(addr as *const i8) }),
+            Type::U8 => Dynamic::U8(unsafe { std::ptr::read_unaligned(addr as *const u8) }),
+            Type::I16 => Dynamic::I16(unsafe { std::ptr::read_unaligned(addr as *const i16) }),
+            Type::U16 => Dynamic::U16(unsafe { std::ptr::read_unaligned(addr as *const u16) }),
+            Type::I32 => Dynamic::I32(unsafe { std::ptr::read_unaligned(addr as *const i32) }),
+            Type::U32 => Dynamic::U32(unsafe { std::ptr::read_unaligned(addr as *const u32) }),
+            Type::I64 => Dynamic::I64(unsafe { std::ptr::read_unaligned(addr as *const i64) }),
+            Type::U64 => Dynamic::U64(unsafe { std::ptr::read_unaligned(addr as *const u64) }),
+            Type::F32 => Dynamic::F32(unsafe { std::ptr::read_unaligned(addr as *const f32) }),
+            Type::F64 => Dynamic::F64(unsafe { std::ptr::read_unaligned(addr as *const f64) }),
+            ty if ty.is_struct() || ty.is_array() || ty.is_vec() => {
+                if storage.is_some() {
+                    Dynamic::owned_struct_from_ptr(addr, ty.clone())
+                } else {
+                    Dynamic::struct_view(addr, ty.clone())
+                }
+            }
+            _ => Self::read_dynamic_ptr(addr, storage, offset).unwrap_or(Dynamic::Null),
         }
     }
 
@@ -1413,32 +1604,124 @@ impl Dynamic {
     pub fn set_idx(&mut self, idx: usize, val: Dynamic) {
         match self {
             Self::List(list) => {
-                list.write().unwrap().get_mut(idx).map(|l| *l = val);
+                list.write().get_mut(idx).map(|l| *l = val);
             }
-            Self::VecI8(vec) => vec.set(idx, val.try_into().unwrap()),
-            Self::VecU16(vec) => vec.set(idx, val.try_into().unwrap()),
-            Self::VecI16(vec) => vec.set(idx, val.try_into().unwrap()),
-            Self::VecU32(vec) => vec.set(idx, val.try_into().unwrap()),
-            Self::VecI32(vec) => vec.set(idx, val.try_into().unwrap()),
-            Self::VecF32(vec) => vec.set(idx, val.try_into().unwrap()),
-            Self::VecI64(vec) => vec[idx] = val.try_into().unwrap(),
-            Self::VecU64(vec) => vec[idx] = val.try_into().unwrap(),
-            Self::VecF64(vec) => vec[idx] = val.try_into().unwrap(),
-            Self::Struct { addr, ty } => {
-                if let Type::Struct { params: _, fields } = ty.clone()
+            Self::VecI8(vec) => {
+                if let Ok(value) = val.try_into() {
+                    vec.set(idx, value);
+                }
+            }
+            Self::VecU16(vec) => {
+                if let Ok(value) = val.try_into() {
+                    vec.set(idx, value);
+                }
+            }
+            Self::VecI16(vec) => {
+                if let Ok(value) = val.try_into() {
+                    vec.set(idx, value);
+                }
+            }
+            Self::VecU32(vec) => {
+                if let Ok(value) = val.try_into() {
+                    vec.set(idx, value);
+                }
+            }
+            Self::VecI32(vec) => {
+                if let Ok(value) = val.try_into() {
+                    vec.set(idx, value);
+                }
+            }
+            Self::VecF32(vec) => {
+                if let Ok(value) = val.try_into() {
+                    vec.set(idx, value);
+                }
+            }
+            Self::VecI64(vec) => {
+                if let Some(slot) = vec.get_mut(idx)
+                    && let Ok(value) = val.try_into()
+                {
+                    *slot = value;
+                }
+            }
+            Self::VecU64(vec) => {
+                if let Some(slot) = vec.get_mut(idx)
+                    && let Ok(value) = val.try_into()
+                {
+                    *slot = value;
+                }
+            }
+            Self::VecF64(vec) => {
+                if let Some(slot) = vec.get_mut(idx)
+                    && let Ok(value) = val.try_into()
+                {
+                    *slot = value;
+                }
+            }
+            Self::StructView { addr, ty } => {
+                if let Type::Struct { params: _, fields } = ty.as_ref()
                     && let Some((_, field_ty)) = fields.get(idx)
                 {
-                    Self::write_struct_field(*addr, idx, field_ty, &ty, val);
+                    Self::write_struct_field(*addr, idx, field_ty, ty.as_ref(), val, None);
+                } else {
+                    Self::write_aggregate_index(*addr, idx, ty.as_ref(), val, None);
+                }
+            }
+            Self::StructOwned { storage, ty } => {
+                if let Type::Struct { params: _, fields } = ty.as_ref()
+                    && let Some((_, field_ty)) = fields.get(idx)
+                {
+                    Self::write_struct_field(storage.addr(), idx, field_ty, ty.as_ref(), val, Some(storage));
+                } else {
+                    Self::write_aggregate_index(storage.addr(), idx, ty.as_ref(), val, Some(storage));
                 }
             }
             _ => {}
         }
     }
 
+    fn write_aggregate_index(addr: usize, idx: usize, ty: &Type, val: Dynamic, storage: Option<&StructBytes>) {
+        let (elem_ty, len) = match ty {
+            Type::Array(elem_ty, len) | Type::Vec(elem_ty, len) => (elem_ty.as_ref(), *len as usize),
+            _ => return,
+        };
+        if idx >= len {
+            return;
+        }
+        let offset = idx * elem_ty.storage_width() as usize;
+        let elem_addr = addr + offset;
+        if let Some(storage) = storage {
+            storage.clear_dynamic_fields_in(offset, elem_ty.storage_width() as usize);
+        }
+        match elem_ty {
+            Type::Bool => unsafe { std::ptr::write_unaligned(elem_addr as *mut u8, if val.is_true() { 1 } else { 0 }) },
+            Type::I8 => unsafe { std::ptr::write_unaligned(elem_addr as *mut i8, val.try_into().unwrap_or_default()) },
+            Type::U8 => unsafe { std::ptr::write_unaligned(elem_addr as *mut u8, val.try_into().unwrap_or_default()) },
+            Type::I16 => unsafe { std::ptr::write_unaligned(elem_addr as *mut i16, val.try_into().unwrap_or_default()) },
+            Type::U16 => unsafe { std::ptr::write_unaligned(elem_addr as *mut u16, val.try_into().unwrap_or_default()) },
+            Type::I32 => unsafe { std::ptr::write_unaligned(elem_addr as *mut i32, val.try_into().unwrap_or_default()) },
+            Type::U32 => unsafe { std::ptr::write_unaligned(elem_addr as *mut u32, val.try_into().unwrap_or_default()) },
+            Type::I64 => unsafe { std::ptr::write_unaligned(elem_addr as *mut i64, val.try_into().unwrap_or_default()) },
+            Type::U64 => unsafe { std::ptr::write_unaligned(elem_addr as *mut u64, val.try_into().unwrap_or_default()) },
+            Type::F32 => unsafe { std::ptr::write_unaligned(elem_addr as *mut f32, f32::try_from(val).unwrap_or_default()) },
+            Type::F64 => unsafe { std::ptr::write_unaligned(elem_addr as *mut f64, f64::try_from(val).unwrap_or_default()) },
+            ty if ty.is_struct() || ty.is_array() || ty.is_vec() => {
+                if let Some((src_addr, _)) = val.struct_addr_ty() {
+                    unsafe {
+                        std::ptr::copy_nonoverlapping(src_addr as *const u8, elem_addr as *mut u8, elem_ty.storage_width() as usize);
+                    }
+                    if let Some(storage) = storage {
+                        storage.clone_dynamic_fields_from(src_addr, elem_ty, offset);
+                    }
+                }
+            }
+            _ => Self::write_dynamic_ptr(elem_addr, val, storage, offset),
+        }
+    }
+
     pub fn to_markdown(&self) -> String {
         let mut s = String::new();
         if let Self::Map(m) = self {
-            for (key, v) in m.read().unwrap().iter() {
+            for (key, v) in m.read().iter() {
                 s.push_str(&format!("#### ```{}```\n", key));
                 s.push_str(&v.to_markdown());
                 s.push('\n');
@@ -1462,11 +1745,37 @@ impl Dynamic {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::RwLock;
+    use parking_lot::RwLock;
 
     #[derive(Debug, PartialEq)]
     struct CustomCounter {
         value: i64,
+    }
+
+    #[test]
+    fn type_add_promotion_rules() {
+        use crate::Type;
+        // 相同类型保持
+        assert_eq!(Type::I32 + Type::I32, Type::I32);
+        // 字符串吸收一切
+        assert_eq!(Type::I32 + Type::Str, Type::Str);
+        // Any 退化
+        assert_eq!(Type::I32 + Type::Any, Type::Any);
+        // 浮点优先,取较宽
+        assert_eq!(Type::I64 + Type::F32, Type::F32);
+        assert_eq!(Type::F32 + Type::F64, Type::F64);
+        // 整数取较大宽度
+        assert_eq!(Type::I8 + Type::I32, Type::I32);
+        assert_eq!(Type::I32 + Type::I64, Type::I64);
+        // 有符号先于无符号被处理:i32 + u32 -> i32
+        assert_eq!(Type::I32 + Type::U32, Type::I32);
+        // 无符号同宽
+        assert_eq!(Type::U8 + Type::U32, Type::U32);
+    }
+
+    #[test]
+    fn dynamic_enum_stays_compact() {
+        assert_eq!(std::mem::size_of::<Dynamic>(), 40);
     }
 
     #[test]
@@ -1476,10 +1785,10 @@ mod tests {
         assert!(value.custom_type_name().is_some());
 
         let cloned = value.clone();
-        assert_eq!(cloned.as_custom::<RwLock<CustomCounter>>().unwrap().read().unwrap().value, 7);
+        assert_eq!(cloned.as_custom::<RwLock<CustomCounter>>().unwrap().read().value, 7);
 
-        cloned.as_custom::<RwLock<CustomCounter>>().unwrap().write().unwrap().value = 9;
-        assert_eq!(value.as_custom::<RwLock<CustomCounter>>().unwrap().read().unwrap().value, 9);
+        cloned.as_custom::<RwLock<CustomCounter>>().unwrap().write().value = 9;
+        assert_eq!(value.as_custom::<RwLock<CustomCounter>>().unwrap().read().value, 9);
         assert_eq!(value, cloned);
     }
 
@@ -1490,11 +1799,11 @@ mod tests {
 
     impl CustomProperty for CustomPropertyBag {
         fn get_key(&self, key: &str) -> Option<Dynamic> {
-            self.values.read().unwrap().get(key).cloned()
+            self.values.read().get(key).cloned()
         }
 
         fn set_key(&self, key: &str, value: Dynamic) -> bool {
-            self.values.write().unwrap().insert(key.into(), value);
+            self.values.write().insert(key.into(), value);
             true
         }
     }
@@ -1553,6 +1862,176 @@ mod tests {
         assert_eq!(Dynamic::U64(i64::MAX as u64).as_int(), Some(i64::MAX));
         assert_eq!(Dynamic::U64(i64::MAX as u64 + 1).as_int(), None);
     }
+
+    #[test]
+    fn dynamic_integer_ops_report_fault_instead_of_panicking() {
+        let _ = take_fault();
+        assert_eq!(Dynamic::U64(u64::MAX) + Dynamic::U64(1), Dynamic::Null);
+        assert!(take_fault().is_some());
+
+        assert_eq!(Dynamic::I64(i64::MAX) + Dynamic::I64(1), Dynamic::Null);
+        assert!(take_fault().is_some());
+
+        assert_eq!(Dynamic::I32(1) << Dynamic::I32(64), Dynamic::Null);
+        assert!(take_fault().is_some());
+    }
+
+    #[test]
+    fn typed_vec_set_idx_ignores_bad_index_or_value_without_panicking() {
+        let mut values = Dynamic::VecI64(vec![1, 2, 3]);
+        values.set_idx(10, Dynamic::I64(99));
+        assert_eq!(values.get_idx(2).and_then(|value| value.as_int()), Some(3));
+
+        values.set_idx(1, Dynamic::from("bad"));
+        assert_eq!(values.get_idx(1).and_then(|value| value.as_int()), Some(2));
+
+        values.set_idx(1, Dynamic::I64(7));
+        assert_eq!(values.get_idx(1).and_then(|value| value.as_int()), Some(7));
+    }
+
+    #[test]
+    fn nested_struct_fields_use_inline_storage() {
+        let inner_ty = Type::Struct { params: vec![], fields: vec![("value".into(), Type::I64)] };
+        let outer_ty = Type::Struct { params: vec![], fields: vec![("inner".into(), inner_ty.clone()), ("tag".into(), Type::I64)] };
+
+        let mut inner_bytes = vec![0u8; inner_ty.storage_width() as usize];
+        let mut outer_bytes = vec![0u8; outer_ty.storage_width() as usize];
+        let inner = Dynamic::struct_view(inner_bytes.as_mut_ptr() as usize, inner_ty);
+        let outer = Dynamic::struct_view(outer_bytes.as_mut_ptr() as usize, outer_ty);
+
+        inner.set_dynamic("value".into(), Dynamic::I64(17));
+        outer.set_dynamic("inner".into(), inner);
+        outer.set_dynamic("tag".into(), Dynamic::I64(3));
+
+        let read_inner = outer.get_dynamic("inner").expect("inner field");
+        assert_eq!(read_inner.get_dynamic("value").and_then(|value| value.as_int()), Some(17));
+        assert_eq!(outer.get_dynamic("tag").and_then(|value| value.as_int()), Some(3));
+    }
+
+    #[test]
+    fn owned_struct_clones_dynamic_pointer_fields() {
+        let ty = Type::Struct { params: vec![], fields: vec![("name".into(), Type::Str)] };
+        let mut bytes = vec![0u8; ty.storage_width() as usize];
+        let original = Box::into_raw(Box::new(Dynamic::from("alpha"))) as usize;
+        unsafe {
+            std::ptr::write_unaligned(bytes.as_mut_ptr() as *mut usize, original);
+        }
+
+        let owned = Dynamic::owned_struct_from_ptr(bytes.as_ptr() as usize, ty);
+        unsafe {
+            drop(Box::from_raw(original as *mut Dynamic));
+        }
+
+        assert_eq!(owned.get_dynamic("name").map(|value| value.as_str().to_string()), Some("alpha".to_string()));
+        owned.set_dynamic("name".into(), Dynamic::from("beta"));
+        assert_eq!(owned.get_dynamic("name").map(|value| value.as_str().to_string()), Some("beta".to_string()));
+    }
+
+    #[test]
+    fn aggregate_array_fields_support_dynamic_index_access() {
+        let ty = Type::Array(std::rc::Rc::new(Type::I64), 3);
+        let mut bytes = vec![0u8; ty.storage_width() as usize];
+        for (idx, value) in [3i64, 5, 7].into_iter().enumerate() {
+            unsafe {
+                std::ptr::write_unaligned(bytes.as_mut_ptr().add(idx * 8) as *mut i64, value);
+            }
+        }
+
+        let mut array = Dynamic::owned_struct_from_ptr(bytes.as_ptr() as usize, ty);
+        assert_eq!(array.get_idx(1).and_then(|value| value.as_int()), Some(5));
+        array.set_idx(1, Dynamic::I64(11));
+        assert_eq!(array.get_idx(1).and_then(|value| value.as_int()), Some(11));
+    }
+
+    #[test]
+    fn f16_roundtrip_via_helpers() {
+        let bits = f64_to_f16(1.0);
+        assert_eq!(bits, 0x3C00);
+        assert_eq!(f16_to_f64(bits), 1.0);
+        let bits = f64_to_f16(0.5);
+        assert_eq!(bits, 0x3800);
+        assert_eq!(f16_to_f64(bits), 0.5);
+    }
+
+    #[test]
+    fn f16_dynamic_get_type_and_is_float() {
+        let v = Dynamic::F16(0x3C00);
+        assert_eq!(v.get_type(), Type::F16);
+        assert!(v.is_f16());
+        assert!(v.is_signed());
+        assert_eq!(v.size_of(), 2);
+        assert_eq!(v.as_float(), Some(1.0));
+    }
+
+    #[test]
+    fn f16_force_from_f64_preserves_value() {
+        let d = Type::F16.force(Dynamic::F64(2.0)).unwrap();
+        let Dynamic::F16(bits) = d else {
+            panic!("expected F16");
+        };
+        assert_eq!(bits, 0x4000);
+        assert_eq!(f16_to_f64(bits), 2.0);
+    }
+
+    #[test]
+    fn f16_compare_equal_by_bits() {
+        assert_eq!(Dynamic::F16(0x3C00), Dynamic::F16(0x3C00));
+        assert_ne!(Dynamic::F16(0x3C00), Dynamic::F16(0x4000));
+    }
+
+    #[test]
+    fn f16_subnormal_roundtrip() {
+        // 最小 subnormal (0x0001) ≈ 5.960464477539063e-8
+        let bits = f64_to_f16(5.96e-8);
+        assert_eq!(bits, 0x0001);
+        let back = f16_to_f64(bits);
+        let expected = half::f16::from_bits(0x0001).to_f64();
+        assert_eq!(back, expected, "got {back}");
+    }
+
+    #[test]
+    fn f16_infinity_roundtrip() {
+        let bits = f64_to_f16(f64::INFINITY);
+        assert_eq!(bits, 0x7C00);
+        assert!(f16_to_f64(bits).is_infinite());
+
+        let bits = f64_to_f16(f64::NEG_INFINITY);
+        assert_eq!(bits, 0xFC00);
+        assert!(f16_to_f64(bits).is_sign_negative());
+    }
+
+    #[test]
+    fn fn_type_partial_eq_with_diff_ret_returns_false_not_panic() {
+        use std::rc::Rc;
+        let a = Type::Fn { tys: vec![Type::I32], ret: Rc::new(Type::I32) };
+        let b = Type::Fn { tys: vec![Type::I32], ret: Rc::new(Type::F32) };
+        assert!(a != b);
+        assert!(!(a == b));
+    }
+
+    #[test]
+    fn fn_type_partial_eq_same_args_same_ret_is_true() {
+        use std::rc::Rc;
+        let a = Type::Fn { tys: vec![Type::I32], ret: Rc::new(Type::I32) };
+        let b = Type::Fn { tys: vec![Type::I32], ret: Rc::new(Type::I32) };
+        assert!(a == b);
+    }
+
+    #[test]
+    fn fn_type_partial_eq_diff_args_returns_false() {
+        use std::rc::Rc;
+        let a = Type::Fn { tys: vec![Type::I32], ret: Rc::new(Type::Void) };
+        let b = Type::Fn { tys: vec![Type::I64], ret: Rc::new(Type::Void) };
+        assert!(a != b);
+    }
+
+    #[test]
+    fn fn_type_partial_eq_with_any_ret_is_false() {
+        use std::rc::Rc;
+        let a = Type::Fn { tys: vec![Type::I32], ret: Rc::new(Type::Any) };
+        let b = Type::Fn { tys: vec![Type::I32], ret: Rc::new(Type::I32) };
+        assert!(a != b);
+    }
 }
 
 #[macro_export]
@@ -1594,6 +2073,8 @@ pub use msgpack::{MsgPack, MsgUnpack};
 
 pub use json::{FromJson, ToJson};
 
+mod fault;
+pub use fault::{has_fault, set_fault, take_fault};
 mod ops;
 mod types;
 pub use types::{ConstIntOp, Type, call_fn, set_dynamic_return_handler};
@@ -1603,7 +2084,7 @@ macro_rules! list {
     ($($v:expr),+ $(,)?) => {{
         let mut list = Vec::new();
         $( let _ = list.push(Dynamic::from($v)); )*
-        Dynamic::List(std::sync::Arc::new(std::sync::RwLock::new(list)))
+        Dynamic::List(::std::sync::Arc::new($crate::RwLock::new(list)))
     }};
 }
 
@@ -1612,6 +2093,6 @@ macro_rules! map {
     ($($k:expr => $v:expr), *) => {{
         let mut obj = std::collections::BTreeMap::new();
         $( let _ = obj.insert(smol_str::SmolStr::from($k), Dynamic::from($v)); )*
-        Dynamic::Map(std::sync::Arc::new(std::sync::RwLock::new(obj)))
+        Dynamic::map(obj)
     }};
 }

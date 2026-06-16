@@ -4,7 +4,7 @@ Zust is a Rust-like scripting language and runtime written in Rust. It keeps the
 
 Official website: [www.zust-lang.com](https://www.zust-lang.com)
 
-The project is close to a mature open-source release. The workspace now contains separately versioned crates, with the VM crate at `0.9.70`, the dynamic crate at `0.9.14`, the compiler at `0.9.32`, the parser at `0.9.13`, the SPIR-V backend at `0.9.8`, the Metal backend at `0.9.9`, and the editor-facing packages at `0.9.2`.
+The project is close to a mature open-source release. The workspace now contains separately versioned crates, with the VM crate at `0.9.77`, the dynamic crate at `0.9.14`, the compiler at `0.9.32`, the parser at `0.9.13`, the SPIR-V backend at `0.9.8`, the Metal backend at `0.9.9`, and the editor-facing packages at `0.9.2`.
 
 中文文档: [README.zh.md](README.zh.md)
 
@@ -326,7 +326,9 @@ See [zusts/bigfloat.zs](zusts/bigfloat.zs) and the GPU Mandelbrot examples under
 
 ## Runtime Modules
 
-`Vm::with_all()` registers the standard runtime modules listed below. These functions use `Dynamic` at the boundary, so maps, lists, strings, bytes, and numbers can be passed directly from Zust scripts.
+`zust-vm` enables no extension features by default. `Vm::new()` registers core runtime support: VM memory, `std`, `Any`, `Vec`, and `root`. `Vm::with_all()` registers every capability compiled into the crate; enabling `full` includes `http`, `db`, `llm`, and `gpu`. `oss` is registered with the `llm` feature, and `http::upload` is available only when both `http` and `llm` are enabled. `vulkan` and `metal` are GPU runtime backend features built on top of `gpu`.
+
+The runtime modules and helper types below use `Dynamic` at the boundary, so maps, lists, strings, bytes, and numbers can be passed directly from Zust scripts.
 
 ### `std`
 
@@ -365,7 +367,7 @@ Dynamic values expose common methods:
 - Constructors and type helpers: `Any::null()`, `is_map()`, `is_list()`, `is_string()`, `is_null()`, `clone()`.
 - Size and conversion helpers: `len()`, `keys()`, `to_string()`, `Any::from_i64(value)`, `Any::to_i64(value)`, `Any::from_bool(value)`, `Any::to_bool(value)`, `Any::from_f64(value)`, `Any::to_f64(value)`.
 - List and string helpers: `push(value)`, `pop()`, `split(sep)`, `slice(start, stop, inclusive)`.
-- Map and index helpers: `get_idx(idx)`, `set_idx(idx, value)`, `get_key(key)`, `set_key(key, value)`, `del_key(key)`, `contains(value)`, `starts_with(prefix)`.
+- Map and index helpers: `get_idx(idx)`, `set_idx(idx, value)`, `get(key)`, `get_key(key)`, `set_key(key, value)`, `del_key(key)`, `contains(value)`, `starts_with(prefix)`.
 - Iteration helpers: `iter()`, `next()`.
 - Operator helpers used by the compiler for dynamic expressions: `Any::binary(left, op, right)` and `Any::logic(left, op, right)`.
 
@@ -377,7 +379,7 @@ Native custom values can opt into property forwarding with `Dynamic::custom_with
 let data = {name: "zust", tags: ["vm", "native"]};
 
 if data.is_map() && data.contains("name") {
-    print(data.get_key("name"));
+    print(data.get("name"));
 }
 
 data.tags.push("script");

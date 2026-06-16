@@ -132,7 +132,7 @@ pub const LLM_NATIVE: [(&str, &[Type], Type, *const u8); 5] = [
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
+    use parking_lot::Mutex;
 
     static CALLBACK_RESULT: Mutex<Option<Dynamic>> = Mutex::new(None);
 
@@ -140,19 +140,19 @@ mod tests {
         if result.is_null() {
             return false;
         }
-        *CALLBACK_RESULT.lock().unwrap() = Some(unsafe { &*result }.deep_clone());
+        *CALLBACK_RESULT.lock() = Some(unsafe { &*result }.deep_clone());
         true
     }
 
     #[test]
     fn llm_notifier_can_call_zust_callback() -> anyhow::Result<()> {
-        *CALLBACK_RESULT.lock().unwrap() = None;
+        *CALLBACK_RESULT.lock() = None;
         let callback = Dynamic::custom(ZustCallback::new(record_callback_result as *const () as usize, Type::Bool, Vec::new()));
 
         assert!(llm_tx(&callback).is_none());
         notify_or_call(&callback, dynamic::map!("text"=> "done"))?;
 
-        let result = CALLBACK_RESULT.lock().unwrap().clone().expect("callback should receive result");
+        let result = CALLBACK_RESULT.lock().clone().expect("callback should receive result");
         assert_eq!(result.get_dynamic("text").map(|value| value.as_str().to_string()), Some("done".to_string()));
         Ok(())
     }

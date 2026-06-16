@@ -2,8 +2,8 @@ use crate::{Dynamic, DynamicErr};
 use smol_str::SmolStr;
 
 use anyhow::{Result, anyhow};
+use parking_lot::RwLock;
 use std::rc::Rc;
-use std::sync::RwLock;
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub enum ConstIntOp {
@@ -66,6 +66,19 @@ pub enum Type {
 unsafe impl Send for Type {}
 unsafe impl Sync for Type {}
 
+/// 两个类型相加得到的"公共类型",也是 VM 里混合宽度算术结果类型的推断规则。
+///
+/// 优先级(从高到低):
+/// 1. 完全相同的类型 → 自身;
+/// 2. 任一为字符串 → `Str`(支持 `任意 + 字符串` 拼接);
+/// 3. 任一为 `Any` → `Any`(动态值参与即退化为动态);
+/// 4. 任一为浮点 → 取较宽的浮点(有 f64 则 f64,否则 f32);
+/// 5. 任一为有符号整数 → 取双方较大宽度的有符号整数(有符号优先于无符号);
+/// 6. 任一为无符号整数 → 取双方较大宽度的无符号整数;
+/// 7. 其它 → `Any`。
+///
+/// 注意:有符号在第 5 步先于无符号被处理,因此 `i32 + u32` 结果是 `i32`(按宽度,
+/// 不做无符号回绕检查)。宽度按 `Type::width` 计算。
 impl std::ops::Add for Type {
     type Output = Self;
     fn add(self, rhs: Self) -> Self::Output {
@@ -78,22 +91,18 @@ impl std::ops::Add for Type {
         } else if self.is_float() || rhs.is_float() {
             if self.is_f64() || rhs.is_f64() { Type::F64 } else { Type::F32 }
         } else if self.is_int() || rhs.is_int() {
-            let width = self.width().max(rhs.width());
-            match width {
+            match self.width().max(rhs.width()) {
                 1 => Type::I8,
                 2 => Type::I16,
                 4 => Type::I32,
-                8 => Type::I64,
-                _ => panic!("{:?} 非法类型", self),
+                _ => Type::I64,
             }
         } else if self.is_uint() || rhs.is_uint() {
-            let width = self.width().max(rhs.width());
-            match width {
+            match self.width().max(rhs.width()) {
                 1 => Type::U8,
                 2 => Type::U16,
                 4 => Type::U32,
-                8 => Type::U64,
-                _ => panic!("{:?} 非法类型", self),
+                _ => Type::U64,
             }
         } else {
             Type::Any
@@ -131,16 +140,7 @@ impl PartialEq for Type {
             (Type::Vec(elem_type1, len1), Type::Vec(elem_type2, len2)) => elem_type1 == elem_type2 && len1 == len2,
             (Type::Array(elem_type1, len1), Type::Array(elem_type2, len2)) => elem_type1 == elem_type2 && len1 == len2,
             (Type::ArrayParam(elem_type1, len1), Type::ArrayParam(elem_type2, len2)) => elem_type1 == elem_type2 && len1 == len2,
-            (Type::Fn { tys: t1, ret: r1 }, Type::Fn { tys: t2, ret: r2 }) => {
-                if t1 == t2 {
-                    if r1 != r2 {
-                        panic!("函数返回类型不一致")
-                    }
-                    true
-                } else {
-                    false
-                }
-            }
+            (Type::Fn { tys: t1, ret: r1 }, Type::Fn { tys: t2, ret: r2 }) => t1 == t2 && r1 == r2,
             _ => false,
         }
     }
@@ -242,6 +242,10 @@ impl Type {
             Self::U16 => src.try_into().map(Dynamic::U16),
             Self::U32 => src.try_into().map(Dynamic::U32),
             Self::U64 => src.try_into().map(Dynamic::U64),
+            Self::F16 => {
+                let f: f64 = src.try_into()?;
+                Ok(Dynamic::F16(crate::f64_to_f16(f)))
+            }
             Self::F32 => src.try_into().map(Dynamic::F32),
             Self::F64 => src.try_into().map(Dynamic::F64),
             Self::Str => Ok(Dynamic::from(src.to_string())),
@@ -386,6 +390,7 @@ impl Dynamic {
             Self::U16(_) => Type::U16,
             Self::U32(_) => Type::U32,
             Self::U64(_) => Type::U64,
+            Self::F16(_) => Type::F16,
             Self::F32(_) => Type::F32,
             Self::F64(_) => Type::F64,
             Self::Bytes(_) => Type::Vec(Rc::new(Type::U8), len),
@@ -400,11 +405,11 @@ impl Dynamic {
             Self::VecF64(_) => Type::Vec(Rc::new(Type::F64), len),
             Self::String(_) | Self::StringBuf(_) => Type::Str,
             Self::Map(_) => Type::Map,
-            Self::Struct { ty, .. } => ty.clone(),
+            Self::StructView { ty, .. } | Self::StructOwned { ty, .. } => ty.as_ref().clone(),
             Self::Custom(_) => Type::Any,
             Self::Null => Type::Void,
             Self::List(items) => {
-                let tys: Vec<Type> = items.read().unwrap().iter().map(|v| v.get_type()).collect();
+                let tys: Vec<Type> = items.read().iter().map(|v| v.get_type()).collect();
                 if let Some(first) = tys.first() {
                     if tys.iter().all(|x| x == first) {
                         return Type::Array(Rc::new(first.clone()), len);
@@ -422,11 +427,11 @@ type DynamicReturnHandler = unsafe fn(*const Dynamic) -> Box<Dynamic>;
 static DYNAMIC_RETURN_HANDLER: RwLock<Option<DynamicReturnHandler>> = RwLock::new(None);
 
 pub fn set_dynamic_return_handler(handler: DynamicReturnHandler) {
-    *DYNAMIC_RETURN_HANDLER.write().unwrap() = Some(handler);
+    *DYNAMIC_RETURN_HANDLER.write() = Some(handler);
 }
 
 unsafe fn take_dynamic_return(ptr: *const Dynamic) -> Box<Dynamic> {
-    if let Some(handler) = *DYNAMIC_RETURN_HANDLER.read().unwrap() {
+    if let Some(handler) = *DYNAMIC_RETURN_HANDLER.read() {
         unsafe { handler(ptr) }
     } else if ptr.is_null() {
         Box::new(Dynamic::Null)

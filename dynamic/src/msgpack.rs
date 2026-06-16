@@ -2,7 +2,7 @@ pub trait MsgPack {
     fn encode(&self, buf: &mut Vec<u8>);
 }
 
-use std::collections::BTreeMap;
+use indexmap::IndexMap;
 
 use byteorder::{BigEndian, WriteBytesExt};
 use smol_str::SmolStr;
@@ -99,6 +99,11 @@ impl MsgPack for Dynamic {
             Dynamic::U16(i) => (*i as i64).encode(buf),
             Dynamic::U32(i) => (*i as i64).encode(buf),
             Dynamic::U64(i) => (*i as i64).encode(buf),
+            Dynamic::F16(bits) => {
+                // round-trip via f64 for msgpack; native f16 has no msgpack tag
+                let f = crate::f16_to_f64(*bits);
+                Dynamic::F64(f).encode(buf);
+            }
             Dynamic::F32(f) => {
                 buf.push(0xca);
                 let int_value = f32::to_bits(*f);
@@ -151,7 +156,7 @@ impl MsgPack for Dynamic {
                 encode_vec(bytemuck::cast_slice(vec.as_slice()), len, 9, buf);
             }
             Dynamic::List(raw) => {
-                let length = raw.read().unwrap().len();
+                let length = raw.read().len();
                 if length < 0x10 {
                     buf.push(0x90 | length as u8);
                 } else if length < 0x10000 {
@@ -161,12 +166,12 @@ impl MsgPack for Dynamic {
                     buf.push(0xdd);
                     buf.write_u32::<BigEndian>(length as u32).unwrap();
                 }
-                for item in raw.read().unwrap().iter() {
+                for item in raw.read().iter() {
                     item.encode(buf);
                 }
             }
             Dynamic::Map(raw) => {
-                let length = raw.read().unwrap().len();
+                let length = raw.read().len();
                 if length < 16 {
                     buf.push(0x80 | length as u8);
                 } else if length <= 0x10000 {
@@ -176,12 +181,12 @@ impl MsgPack for Dynamic {
                     buf.push(0xdf);
                     buf.write_u32::<BigEndian>(length as u32).unwrap();
                 }
-                for (k, v) in raw.read().unwrap().iter() {
+                for (k, v) in raw.read().iter() {
                     k.as_str().encode(buf);
                     v.encode(buf);
                 }
             }
-            Dynamic::Struct { .. } => {
+            Dynamic::StructView { .. } | Dynamic::StructOwned { .. } => {
                 let keys = self.keys();
                 let length = keys.len();
                 if length < 16 {
@@ -243,7 +248,7 @@ pub(crate) fn read_64(raw: &[u8]) -> u64 {
 }
 
 fn vec_to_map(kvs: Vec<Dynamic>) -> Result<Dynamic> {
-    let mut map: BTreeMap<SmolStr, Dynamic> = BTreeMap::new();
+    let mut map: IndexMap<SmolStr, Dynamic> = IndexMap::new();
     let mut key: Option<Dynamic> = None;
     for kv in kvs {
         if let Some(k) = key.take() {
@@ -298,7 +303,8 @@ fn to_vec(buf: &[u8], tag: u8) -> Result<Dynamic> {
     }
 }
 
-use std::sync::{Arc, RwLock};
+use parking_lot::RwLock;
+use std::sync::Arc;
 
 impl MsgUnpack for Dynamic {
     fn decode(buf: &[u8]) -> Result<(Self, usize)> {

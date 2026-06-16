@@ -71,7 +71,7 @@ fn main() -> Result<()> {
     let kernel = vm_metal::compile_file_with_generic_args_and_workgroup_size(&source_path, &module_name, "main", &[Type::ConstInt(BIGFLOAT_LIMBS as i64)], WORKGROUP_SIZE)?;
     let vm = vm::Vm::new();
     vm.import(&module_name, &source_path)?;
-    let params_layout = vm::GpuStructLayout::from_symbol_table(&vm.jit.read().unwrap().compiler.symbols, &format!("{module_name}::Params"), &[Type::ConstInt(BIGFLOAT_LIMBS as i64)])?;
+    let params_layout = vm::GpuStructLayout::from_symbol_table(&vm.jit.read().compiler.symbols, &format!("{module_name}::Params"), &[Type::ConstInt(BIGFLOAT_LIMBS as i64)])?;
     let params_bytes = params_layout.pack_map(&dynamic::map!(
         "x"=> bigfloat_from_f32::<BIGFLOAT_LIMBS>(-0.7454),
         "y"=> bigfloat_from_f32::<BIGFLOAT_LIMBS>(0.1103),

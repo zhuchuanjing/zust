@@ -61,6 +61,7 @@ extern "C" fn http_serve(input: *const Dynamic) -> *const Dynamic {
     alloc_dynamic(start_server(input))
 }
 
+#[cfg(feature = "llm")]
 extern "C" fn http_upload(config: *const Dynamic, object_name: *const Dynamic, bytes: *const Dynamic) -> *const Dynamic {
     if config.is_null() || object_name.is_null() || bytes.is_null() {
         return alloc_dynamic(Dynamic::Null);
@@ -280,6 +281,7 @@ fn dynamic_to_text(value: &Dynamic) -> String {
     if value.is_str() { value.as_str().to_string() } else { value.to_string() }
 }
 
+#[cfg(feature = "llm")]
 fn upload_bytes(config: Dynamic, object_name: Dynamic, bytes: Dynamic) -> Dynamic {
     match upload_bytes_result(config, object_name, bytes) {
         Ok(result) => result,
@@ -287,6 +289,7 @@ fn upload_bytes(config: Dynamic, object_name: Dynamic, bytes: Dynamic) -> Dynami
     }
 }
 
+#[cfg(feature = "llm")]
 fn upload_bytes_result(config: Dynamic, object_name: Dynamic, bytes: Dynamic) -> Result<Dynamic> {
     let object_name = object_name.as_str().to_string();
     if object_name.trim().is_empty() {
@@ -461,10 +464,121 @@ async fn http_health() -> Response {
 }
 
 async fn api_dispatch(axum::extract::State(options): axum::extract::State<ServerOptions>, req: Request<Body>) -> Response {
-    let route = api_route(&options, &req);
-    match api_payload(req, options.body_limit).await.and_then(|payload| root::send_msg(&route, payload).map_err(|err| anyhow!("dispatch {route}: {err}"))) {
+    let route_match = api_route_match(&options, &req);
+    let route = route_match.route.clone();
+    match api_payload(req, options.body_limit).await.and_then(|payload| {
+        apply_path_params(&payload, route_match.params);
+        root::send_msg(&route, payload).map_err(|err| anyhow!("dispatch {route}: {err}"))
+    }) {
         Ok(result) => to_response(result).unwrap_or_else(|err| json_error(StatusCode::INTERNAL_SERVER_ERROR, err.to_string())),
         Err(err) => json_error(StatusCode::BAD_REQUEST, err.to_string()),
+    }
+}
+
+struct RouteMatch {
+    route: String,
+    params: Dynamic,
+}
+
+fn api_route_match(options: &ServerOptions, req: &Request<Body>) -> RouteMatch {
+    let method = req.method().as_str().to_ascii_lowercase();
+    let prefix = format!("/{}/", options.api_prefix.trim_matches('/'));
+    let path = req.uri().path().strip_prefix(&prefix).unwrap_or("").trim_matches('/');
+    let exact = format!("local/http/{method}/{path}");
+    if root::contains(&exact) {
+        return RouteMatch { route: exact, params: map!() };
+    }
+    if let Some((route, params)) = dynamic_api_route(&method, path) {
+        return RouteMatch { route, params };
+    }
+    RouteMatch { route: exact, params: map!() }
+}
+
+fn dynamic_api_route(method: &str, path: &str) -> Option<(String, Dynamic)> {
+    let root_path = format!("local/http/{method}");
+    let mut routes = Vec::new();
+    collect_routes(&root_path, &mut routes, 0);
+    let request_segments = path_segments(path);
+    let mut best: Option<(String, Dynamic, usize)> = None;
+    for route in routes {
+        let Some(pattern) = route.strip_prefix(&(root_path.clone() + "/")) else {
+            continue;
+        };
+        if let Some((params, score)) = match_route_pattern(pattern, &request_segments) {
+            if best.as_ref().map(|(_, _, best_score)| score > *best_score).unwrap_or(true) {
+                best = Some((route, params, score));
+            }
+        }
+    }
+    best.map(|(route, params, _)| (route, params))
+}
+
+fn collect_routes(prefix: &str, out: &mut Vec<String>, depth: usize) {
+    if depth > 32 {
+        return;
+    }
+    if root::contains(prefix) {
+        out.push(prefix.to_string());
+    }
+    let Ok(children) = root::dir(prefix) else {
+        return;
+    };
+    if !children.is_list() {
+        return;
+    }
+    for idx in 0..children.len() {
+        let Some(child) = children.get_idx(idx) else {
+            continue;
+        };
+        let child = child.as_str();
+        let child_path = if child.starts_with(prefix) {
+            child.to_string()
+        } else if let Some(local_child) = child.strip_prefix("http/") {
+            format!("local/http/{}", local_child.trim_matches('/'))
+        } else {
+            format!("{}/{}", prefix.trim_matches('/'), child.trim_matches('/'))
+        };
+        collect_routes(&child_path, out, depth + 1);
+    }
+}
+
+fn match_route_pattern(pattern: &str, request_segments: &[&str]) -> Option<(Dynamic, usize)> {
+    let pattern_segments = path_segments(pattern);
+    if pattern_segments.len() != request_segments.len() {
+        return None;
+    }
+    let params = map!();
+    let mut score = 0usize;
+    for (pattern, actual) in pattern_segments.iter().zip(request_segments.iter()) {
+        if let Some(name) = pattern.strip_prefix(':') {
+            if name.is_empty() || actual.is_empty() {
+                return None;
+            }
+            params.insert(name, percent_decode(actual));
+        } else if *pattern == *actual {
+            score += 1;
+        } else {
+            return None;
+        }
+    }
+    Some((params, score))
+}
+
+fn path_segments(path: &str) -> Vec<&str> {
+    path.trim_matches('/').split('/').filter(|part| !part.is_empty()).collect()
+}
+
+fn apply_path_params(payload: &Dynamic, params: Dynamic) {
+    if !params.is_map() {
+        return;
+    }
+    payload.insert("@path_params", params.clone());
+    for key in params.keys() {
+        if !payload.contains(key.as_str()) {
+            if let Some(value) = params.get_dynamic(key.as_str()) {
+                payload.insert(key, value);
+            }
+        }
     }
 }
 
@@ -477,13 +591,6 @@ async fn upload_dispatch(axum::extract::State(options): axum::extract::State<Ser
         Ok(result) => to_response(result).unwrap_or_else(|err| json_error(StatusCode::INTERNAL_SERVER_ERROR, err.to_string())),
         Err(err) => json_error(StatusCode::BAD_REQUEST, err.to_string()),
     }
-}
-
-fn api_route(options: &ServerOptions, req: &Request<Body>) -> String {
-    let method = req.method().as_str().to_ascii_lowercase();
-    let prefix = format!("/{}/", options.api_prefix.trim_matches('/'));
-    let path = req.uri().path().strip_prefix(&prefix).unwrap_or("").trim_matches('/');
-    format!("local/http/{method}/{path}")
 }
 
 async fn api_payload(req: Request<Body>, body_limit: usize) -> Result<Dynamic> {
@@ -875,10 +982,11 @@ fn body_to_dynamic(body: Bytes) -> Dynamic {
     std::str::from_utf8(&body).map(Dynamic::from).unwrap_or_else(|_| Dynamic::Bytes(body.to_vec()))
 }
 
-pub const HTTP_NATIVE: [(&str, &[Type], Type, *const u8); 5] = [
+pub const HTTP_NATIVE: &[(&str, &[Type], Type, *const u8)] = &[
     ("request", &[Type::Any], Type::Any, http_request as *const u8),
     ("get", &[Type::Any], Type::Any, http_get as *const u8),
     ("post", &[Type::Any, Type::Any], Type::Any, http_post as *const u8),
+    #[cfg(feature = "llm")]
     ("upload", &[Type::Any, Type::Any, Type::Any], Type::Any, http_upload as *const u8),
     ("serve", &[Type::Any], Type::Any, http_serve as *const u8),
 ];

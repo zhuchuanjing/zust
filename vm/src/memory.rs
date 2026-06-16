@@ -1,4 +1,4 @@
-use dynamic::Dynamic;
+use dynamic::{Dynamic, Type};
 use std::cell::RefCell;
 use std::mem::{MaybeUninit, align_of, size_of};
 use std::ptr;
@@ -30,6 +30,13 @@ impl Chunk {
     fn ptr(&mut self) -> *mut u8 {
         self.bytes.as_mut_ptr() as *mut u8
     }
+
+    /// 本 chunk 覆盖的地址区间 [base, end)。用于 O(1)/O(chunks) 判断某指针是否
+    /// 由 arena 持有(分配不跨 chunk,故起始地址落在区间内即整块都在内)。
+    fn contains(&self, addr: usize) -> bool {
+        let base = self.bytes.as_ptr() as usize;
+        addr >= base && addr < base + self.bytes.len()
+    }
 }
 
 struct VmMemory {
@@ -50,7 +57,10 @@ impl VmMemory {
     }
 
     fn owns_dynamic(&self, ptr: *const Dynamic) -> bool {
-        self.dynamics.iter().any(|dynamic| std::ptr::addr_eq(*dynamic as *const Dynamic, ptr))
+        // arena 持有的 Dynamic 都落在某个 chunk 的内存区间内;堆上 Box 的不在。
+        // 按 chunk 地址区间判断是 O(chunks)(chunk 极少),取代原先 O(dynamics) 线性扫描。
+        let addr = ptr as usize;
+        self.chunks.iter().any(|chunk| chunk.contains(addr))
     }
 
     fn enter_scope(&mut self) {
@@ -128,6 +138,13 @@ pub(crate) fn alloc_dynamic(value: Dynamic) -> *const Dynamic {
     })
 }
 
+/// JIT 守卫代码在整数除零 / `INT_MIN/-1` 溢出时调用,记录运行期错误标志。
+/// 边界([`crate::call_jit_isolated`])在调用结束后读取它,把错误降级为失败的
+/// 调用而不是进程崩溃。
+pub(crate) extern "C" fn arith_fault() {
+    dynamic::set_fault("整数除零");
+}
+
 pub(crate) extern "C" fn scope_enter() {
     VM_MEMORY.with(|memory| memory.borrow_mut().enter_scope());
 }
@@ -147,9 +164,43 @@ pub(crate) extern "C" fn scope_exit_dynamic(value: *const Dynamic) -> *const Dyn
     alloc_dynamic(promoted)
 }
 
-pub(crate) extern "C" fn scope_exit_bytes(value: *const u8, size: i64) -> *mut u8 {
+fn clone_dynamic_ptr_fields(bytes: &mut [u8], src_base: *const u8, ty: &Type, offset: usize) {
+    match ty {
+        Type::Bool | Type::I8 | Type::U8 | Type::I16 | Type::U16 | Type::I32 | Type::U32 | Type::I64 | Type::U64 | Type::F16 | Type::F32 | Type::F64 | Type::Void => {}
+        Type::Struct { fields, .. } => {
+            let (_, offsets) = Type::struct_layout(fields);
+            for ((_, field_ty), field_offset) in fields.iter().zip(offsets) {
+                clone_dynamic_ptr_fields(bytes, unsafe { src_base.add(field_offset as usize) }, field_ty, offset + field_offset as usize);
+            }
+        }
+        Type::Array(elem_ty, len) | Type::Vec(elem_ty, len) => {
+            let width = elem_ty.storage_width() as usize;
+            for idx in 0..*len as usize {
+                clone_dynamic_ptr_fields(bytes, unsafe { src_base.add(idx * width) }, elem_ty, offset + idx * width);
+            }
+        }
+        _ => {
+            if offset + std::mem::size_of::<usize>() > bytes.len() {
+                return;
+            }
+            let ptr = unsafe { std::ptr::read_unaligned(src_base as *const usize) };
+            if ptr == 0 {
+                return;
+            }
+            let cloned = unsafe { (&*(ptr as *const Dynamic)).deep_clone() };
+            let boxed = Box::into_raw(Box::new(cloned)) as usize;
+            bytes[offset..offset + std::mem::size_of::<usize>()].copy_from_slice(&boxed.to_ne_bytes());
+        }
+    }
+}
+
+pub(crate) extern "C" fn scope_exit_bytes(value: *const u8, size: i64, ty: i64) -> *mut u8 {
     let size = size.max(0) as usize;
-    let bytes = if value.is_null() || size == 0 { Vec::new() } else { unsafe { std::slice::from_raw_parts(value, size).to_vec() } };
+    let mut bytes = if value.is_null() || size == 0 { Vec::new() } else { unsafe { std::slice::from_raw_parts(value, size).to_vec() } };
+    if !value.is_null() && ty != 0 {
+        let ty = unsafe { &*(ty as *const Type) };
+        clone_dynamic_ptr_fields(&mut bytes, value, ty, 0);
+    }
     VM_MEMORY.with(|memory| memory.borrow_mut().exit_scope());
     let dst = alloc_struct_bytes(size);
     if !bytes.is_empty() {

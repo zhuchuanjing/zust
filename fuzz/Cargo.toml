@@ -1,0 +1,24 @@
+[package]
+name = "zust-fuzz"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+# 解析器是处理不可信脚本输入的边界,优先 fuzz 它。
+zust-parser = { path = ".." }
+
+[[bin]]
+name = "parse"
+path = "fuzz_targets/parse.rs"
+test = false
+doc = false
+bench = false
+
+# 独立 workspace:不让父 workspace 把 fuzz crate 卷进常规构建/测试。
+# 需要 nightly + cargo-fuzz 运行:`cargo +nightly fuzz run parse`
+[workspace]

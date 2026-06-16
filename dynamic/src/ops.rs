@@ -37,6 +37,21 @@ impl Not for Dynamic {
 
 use std::ops::{Add, Div, Mul, Rem, Sub};
 
+fn int_fault(reason: &'static str) -> Dynamic {
+    crate::set_fault(reason);
+    Dynamic::Null
+}
+
+fn checked_i64(left: &Dynamic, right: &Dynamic, reason: &'static str) -> Option<(i64, i64)> {
+    match (left.as_int(), right.as_int()) {
+        (Some(left), Some(right)) => Some((left, right)),
+        _ => {
+            crate::set_fault(reason);
+            None
+        }
+    }
+}
+
 impl Add for Dynamic {
     type Output = Self;
     fn add(self, rhs: Self) -> Self::Output {
@@ -100,10 +115,16 @@ impl Add for Dynamic {
                     return Dynamic::F32(left.as_float().unwrap_or(0.0) as f32 + right.as_float().unwrap_or(0.0) as f32);
                 }
                 if left.is_int() || right.is_int() {
-                    return Self::I64(left.as_int().unwrap() + right.as_int().unwrap());
+                    let Some((left, right)) = checked_i64(&left, &right, "整数加法类型或范围错误") else {
+                        return Dynamic::Null;
+                    };
+                    return left.checked_add(right).map(Self::I64).unwrap_or_else(|| int_fault("整数加法溢出"));
                 }
                 if left.is_uint() || right.is_uint() {
-                    return Self::U64(left.as_uint().unwrap() + right.as_uint().unwrap());
+                    let (Some(left), Some(right)) = (left.as_uint(), right.as_uint()) else {
+                        return int_fault("无符号整数加法类型错误");
+                    };
+                    return left.checked_add(right).map(Self::U64).unwrap_or_else(|| int_fault("无符号整数加法溢出"));
                 }
                 if left.is_map() && right.is_map() {
                     left.append(right);
@@ -123,10 +144,16 @@ impl Mul for Dynamic {
             return Dynamic::F32(self.as_float().unwrap_or(0.0) as f32 * rhs.as_float().unwrap_or(0.0) as f32);
         }
         if self.is_int() || rhs.is_int() {
-            return Self::I64(self.as_int().unwrap_or(0) * rhs.as_int().unwrap_or(0));
+            let Some((left, right)) = checked_i64(&self, &rhs, "整数乘法类型或范围错误") else {
+                return Dynamic::Null;
+            };
+            return left.checked_mul(right).map(Self::I64).unwrap_or_else(|| int_fault("整数乘法溢出"));
         }
         if self.is_uint() || rhs.is_uint() {
-            return Self::U64(self.as_uint().unwrap_or(0) * rhs.as_uint().unwrap_or(0));
+            let (Some(left), Some(right)) = (self.as_uint(), rhs.as_uint()) else {
+                return int_fault("无符号整数乘法类型错误");
+            };
+            return left.checked_mul(right).map(Self::U64).unwrap_or_else(|| int_fault("无符号整数乘法溢出"));
         }
         self
     }
@@ -141,7 +168,10 @@ impl Sub for Dynamic {
             return Dynamic::F32(self.as_float().unwrap() as f32 - rhs.as_float().unwrap() as f32);
         }
         if self.is_int() || rhs.is_int() || self.is_uint() || rhs.is_uint() {
-            return Self::I64(self.as_int().unwrap() - rhs.as_int().unwrap());
+            let Some((left, right)) = checked_i64(&self, &rhs, "整数减法类型或范围错误") else {
+                return Dynamic::Null;
+            };
+            return left.checked_sub(right).map(Self::I64).unwrap_or_else(|| int_fault("整数减法溢出"));
         }
         if self.is_list() && rhs.is_list() {
             if self.len() == rhs.len() {}
@@ -159,7 +189,16 @@ impl Div for Dynamic {
             return Dynamic::F32(self.as_float().unwrap() as f32 / rhs.as_float().unwrap() as f32);
         }
         if self.is_int() || rhs.is_int() || self.is_uint() || rhs.is_uint() {
-            return Self::I64(self.as_int().unwrap() / rhs.as_int().unwrap());
+            let Some((left, right)) = checked_i64(&self, &rhs, "整数除法类型或范围错误") else {
+                return Dynamic::Null;
+            };
+            return match left.checked_div(right) {
+                Some(value) => Self::I64(value),
+                None => {
+                    crate::set_fault("整数除零");
+                    Self::Null
+                }
+            };
         }
         self
     }
@@ -169,7 +208,16 @@ impl Rem for Dynamic {
     type Output = Self;
     fn rem(self, rhs: Self) -> Self::Output {
         if self.is_int() || rhs.is_int() || self.is_uint() || rhs.is_uint() {
-            return Self::I64(self.as_int().unwrap() % rhs.as_int().unwrap());
+            let Some((left, right)) = checked_i64(&self, &rhs, "整数取余类型或范围错误") else {
+                return Dynamic::Null;
+            };
+            return match left.checked_rem(right) {
+                Some(value) => Self::I64(value),
+                None => {
+                    crate::set_fault("整数取余除零");
+                    Self::Null
+                }
+            };
         }
         self
     }
@@ -181,16 +229,18 @@ impl Shl for Dynamic {
     type Output = Self;
     fn shl(self, rhs: Self) -> Self::Output {
         use Dynamic::*;
-        let shift = u64::try_from(rhs).unwrap();
+        let Some(shift) = rhs.as_int().and_then(|value| u32::try_from(value).ok()).or_else(|| rhs.as_uint().and_then(|value| u32::try_from(value).ok())) else {
+            return int_fault("位移数量类型或范围错误");
+        };
         match self {
-            I8(i) => I8(i << shift),
-            I16(i) => I16(i << shift),
-            I32(i) => I32(i << shift),
-            I64(i) => I64(i << shift),
-            U8(i) => U8(i << shift),
-            U16(i) => U16(i << shift),
-            U32(i) => U32(i << shift),
-            U64(i) => U64(i << shift),
+            I8(i) => i.checked_shl(shift).map(I8).unwrap_or_else(|| int_fault("左移溢出")),
+            I16(i) => i.checked_shl(shift).map(I16).unwrap_or_else(|| int_fault("左移溢出")),
+            I32(i) => i.checked_shl(shift).map(I32).unwrap_or_else(|| int_fault("左移溢出")),
+            I64(i) => i.checked_shl(shift).map(I64).unwrap_or_else(|| int_fault("左移溢出")),
+            U8(i) => i.checked_shl(shift).map(U8).unwrap_or_else(|| int_fault("左移溢出")),
+            U16(i) => i.checked_shl(shift).map(U16).unwrap_or_else(|| int_fault("左移溢出")),
+            U32(i) => i.checked_shl(shift).map(U32).unwrap_or_else(|| int_fault("左移溢出")),
+            U64(i) => i.checked_shl(shift).map(U64).unwrap_or_else(|| int_fault("左移溢出")),
             _ => Dynamic::I64(0),
         }
     }
@@ -200,16 +250,18 @@ impl Shr for Dynamic {
     type Output = Self;
     fn shr(self, rhs: Self) -> Self::Output {
         use Dynamic::*;
-        let shift = u64::try_from(rhs).unwrap();
+        let Some(shift) = rhs.as_int().and_then(|value| u32::try_from(value).ok()).or_else(|| rhs.as_uint().and_then(|value| u32::try_from(value).ok())) else {
+            return int_fault("位移数量类型或范围错误");
+        };
         match self {
-            I8(i) => I8(i >> shift),
-            I16(i) => I16(i >> shift),
-            I32(i) => I32(i >> shift),
-            I64(i) => I64(i >> shift),
-            U8(i) => U8(i >> shift),
-            U16(i) => U16(i >> shift),
-            U32(i) => U32(i >> shift),
-            U64(i) => U64(i >> shift),
+            I8(i) => i.checked_shr(shift).map(I8).unwrap_or_else(|| int_fault("右移溢出")),
+            I16(i) => i.checked_shr(shift).map(I16).unwrap_or_else(|| int_fault("右移溢出")),
+            I32(i) => i.checked_shr(shift).map(I32).unwrap_or_else(|| int_fault("右移溢出")),
+            I64(i) => i.checked_shr(shift).map(I64).unwrap_or_else(|| int_fault("右移溢出")),
+            U8(i) => i.checked_shr(shift).map(U8).unwrap_or_else(|| int_fault("右移溢出")),
+            U16(i) => i.checked_shr(shift).map(U16).unwrap_or_else(|| int_fault("右移溢出")),
+            U32(i) => i.checked_shr(shift).map(U32).unwrap_or_else(|| int_fault("右移溢出")),
+            U64(i) => i.checked_shr(shift).map(U64).unwrap_or_else(|| int_fault("右移溢出")),
             _ => Dynamic::I64(0),
         }
     }
@@ -220,8 +272,12 @@ impl BitAnd for Dynamic {
     type Output = Self;
     fn bitand(self, rhs: Self) -> Self::Output {
         let ty = self.get_type() + rhs.get_type();
-        let left = ty.force(self).unwrap();
-        let right = ty.force(rhs).unwrap();
+        let Ok(left) = ty.force(self) else {
+            return int_fault("按位与左操作数类型错误");
+        };
+        let Ok(right) = ty.force(rhs) else {
+            return int_fault("按位与右操作数类型错误");
+        };
         match (left, right) {
             (Dynamic::I8(l), Dynamic::I8(r)) => Dynamic::I8(l & r),
             (Dynamic::I16(l), Dynamic::I16(r)) => Dynamic::I16(l & r),
@@ -260,8 +316,12 @@ impl BitOr for Dynamic {
     type Output = Self;
     fn bitor(self, rhs: Self) -> Self::Output {
         let ty = self.get_type() + rhs.get_type();
-        let left = ty.force(self).unwrap();
-        let right = ty.force(rhs).unwrap();
+        let Ok(left) = ty.force(self) else {
+            return int_fault("按位或左操作数类型错误");
+        };
+        let Ok(right) = ty.force(rhs) else {
+            return int_fault("按位或右操作数类型错误");
+        };
         match (left, right) {
             (Dynamic::I8(l), Dynamic::I8(r)) => Dynamic::I8(l | r),
             (Dynamic::I16(l), Dynamic::I16(r)) => Dynamic::I16(l | r),
@@ -280,8 +340,12 @@ impl BitXor for Dynamic {
     type Output = Self;
     fn bitxor(self, rhs: Self) -> Self::Output {
         let ty = self.get_type() + rhs.get_type();
-        let left = ty.force(self).unwrap();
-        let right = ty.force(rhs).unwrap();
+        let Ok(left) = ty.force(self) else {
+            return int_fault("按位异或左操作数类型错误");
+        };
+        let Ok(right) = ty.force(rhs) else {
+            return int_fault("按位异或右操作数类型错误");
+        };
         match (left, right) {
             (Dynamic::I8(l), Dynamic::I8(r)) => Dynamic::I8(l ^ r),
             (Dynamic::I16(l), Dynamic::I16(r)) => Dynamic::I16(l ^ r),

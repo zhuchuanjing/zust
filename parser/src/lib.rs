@@ -40,7 +40,23 @@ pub struct Parser {
     spans: Vec<usize>,
     decl_scopes: Vec<BTreeSet<SmolStr>>,
     impl_depth: usize,
+    /// 函数体嵌套深度。>0 表示当前 stmt 处于某个 `fn body` 内,需要拒绝
+    /// `fn / struct / impl / const / static` 等顶层声明关键字。
+    fn_body_depth: usize,
+    /// impl 体嵌套深度。>0 表示当前 stmt 处于 `impl { ... }` 内,
+    /// 拒绝嵌套 `struct / impl / const / static`(fn 仍允许,即方法)。
+    impl_body_depth: usize,
+    depth: usize, //当前表达式/语句递归深度,防止恶意深嵌套输入打爆调用栈
+    fatal: bool,  //递归过深等不可恢复错误;置位后所有解析入口立即失败,避免回溯重试导致死循环
 }
+
+/// 解析递归深度上限。超过即返回 [`ParserErr::TooDeep`],把"栈溢出崩溃"降级为
+/// 普通解析错误。
+///
+/// 单层 `expr_with_min_weight` 帧约 7KB,worker 线程默认栈仅 2MB,因此上限取
+/// 128(与 rustc 默认 `recursion_limit` 一致):128×7KB≈0.9MB,在最小栈上仍有
+/// 余量,而正常代码极少超过几十层嵌套。
+pub const MAX_PARSE_DEPTH: usize = 128;
 
 const NOT_IDENT: &[u8] = &[b' ', b'\t', b'\n', b'\r', b'/', b'*', b'+', b'-', b'=', b'(', b')', b'{', b'}', b'[', b']', b';', b':', b',', b'.', b'<', b'>', b'!', b'#', b'$', b'%', b'^', b'&', b'|', b'\\', b'"', b'\''];
 const WHITE_SPACE: &[u8] = &[b' ', b'\t', b'\n', b'\r'];
@@ -90,6 +106,8 @@ macro_rules! try_parse {
         let save_impl_depth = $self.impl_depth;
         match $method {
             Ok(expr) => Ok(expr),
+            // fatal(如递归过深)不可恢复:不回退 pos,直接上抛,避免外层换产生式重试导致死循环
+            Err(e) if $self.fatal => Err(e),
             Err(e) => {
                 $self.pos = save_pos;
                 $self.decl_scopes = save_decl_scopes;
@@ -102,31 +120,77 @@ macro_rules! try_parse {
 
 #[derive(Debug, thiserror::Error)]
 pub enum ParserErr {
-    #[error("期望字符 {0} 实际字符 {1}")]
-    ExpectChar(char, char),
-    #[error("未发现期望字符")]
-    NoCharCollect,
-    #[error("期望字符串 {0}")]
-    ExpectedString(SmolStr),
-    #[error("输入结束")]
-    EndofInput,
-    #[error("未关闭的注释")]
-    UncloseComment,
-    #[error("非法的原始字符串")]
-    IllegalRawString,
-    #[error("未关闭字符串")]
-    UnclosedString,
-    #[error("非字符串")]
-    NotString,
-    #[error("非数字")]
-    NotNumber,
-    #[error("符号 {0} 已经声明")]
-    DuplicateSymbol(SmolStr),
+    #[error("{message}")]
+    Spanned { message: String, span: Span },
+}
+
+impl ParserErr {
+    /// 构造携带 span 的解析错误。所有 ParserErr 错误都应该走这个构造。
+    pub fn new(message: impl Into<String>, span: Span) -> Self {
+        Self::Spanned { message: message.into(), span }
+    }
+
+    /// 便捷构造:span 是 [pos, pos) 的零长 span,用于"在当前位置报错"的场景。
+    pub fn at(message: impl Into<String>, pos: usize) -> Self {
+        Self::Spanned { message: message.into(), span: Span::new(pos, pos) }
+    }
+
+    pub fn span(&self) -> Span {
+        match self {
+            Self::Spanned { span, .. } => *span,
+        }
+    }
+
+    pub fn message(&self) -> &str {
+        match self {
+            Self::Spanned { message, .. } => message,
+        }
+    }
+}
+
+/// 在 ParserErr 基础上附带 parser 当前光标位置。
+/// parse_code 顶层 downcast 此类型,做精确的 LSP-style 错误高亮。
+#[derive(Debug, thiserror::Error)]
+#[error("{err}")]
+pub struct SpannedParseError {
+    pub err: ParserErr,
+    pub pos: usize,
+}
+
+impl SpannedParseError {
+    pub fn new(err: ParserErr, pos: usize) -> Self {
+        Self { err, pos }
+    }
 }
 
 impl Parser {
     pub fn new(buf: Vec<u8>) -> Self {
-        Self { pos: 0, buf, spans: Vec::new(), decl_scopes: vec![BTreeSet::new()], impl_depth: 0 }
+        Self { pos: 0, buf, spans: Vec::new(), decl_scopes: vec![BTreeSet::new()], impl_depth: 0, fn_body_depth: 0, impl_body_depth: 0, depth: 0, fatal: false }
+    }
+
+    /// 进入一层递归:自增深度并校验上限。配合 [`Parser::exit_depth`] 使用。
+    ///
+    /// 超限时置 [`Parser::fatal`]:这是不可恢复错误。否则 `try_parse!` 的回溯会
+    /// 把 [`ParserErr::TooDeep`] 当成"换个产生式再试",pos 回退后外层循环原地重试,
+    /// 形成死循环。置位后 [`Parser::check_fatal`] 让每个解析入口立即失败,错误一路
+    /// 通过 `?` 上抛终止解析。
+    fn enter_depth(&mut self) -> Result<()> {
+        self.depth += 1;
+        if self.depth > MAX_PARSE_DEPTH {
+            self.depth -= 1;
+            self.fatal = true;
+            return Err(ParserErr::at("表达式嵌套过深", self.current_pos()).into());
+        }
+        Ok(())
+    }
+
+    fn exit_depth(&mut self) {
+        self.depth = self.depth.saturating_sub(1);
+    }
+
+    /// 解析入口的快速失败检查:一旦进入 fatal 状态,立即返回错误,阻止任何回溯重试。
+    fn check_fatal(&self) -> Result<()> {
+        if self.fatal { Err(ParserErr::at("表达式嵌套过深", self.current_pos()).into()) } else { Ok(()) }
     }
 
     fn push_decl_scope(&mut self) {
@@ -144,7 +208,7 @@ impl Parser {
             return Ok(());
         }
         if self.decl_scopes.iter().rev().any(|scope| scope.contains(name)) {
-            return Err(ParserErr::DuplicateSymbol(name.clone()).into());
+            return Err(ParserErr::at(format!("符号 {} 已经声明", name), self.current_pos()).into());
         }
         self.decl_scopes.last_mut().expect("parser always has a declaration scope").insert(name.clone());
         Ok(())
@@ -156,7 +220,7 @@ impl Parser {
         }
         let scope = self.decl_scopes.last_mut().expect("parser always has a declaration scope");
         if scope.contains(name) {
-            return Err(ParserErr::DuplicateSymbol(name.clone()).into());
+            return Err(ParserErr::at(format!("符号 {} 已经声明", name), self.current_pos()).into());
         }
         scope.insert(name.clone());
         Ok(())
@@ -194,10 +258,12 @@ impl Parser {
 
     fn function_body(&mut self, args: &[(SmolStr, Type)]) -> Result<Stmt> {
         self.push_decl_scope();
+        self.fn_body_depth += 1;
         let result = (|| {
             self.declare_args(args)?;
             self.block()
         })();
+        self.fn_body_depth -= 1;
         self.pop_decl_scope();
         result
     }
@@ -205,7 +271,9 @@ impl Parser {
     fn impl_body(&mut self) -> Result<Stmt> {
         self.push_decl_scope();
         self.impl_depth += 1;
+        self.impl_body_depth += 1;
         let result = self.block();
+        self.impl_body_depth -= 1;
         self.impl_depth -= 1;
         self.pop_decl_scope();
         result
@@ -217,7 +285,7 @@ impl Parser {
 
     pub fn get(&self) -> Result<u8> {
         //查看当前字符
-        self.buf.get(self.pos).cloned().ok_or(ParserErr::EndofInput.into())
+        self.buf.get(self.pos).cloned().ok_or_else(|| ParserErr::at("输入结束", self.pos).into())
     }
 
     pub fn take(&mut self, ch: u8) -> Result<()> {
@@ -226,7 +294,7 @@ impl Parser {
             self.pos += 1;
             Ok(())
         } else {
-            Err(ParserErr::ExpectChar(ch as char, self.buf.get(self.pos as usize).cloned().unwrap_or(0) as char).into())
+            Err(SpannedParseError::new(ParserErr::at(format!("期望字符 {} 实际字符 {}", ch as char, self.buf.get(self.pos as usize).cloned().unwrap_or(0) as char), self.pos), self.pos).into())
         }
     }
 
@@ -238,7 +306,7 @@ impl Parser {
 
     pub fn ahead(&self) -> Result<u8> {
         //朝前看
-        self.buf.get(self.pos + 1).cloned().ok_or(ParserErr::EndofInput.into())
+        self.buf.get(self.pos + 1).cloned().ok_or_else(|| ParserErr::at("输入结束", self.pos).into())
     }
 
     pub fn get_str(&self, start: usize, stop: usize) -> SmolStr {
@@ -262,7 +330,7 @@ impl Parser {
         while self.pos < self.buf.len() && f(self.buf[self.pos]) {
             self.pos += 1;
         }
-        if self.pos > start { Ok((start, self.pos)) } else { Err(ParserErr::NoCharCollect.into()) }
+        if self.pos > start { Ok((start, self.pos)) } else { Err(ParserErr::at("未发现期望字符", start).into()) }
     }
 
     pub fn just(&mut self, pattern: &str) -> Result<()> {
@@ -270,7 +338,7 @@ impl Parser {
             self.pos += pattern.len();
             Ok(())
         } else {
-            Err(ParserErr::ExpectedString(SmolStr::new(pattern)).into())
+            Err(ParserErr::at(format!("期望字符串 {}", pattern), self.pos).into())
         }
     }
 
@@ -278,7 +346,7 @@ impl Parser {
         self.just(pattern)?;
         if self.pos < self.buf.len() && !NOT_IDENT.contains(&self.buf[self.pos]) {
             self.pos -= pattern.len();
-            return Err(ParserErr::ExpectedString(SmolStr::new(pattern)).into());
+            return Err(ParserErr::at(format!("期望字符串 {}", pattern), self.pos).into());
         }
         Ok(())
     }
@@ -419,7 +487,7 @@ impl Parser {
                 }
                 self.pos += 1;
             }
-            Err(ParserErr::UncloseComment.into())
+            Err(ParserErr::at("未关闭的注释", self.pos).into())
         } else {
             Ok(())
         }
@@ -461,7 +529,7 @@ impl Parser {
 
     pub fn string(&mut self) -> Result<SmolStr> {
         if self.get()? != b'"' {
-            return Err(ParserErr::NotString.into());
+            return Err(ParserErr::at("非字符串", self.current_pos()).into());
         }
         self.pos += 1;
         let mut text_buf = Vec::new();
@@ -470,9 +538,18 @@ impl Parser {
                 //转义字符
                 self.pos += 1;
                 match self.buf[self.pos] {
-                    b'n' => { text_buf.push(b'\n'); self.pos += 1; }
-                    b'r' => { text_buf.push(b'\r'); self.pos += 1; }
-                    b't' => { text_buf.push(b'\t'); self.pos += 1; }
+                    b'n' => {
+                        text_buf.push(b'\n');
+                        self.pos += 1;
+                    }
+                    b'r' => {
+                        text_buf.push(b'\r');
+                        self.pos += 1;
+                    }
+                    b't' => {
+                        text_buf.push(b'\t');
+                        self.pos += 1;
+                    }
                     ch @ (b'\\' | b'"') => {
                         text_buf.push(ch);
                         self.pos += 1;
@@ -493,13 +570,20 @@ impl Parser {
                     }
                     b'x' => {
                         self.pos += 1;
-                        if self.pos + 2 < self.buf.len() {
-                            let start = self.pos;
-                            self.pos += 2;
-                            let hex = &self.buf[start..self.pos];
-                            let code = u32::from_str_radix(String::from_utf8_lossy(hex).as_ref(), 16)?;
-                            text_buf.push(code as u8);
+                        if self.pos + 2 > self.buf.len() {
+                            return Err(anyhow!("非法 \\x 转义：需要 2 位十六进制"));
                         }
+                        let start = self.pos;
+                        self.pos += 2;
+                        let hex = &self.buf[start..self.pos];
+                        if hex.iter().any(|b| !b.is_ascii_hexdigit()) {
+                            return Err(anyhow!("非法 \\x 转义：仅允许十六进制字符"));
+                        }
+                        let code = u32::from_str_radix(String::from_utf8_lossy(hex).as_ref(), 16)?;
+                        if code > 0xFF {
+                            return Err(anyhow!("\\x 转义值 0x{:02X} 超出 0xFF", code));
+                        }
+                        text_buf.push(code as u8);
                     }
                     other => {
                         return Err(anyhow!("invalid escape character: {}", other as char));
@@ -514,7 +598,7 @@ impl Parser {
                 self.pos += 1;
             }
         }
-        Err(ParserErr::UnclosedString.into())
+        Err(ParserErr::at("未关闭字符串", self.pos).into())
     }
 
     pub fn text(&mut self) -> Result<SmolStr> {
@@ -526,7 +610,7 @@ impl Parser {
                 self.pos += 1;
             }
             if self.get()? != b'"' {
-                return Err(ParserErr::IllegalRawString.into());
+                return Err(ParserErr::at("非法的原始字符串", self.current_pos()).into());
             }
             self.pos += 1;
             let start_pos = self.pos;
@@ -551,7 +635,7 @@ impl Parser {
     fn numeric_suffix(&mut self) -> Option<Type> {
         let save = self.pos;
         for (name, ty) in TYPES {
-            if !ty.is_native() || *ty == Type::F16 {
+            if !ty.is_native() {
                 continue;
             }
             if self.buf.len() >= self.pos + name.len() && self.buf[self.pos..self.pos + name.len()].eq(name.as_bytes()) {
@@ -564,23 +648,69 @@ impl Parser {
     }
 
     fn int_literal(&mut self, digits: &str, radix: u32, suffix: Option<Type>) -> Result<Dynamic> {
-        Ok(match suffix.unwrap_or(Type::I32) {
-            Type::I8 => Dynamic::I8(i128::from_str_radix(digits, radix)? as i8),
-            Type::I16 => Dynamic::I16(i128::from_str_radix(digits, radix)? as i16),
-            Type::I32 => Dynamic::I32(i128::from_str_radix(digits, radix)? as i32),
-            Type::I64 => Dynamic::I64(i128::from_str_radix(digits, radix)? as i64),
-            Type::U8 => Dynamic::U8(u128::from_str_radix(digits, radix)? as u8),
-            Type::U16 => Dynamic::U16(u128::from_str_radix(digits, radix)? as u16),
-            Type::U32 => Dynamic::U32(u128::from_str_radix(digits, radix)? as u32),
-            Type::U64 => Dynamic::U64(u128::from_str_radix(digits, radix)? as u64),
-            Type::F32 => Dynamic::F32(u128::from_str_radix(digits, radix)? as f32),
-            Type::F64 => Dynamic::F64(u128::from_str_radix(digits, radix)? as f64),
+        // 默认整数类型为 I64:常见的较大十进制数(如 30 亿)不再静默回绕成负数。
+        let ty = suffix.unwrap_or(Type::I64);
+        // 负号由一元运算符单独解析,这里的字面量恒为非负,因此统一解析成 u128。
+        let magnitude = u128::from_str_radix(digits, radix).map_err(|_| anyhow!("整数字面量 {} 超出可表示范围", digits))?;
+        let (signed, bits) = match ty {
+            Type::I8 => (true, 8u32),
+            Type::I16 => (true, 16),
+            Type::I32 => (true, 32),
+            Type::I64 => (true, 64),
+            Type::U8 => (false, 8),
+            Type::U16 => (false, 16),
+            Type::U32 => (false, 32),
+            Type::U64 => (false, 64),
+            Type::F16 => return Ok(Dynamic::F16(dynamic::f64_to_f16(magnitude as f64))),
+            Type::F32 => return Ok(Dynamic::F32(magnitude as f32)),
+            Type::F64 => return Ok(Dynamic::F64(magnitude as f64)),
             ty => return Err(anyhow!("{:?} 不能作为数字后缀", ty)),
+        };
+        let unsigned_max = (1u128 << bits) - 1;
+        // 十进制按数值语义判界(有符号允许到 |MIN|,即 2^(bits-1),以支持 -128i8、i64::MIN);
+        // 十六/八/二进制按位模式语义判界,允许写满整型位宽(如 0xFFFFFFFF 仍是合法的位掩码)。
+        let max_allowed = if radix == 10 { if signed { unsigned_max / 2 + 1 } else { unsigned_max } } else { unsigned_max };
+        if magnitude > max_allowed {
+            return Err(anyhow!("整数字面量 {} 超出 {:?} 的范围", digits, ty));
+        }
+        Ok(match ty {
+            Type::I8 => Dynamic::I8(magnitude as i8),
+            Type::I16 => Dynamic::I16(magnitude as i16),
+            Type::I32 => Dynamic::I32(magnitude as i32),
+            Type::I64 => Dynamic::I64(magnitude as i64),
+            Type::U8 => Dynamic::U8(magnitude as u8),
+            Type::U16 => Dynamic::U16(magnitude as u16),
+            Type::U32 => Dynamic::U32(magnitude as u32),
+            Type::U64 => Dynamic::U64(magnitude as u64),
+            _ => unreachable!(),
         })
     }
 
     fn float_literal(&mut self, digits: &str, suffix: Option<Type>) -> Result<Dynamic> {
         let value: f64 = digits.parse()?;
+        if let Some(ref ty) = suffix {
+            // 整数类后缀:校验是否在目标范围内。NaN / Inf 一律拒绝;
+            // 不允许小数部分。F16/F32/F64 不做范围 / 整数性校验。
+            let is_int_suffix = matches!(ty, Type::I8 | Type::I16 | Type::I32 | Type::I64 | Type::U8 | Type::U16 | Type::U32 | Type::U64);
+            if is_int_suffix {
+                let (min, max): (f64, f64) = match ty {
+                    Type::I8 => (i8::MIN as f64, i8::MAX as f64),
+                    Type::I16 => (i16::MIN as f64, i16::MAX as f64),
+                    Type::I32 => (i32::MIN as f64, i32::MAX as f64),
+                    Type::I64 => (i64::MIN as f64, i64::MAX as f64),
+                    Type::U8 => (0.0, u8::MAX as f64),
+                    Type::U16 => (0.0, u16::MAX as f64),
+                    Type::U32 => (0.0, u32::MAX as f64),
+                    Type::U64 => (0.0, u64::MAX as f64),
+                    _ => unreachable!(),
+                };
+                if !value.is_finite() || value < min || value > max || value.fract() != 0.0 {
+                    return Err(anyhow!("浮点字面量 {:?} 超出 {:?} 范围", value, ty));
+                }
+            } else if !value.is_finite() {
+                return Err(anyhow!("非法浮点字面量: {:?}", value));
+            }
+        }
         Ok(match suffix.unwrap_or(Type::F32) {
             Type::I8 => Dynamic::I8(value as i8),
             Type::I16 => Dynamic::I16(value as i16),
@@ -590,6 +720,7 @@ impl Parser {
             Type::U16 => Dynamic::U16(value as u16),
             Type::U32 => Dynamic::U32(value as u32),
             Type::U64 => Dynamic::U64(value as u64),
+            Type::F16 => Dynamic::F16(dynamic::f64_to_f16(value)),
             Type::F32 => Dynamic::F32(value as f32),
             Type::F64 => Dynamic::F64(value),
             ty => return Err(anyhow!("{:?} 不能作为浮点数字后缀", ty)),
@@ -651,7 +782,7 @@ impl Parser {
             }
             return self.int_literal(&text, 10, suffix);
         }
-        Err(ParserErr::NotNumber.into())
+        Err(ParserErr::at("非数字", start).into())
     }
 }
 
@@ -673,6 +804,225 @@ mod tests {
                 }
             }
         }
+    }
+
+    // 调试构建里单帧约 16KB,病态深嵌套即便有深度守卫也会在守卫触发"之前"打爆
+    // 测试线程默认 2MB 栈;因此用大栈线程跑,验证守卫确实返回 TooDeep(而非崩溃)。
+    // 生产是 release 构建,单帧仅数 KB,128 层上限在 8MB 主栈上余量充足。
+    fn run_with_big_stack(f: impl FnOnce() + Send + 'static) {
+        std::thread::Builder::new().stack_size(64 * 1024 * 1024).spawn(f).unwrap().join().unwrap();
+    }
+
+    #[test]
+    fn deeply_nested_parens_error_instead_of_stack_overflow() {
+        run_with_big_stack(|| {
+            let depth = MAX_PARSE_DEPTH + 50;
+            let code = format!("{}1{}", "(".repeat(depth), ")".repeat(depth));
+            let mut parser = Parser::new(code.into_bytes());
+            let err = parser.get_expr().unwrap_err();
+            assert!(err.to_string().contains("嵌套过深"), "got: {err}");
+        });
+    }
+
+    #[test]
+    fn deeply_nested_blocks_error_instead_of_stack_overflow() {
+        run_with_big_stack(|| {
+            let depth = MAX_PARSE_DEPTH + 50;
+            let code = format!("fn f() {}{}{}", "{".repeat(depth), "1", "}".repeat(depth));
+            let err = parse_all(&code).unwrap_err();
+            assert!(err.to_string().contains("嵌套过深"), "got: {err}");
+        });
+    }
+
+    #[test]
+    fn normal_nesting_within_limit_parses() {
+        // 远低于上限的正常嵌套不受影响
+        let code = format!("{}1{}", "(".repeat(32), ")".repeat(32));
+        let mut parser = Parser::new(code.into_bytes());
+        parser.get_expr().unwrap();
+    }
+
+    fn parse_literal(code: &str) -> Result<Dynamic> {
+        let mut parser = Parser::new(code.as_bytes().to_vec());
+        match parser.get_expr()?.kind {
+            crate::ExprKind::Value(value) => Ok(value),
+            other => Err(anyhow!("不是字面量: {:?}", other)),
+        }
+    }
+
+    #[test]
+    fn unsuffixed_integer_defaults_to_i64() {
+        assert_eq!(parse_literal("5").unwrap(), Dynamic::I64(5));
+        // 30 亿:旧的 I32 默认会静默回绕成负数,I64 默认保留正确数值
+        assert_eq!(parse_literal("3000000000").unwrap(), Dynamic::I64(3000000000));
+    }
+
+    #[test]
+    fn out_of_range_integer_literals_error() {
+        // 超出 u64,连 i128 解析也容纳不下 → 报错而非回绕
+        assert!(parse_literal("99999999999999999999999999999999999999999").is_err());
+        // 窄后缀越界
+        assert!(parse_literal("255i8").unwrap_err().to_string().contains("超出"));
+        assert!(parse_literal("70000i16").unwrap_err().to_string().contains("超出"));
+        assert!(parse_literal("256u8").unwrap_err().to_string().contains("超出"));
+    }
+
+    #[test]
+    fn signed_min_magnitude_literals_allowed() {
+        // -128i8 由一元负号 + 字面量 128 组成,字面量 128 必须可被接受
+        assert_eq!(parse_literal("128i8").unwrap(), Dynamic::I8(-128));
+        assert_eq!(parse_literal("9223372036854775808").unwrap(), Dynamic::I64(i64::MIN));
+    }
+
+    #[test]
+    fn hex_literals_keep_bit_pattern() {
+        // 十六进制按位模式语义:0xFFFFFFFF 是合法掩码,默认 I64 容纳为正值
+        assert_eq!(parse_literal("0xFFFFFFFF").unwrap(), Dynamic::I64(0xFFFFFFFF));
+        // 写满目标位宽的掩码允许通过(0xFF -> i8 的 -1)
+        assert_eq!(parse_literal("0xFFi8").unwrap(), Dynamic::I8(-1));
+        assert_eq!(parse_literal("0xFFFFFFFFu32").unwrap(), Dynamic::U32(u32::MAX));
+    }
+
+    // 把表达式 AST 渲染成 S 表达式,用来锁定优先级/结合性(expr.rs 手写树旋转逻辑)。
+    fn shape(code: &str) -> String {
+        let mut parser = Parser::new(code.as_bytes().to_vec());
+        let expr = parser.get_expr().expect("parse");
+        fmt_shape(&expr)
+    }
+
+    fn binop_sym(op: &crate::BinaryOp) -> &'static str {
+        use crate::BinaryOp::*;
+        match op {
+            Add => "+",
+            Sub => "-",
+            Mul => "*",
+            Div => "/",
+            Mod => "%",
+            Shl => "<<",
+            Shr => ">>",
+            BitAnd => "&",
+            BitOr => "|",
+            BitXor => "^",
+            Assign => "=",
+            AddAssign => "+=",
+            Eq => "==",
+            Ne => "!=",
+            Lt => "<",
+            Gt => ">",
+            Le => "<=",
+            Ge => ">=",
+            And => "&&",
+            Or => "||",
+            Idx => "idx",
+            other => {
+                let _ = other;
+                "?"
+            }
+        }
+    }
+
+    fn fmt_shape(expr: &crate::Expr) -> String {
+        use crate::ExprKind::*;
+        match &expr.kind {
+            Value(v) => format!("{:?}", v).replace("I64(", "").replace("I32(", "").trim_end_matches(')').to_string(),
+            Ident(name) => name.to_string(),
+            Unary { op, value } => {
+                let s = if matches!(op, crate::UnaryOp::Neg) { "-" } else { "!" };
+                format!("({} {})", s, fmt_shape(value))
+            }
+            Binary { left, op, right } => format!("({} {} {})", binop_sym(op), fmt_shape(left), fmt_shape(right)),
+            Range { start, stop, inclusive } => format!("({} {} {})", if *inclusive { "..=" } else { ".." }, fmt_shape(start), fmt_shape(stop)),
+            Typed { value, ty } => format!("(as {} {:?})", fmt_shape(value), ty),
+            other => format!("{:?}", other),
+        }
+    }
+
+    #[test]
+    fn precedence_and_associativity_golden() {
+        // 乘法高于加法
+        assert_eq!(shape("1 + 2 * 3"), "(+ 1 (* 2 3))");
+        assert_eq!(shape("1 * 2 + 3"), "(+ (* 1 2) 3)");
+        // 同级左结合
+        assert_eq!(shape("1 - 2 - 3"), "(- (- 1 2) 3)");
+        assert_eq!(shape("8 / 4 / 2"), "(/ (/ 8 4) 2)");
+        // 移位低于加法
+        assert_eq!(shape("2 + 3 << 4"), "(<< (+ 2 3) 4)");
+        // 位运算优先级:& 高于 ^ 高于 |
+        assert_eq!(shape("1 | 2 ^ 3 & 4"), "(| 1 (^ 2 (& 3 4)))");
+        // 比较低于算术
+        assert_eq!(shape("1 + 2 == 3"), "(== (+ 1 2) 3)");
+        // 逻辑:&& 高于 ||
+        assert_eq!(shape("a && b || c"), "(|| (&& a b) c)");
+        // 一元高于乘法
+        assert_eq!(shape("-a * b"), "(* (- a) b)");
+        assert_eq!(shape("!a == b"), "(== (! a) b)");
+    }
+
+    #[test]
+    fn assignment_range_and_as_precedence_golden() {
+        // 赋值最低优先级,右结合
+        assert_eq!(shape("a = b + c"), "(= a (+ b c))");
+        assert_eq!(shape("a = b = c"), "(= a (= b c))");
+        assert_eq!(shape("a = b = c = d"), "(= a (= b (= c d)))");
+        // 复合赋值
+        assert_eq!(shape("a += b * c"), "(+= a (* b c))");
+        // range 边界是完整算术表达式(上界按完整子表达式解析)
+        assert_eq!(shape("1 + 1 .. n * 2"), "(.. (+ 1 1) (* n 2))");
+        assert_eq!(shape("0 ..= n - 1"), "(..= 0 (- n 1))");
+        // as 紧绑定到操作数,优先级高于二元算术(Rust 语义)
+        assert_eq!(shape("a + b as i64"), "(+ a (as b I64))");
+        assert_eq!(shape("a as i64 + b"), "(+ (as a I64) b)");
+        assert_eq!(shape("(a + b) as i64"), "(as (+ a b) I64)");
+    }
+
+    // 轻量 fuzz:用确定性 PRNG 生成大量随机/半结构化输入喂给解析器,断言它永远
+    // 不 panic、不崩溃(返回 Ok 或 Err 都可),也不卡死(B2 的深度守卫保证有界)。
+    // 在大栈线程上跑,避免深嵌套合法解析在调试构建里耗尽测试线程的 2MB 栈。
+    #[test]
+    fn parser_never_panics_on_random_input() {
+        run_with_big_stack(|| {
+            const FRAGMENTS: &[&str] = &[
+                "fn", "let", "if", "else", "for", "in", "while", "return", "struct", "impl", "pub", "(", ")", "{", "}", "[", "]", "<", ">", "+", "-", "*", "/", "%", "=", "==", "&&", "||", "..", "..=", "as", "i32",
+                "u64", "f64", ".", ",", ";", ":", "::", "x", "0", "1", "255i8", "0xFF", "\"s\"", "true", "null", "|a|", "->",
+            ];
+            // xorshift64* 确定性 PRNG
+            let mut state: u64 = 0x9E3779B97F4A7C15;
+            let mut next = || {
+                state ^= state >> 12;
+                state ^= state << 25;
+                state ^= state >> 27;
+                state = state.wrapping_mul(0x2545F4914F6CDD1D);
+                state
+            };
+
+            for _ in 0..4000 {
+                let mut code = String::new();
+                let tokens = (next() % 40) as usize;
+                for _ in 0..tokens {
+                    code.push_str(FRAGMENTS[(next() as usize) % FRAGMENTS.len()]);
+                    if next() % 2 == 0 {
+                        code.push(' ');
+                    }
+                }
+                // 解析全程不应 panic;parse_all 返回 Ok/Err 均可接受。
+                let result = std::panic::catch_unwind(|| {
+                    let mut parser = Parser::new(code.clone().into_bytes());
+                    let mut count = 0;
+                    loop {
+                        match parser.stmt(false) {
+                            Ok(_) => {
+                                count += 1;
+                                if parser.is_eof() || count > 1000 {
+                                    break;
+                                }
+                            }
+                            Err(_) => break,
+                        }
+                    }
+                });
+                assert!(result.is_ok(), "parser panicked on input: {:?}", code);
+            }
+        });
     }
 
     #[test]
@@ -730,6 +1080,138 @@ mod tests {
             "#,
         )
         .unwrap();
+    }
+
+    #[test]
+    fn rejects_nested_fn_inside_function_body() {
+        let err = parse_all("fn outer() { fn inner() { 1 } }").unwrap_err();
+        assert!(err.to_string().contains("函数体内不能定义"), "got: {err}");
+    }
+
+    #[test]
+    fn rejects_nested_struct_inside_function_body() {
+        let err = parse_all("fn outer() { struct S { x: i32 } S{x: 1} }").unwrap_err();
+        assert!(err.to_string().contains("函数体内不能定义"), "got: {err}");
+    }
+
+    #[test]
+    fn rejects_nested_const_inside_function_body() {
+        let err = parse_all("fn outer() { const K = 1 } K").unwrap_err();
+        assert!(err.to_string().contains("函数体内不能定义"), "got: {err}");
+    }
+
+    #[test]
+    fn hex_escape_at_end_of_string_preserves_byte() {
+        let mut p = Parser::new(br#""abc\x41""#.to_vec());
+        let s = p.string().unwrap();
+        assert_eq!(s.as_str(), "abcA");
+    }
+
+    #[test]
+    fn hex_escape_truncated_reports_clear_error() {
+        let mut p = Parser::new(br#""abc\x""#.to_vec());
+        let err = p.string().unwrap_err();
+        assert!(err.to_string().contains("\\x"), "got: {err}");
+    }
+
+    #[test]
+    fn hex_escape_non_hex_char_reports_clear_error() {
+        let mut p = Parser::new(br#""abc\xZZ""#.to_vec());
+        let err = p.string().unwrap_err();
+        assert!(err.to_string().contains("\\x"), "got: {err}");
+    }
+
+    #[test]
+    fn else_with_invalid_body_reports_error() {
+        // 让 block() 在 else 后失败:解析到 '}' 紧跟一个无闭的 '{' 触发 "not code block"
+        let err = parse_all("fn f() { if true { 1 } else }").unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("not code block") || msg.contains("未结束的"), "got: {msg}");
+    }
+
+    #[test]
+    fn float_literal_with_int_suffix_out_of_range_errors() {
+        let mut p = Parser::new(b"1e30u8".to_vec());
+        let err = p.number().unwrap_err();
+        assert!(err.to_string().contains("超出"), "got: {err}");
+    }
+
+    #[test]
+    fn float_literal_with_int_suffix_fractional_errors() {
+        let mut p = Parser::new(b"1.5i32".to_vec());
+        let err = p.number().unwrap_err();
+        assert!(err.to_string().contains("超出"), "got: {err}");
+    }
+
+    #[test]
+    fn float_literal_with_float_suffix_accepts_fractional() {
+        let mut p = Parser::new(b"1e-3f32".to_vec());
+        assert!(matches!(p.number().unwrap(), Dynamic::F32(v) if (v - 1e-3).abs() < 1e-8));
+    }
+
+    #[test]
+    fn allows_closure_inside_function_body() {
+        parse_all("fn outer() { let f = |x: i32| { x + 1 }; f(1) }").unwrap();
+    }
+
+    #[test]
+    fn rejects_const_inside_impl_body() {
+        let err = parse_all("struct S {}\nimpl S { const K = 1 }").unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("impl 体内不能定义") && msg.contains("const"), "got: {msg}");
+    }
+
+    #[test]
+    fn allows_fn_inside_impl_body() {
+        parse_all("struct S {}\nimpl S { pub fn m(self: S) { 1 } }").unwrap();
+    }
+
+    #[test]
+    fn parser_err_carries_span() {
+        // 用 fn 重复声明触发 DuplicateSymbol,ParserErr span 应当指向重复位置。
+        let src = "fn f() {}\nfn f() {}\n";
+        let err = parse_all(src).unwrap_err();
+        eprintln!("err display: {err}");
+        let downcast = err.downcast_ref::<ParserErr>().expect("ParserErr");
+        eprintln!("message: {}", downcast.message());
+        eprintln!("span: {:?}", downcast.span());
+        assert!(downcast.message().contains("f"));
+        // span 应当在文件范围内
+        assert!(downcast.span().start < src.len());
+    }
+
+    #[test]
+    fn block_as_let_value_is_expression() {
+        parse_all("pub fn f() { let x = { let y = 1; y + 1 }; x }").unwrap();
+    }
+
+    #[test]
+    fn dict_still_takes_priority_over_block() {
+        // dict 仍是 dict,不能误判为 block
+        parse_all("pub fn f() { let d = { key: 1 }; d }").unwrap();
+    }
+
+    #[test]
+    fn list_pattern_with_rest_parses() {
+        parse_all("pub fn f(items) { let [first, ..rest] = items; first }").unwrap();
+    }
+
+    #[test]
+    fn list_pattern_with_only_rest_parses() {
+        parse_all("pub fn f(items) { let [..all] = items; all }").unwrap();
+    }
+
+    #[test]
+    fn take_error_carries_precise_pos() {
+        // take 失败时,SpannedParseError.pos 应该指向缺失字符的位置,
+        // 而不是 parse_code 默认的 parser.current_pos。
+        use crate::SpannedParseError;
+        let mut p = Parser::new(b"ab".to_vec());
+        let pos_before = p.current_pos();
+        let err = p.take(b'c').unwrap_err();
+        let spanned = err.downcast_ref::<SpannedParseError>().expect("take should wrap in SpannedParseError");
+        // take 在 pos_before 处失败,期望 pos == pos_before(0)
+        assert_eq!(spanned.pos, pos_before);
     }
 
     #[test]

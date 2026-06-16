@@ -1,21 +1,38 @@
 use anyhow::{Result, anyhow};
 use dynamic::{Dynamic, FromJson, ToJson};
+use std::io::Write;
 
 pub mod oss;
+
+fn debug_log_event(options: &Dynamic, event: Dynamic) {
+    let Some(path) = options.get_dynamic("debug_log_file") else {
+        return;
+    };
+    let path = path.as_str().to_string();
+    if path.is_empty() {
+        return;
+    }
+    let path = std::path::PathBuf::from(path);
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let mut line = String::new();
+    event.to_json(&mut line);
+    if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+        let _ = writeln!(file, "{line}");
+    }
+}
 
 pub fn to_markdown(d: &Dynamic, buf: &mut String) {
     if d.is_vec() {
         //简单的 Vec<float> Vec<int> 按照 json
         d.to_json(buf);
     } else if let Dynamic::Map(m) = d {
-        if let Ok(map) = m.read() {
-            for (key, v) in map.iter() {
-                buf.push_str(&format!("#### ```{}```\n", key));
-                to_markdown(v, buf);
-                buf.push('\n');
-            }
-        } else {
-            buf.push_str(&d.to_string());
+        let map = m.read();
+        for (key, v) in map.iter() {
+            buf.push_str(&format!("#### ```{}```\n", key));
+            to_markdown(v, buf);
+            buf.push('\n');
         }
     } else if let Dynamic::Bytes(bytes) = d {
         if bytes.len() >= 8 {
@@ -579,6 +596,16 @@ async fn poll_image_task(options: &Dynamic, task_id: &str) -> Result<Dynamic> {
         let resp = req.send().await?;
         let status = resp.status();
         let text = resp.text().await?;
+        debug_log_event(
+            options,
+            map!(
+                "event"=> "llm_image_task_poll_response",
+                "url"=> task_url.clone(),
+                "taskId"=> task_id,
+                "status"=> status.as_u16() as i64,
+                "body"=> text.clone()
+            ),
+        );
         if !status.is_success() {
             return Err(anyhow!("图片任务查询失败 HTTP {}: {}", status.as_u16(), text.trim()));
         }
@@ -882,6 +909,15 @@ pub async fn post_binary(method: &str, openai: Dynamic, msg: Dynamic) -> Result<
     let mut body_str = String::new();
     msg.to_json(&mut body_str);
     log::info!("{}", body_str);
+    debug_log_event(
+        &openai,
+        map!(
+            "event"=> "llm_http_request",
+            "method"=> method,
+            "url"=> format!("{}/{}", url.as_str(), method),
+            "body"=> body_str.clone()
+        ),
+    );
 
     let resp = if let Some(token) = token {
         client.post(&format!("{}/{}", url.as_str(), method)).header("Content-Type", "application/json").header("authorization", format!("Bearer {}", token)).body(body_str).send().await?
@@ -1001,6 +1037,16 @@ pub async fn post(method: &str, openai: Dynamic, msg: Dynamic, tx: Option<Dynami
         tx.as_ref().map(|tx| notify(tx, Dynamic::Null));
     }
     log::info!("{:#?}", &text);
+    debug_log_event(
+        &openai,
+        map!(
+            "event"=> "llm_http_response",
+            "method"=> method,
+            "url"=> format!("{}/{}", url.as_str(), method),
+            "status"=> status.as_u16() as i64,
+            "body"=> text.clone()
+        ),
+    );
     if !status.is_success() {
         return Err(anyhow!("LLM 请求失败 HTTP {}: {}", status.as_u16(), text.trim()));
     }
@@ -1032,7 +1078,15 @@ fn decode_llm_response(t: Dynamic, raw_text: &str) -> Result<Dynamic> {
         return decode_text_content(content, raw_text);
     }
     let choice = t.remove_dynamic("choices").and_then(|c| c.into_vec::<Dynamic>()).and_then(|v| v.into_iter().next()).ok_or_else(|| anyhow!("LLM 响应缺少 data[0] 或 choices[0]: {raw_text}"))?;
-    if let Some(content) = choice.remove_dynamic("message").and_then(|m| m.remove_dynamic("content")) { decode_text_content(content, raw_text) } else { Err(anyhow!("结果不是 json")) }
+    if let Some(message) = choice.remove_dynamic("message") {
+        if message.contains("tool_calls") {
+            return Ok(message);
+        }
+        if let Some(content) = message.remove_dynamic("content") {
+            return decode_text_content(content, raw_text);
+        }
+    }
+    Err(anyhow!("结果不是 json"))
 }
 
 fn decode_output(output: Dynamic) -> Option<Dynamic> {
@@ -1240,6 +1294,21 @@ mod test {
 
         assert!(message.contains("缺少 data[0] 或 choices[0]"));
         assert!(message.contains("bad api key"));
+        Ok(())
+    }
+
+    #[test]
+    fn decode_chat_tool_calls_returns_message() -> anyhow::Result<()> {
+        let raw = r#"{"choices":[{"message":{"role":"assistant","content":"","tool_calls":[{"id":"call_1","type":"function","function":{"name":"search_google_maps","arguments":"{\"address\":\"大阪府大阪市北区梅田3丁目1-1\"}"}}]}}]}"#;
+        let (body, _) = Dynamic::from_json(raw.as_bytes())?;
+        let decoded = super::decode_llm_response(body, raw)?;
+
+        assert!(decoded.contains("tool_calls"));
+        assert_eq!(decoded.get_dynamic("role").unwrap().as_str(), "assistant");
+        let tool_calls = decoded.get_dynamic("tool_calls").unwrap();
+        assert_eq!(tool_calls.len(), 1);
+        let call = tool_calls.get_idx(0).unwrap();
+        assert_eq!(call.get_dynamic("function").unwrap().get_dynamic("name").unwrap().as_str(), "search_google_maps");
         Ok(())
     }
 

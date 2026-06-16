@@ -418,6 +418,20 @@ impl Parser {
                 break;
             }
         }
+        // `as` 紧绑定到刚解析出的原子(优先级高于所有二元运算符),因此
+        // `a + b as i64` 解析为 `a + (b as i64)` 而非 `(a + b) as i64`。
+        // 用 save/restore 包裹,避免在没有 `as` 时吞掉后续空白。
+        loop {
+            let save = self.pos;
+            self.whitespace()?;
+            if self.keyword("as").is_ok() {
+                let ty = self.get_type()?;
+                expr = Expr::new(ExprKind::Typed { value: Box::new(expr), ty }, Span::new(start, self.current_pos()));
+            } else {
+                self.pos = save;
+                break;
+            }
+        }
         Ok(expr.with_span(Span::new(start, self.current_pos())))
     }
 
@@ -536,11 +550,15 @@ impl Parser {
     }
 
     pub fn base_expr(&mut self, allow_struct_literal: bool) -> Result<Expr> {
+        self.check_fatal()?;
         let start = self.current_pos();
         if let Ok(s) = self.text() {
             let expr = Expr::new(ExprKind::Value(Dynamic::String(s)), self.span_from(start));
             self.postfix_expr(start, expr)
-        } else if let Ok(n) = self.number() {
+        } else if self.get().map(|c| c.is_ascii_digit()).unwrap_or(false) {
+            // 数字开头一定是数字字面量:解析失败(如越界)直接上抛,
+            // 不要回落到其它产生式而把"超出范围"错误吞成笼统的"期望表达式"。
+            let n = self.number()?;
             let expr = if let Ok(ty) = self.get_type() {
                 if ty.is_native() {
                     Expr::new(ExprKind::Typed { value: Box::new(Expr::new(ExprKind::Value(n), self.span_from(start))), ty }, self.span_from(start))
@@ -694,9 +712,17 @@ impl Parser {
     }
 
     fn expr_with_min_weight(&mut self, left: Option<(Expr, bool)>, left_op: Option<BinaryOp>, min_weight: usize, allow_struct_literal: bool) -> Result<(Expr, bool)> {
+        self.check_fatal()?;
+        self.enter_depth()?;
+        let result = self.expr_with_min_weight_inner(left, left_op, min_weight, allow_struct_literal);
+        self.exit_depth();
+        result
+    }
+
+    fn expr_with_min_weight_inner(&mut self, left: Option<(Expr, bool)>, left_op: Option<BinaryOp>, min_weight: usize, allow_struct_literal: bool) -> Result<(Expr, bool)> {
         self.whitespace()?;
         if self.is_eof() {
-            return left.ok_or(ParserErr::EndofInput.into());
+            return left.ok_or_else(|| ParserErr::at("左操作数缺失", self.current_pos()).into());
         }
         let start = self.current_pos();
         let ch = self.get()?;
@@ -802,6 +828,23 @@ impl Parser {
                 self.pos = start;
                 return Ok((left, close));
             }
+            // range 的上界要按完整子表达式解析(优先级降到 range 之上),
+            // 否则 `0 .. n * 2` 只会把 `n` 当上界,`* 2` 反而套在整个 range 外面。
+            if matches!(this_op, BinaryOp::RangeOpen | BinaryOp::RangeClose) {
+                let stop = self.expr_with_min_weight(None, None, this_op.weight() + 1, allow_struct_literal)?.0;
+                let span = left.span.merge(stop.span);
+                let inclusive = this_op == BinaryOp::RangeClose;
+                let range = Expr::new(ExprKind::Range { start: Box::new(left), stop: Box::new(stop), inclusive }, span);
+                return self.expr_with_min_weight(Some((range, false)), None, min_weight, allow_struct_literal);
+            }
+            // 赋值右结合:右侧按完整表达式解析,min_weight 取赋值自身权重(0),
+            // 使得 `a = b = c` 解析为 `a = (b = c)`、`a = b + c` 为 `a = (b + c)`。
+            if this_op.is_assign() {
+                let rhs = self.expr_with_min_weight(None, None, this_op.weight(), allow_struct_literal)?.0;
+                let span = left.span.merge(rhs.span);
+                let expr = Expr::new(ExprKind::Binary { left: Box::new(left), op: this_op, right: Box::new(rhs) }, span);
+                return self.expr_with_min_weight(Some((expr, false)), None, min_weight, allow_struct_literal);
+            }
             if left_op.is_some() {
                 return Err(anyhow!("unexpected binary op {:?}", this_op));
             }
@@ -815,12 +858,8 @@ impl Parser {
             } else {
                 self.expr_with_min_weight(Some((left, false)), Some(this_op), min_weight, allow_struct_literal)
             };
-        } else if self.keyword("as").is_ok() && left.is_some() {
-            let value = left.unwrap().0;
-            let start = value.span.start;
-            let ty = self.get_type()?;
-            return Ok((Expr::new(ExprKind::Typed { value: Box::new(value), ty }, Span::new(start, self.current_pos())), false));
         } else {
+            // 注:`as` 现在由 postfix_expr 紧绑定到原子处理,不再在二元位置兜底。
             self.base_expr(allow_struct_literal).map(|e| (e, false))
         };
 

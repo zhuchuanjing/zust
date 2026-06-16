@@ -4,7 +4,7 @@ Zust 是一个用 Rust 编写的类 Rust 脚本语言和运行时。它保留了
 
 官方网站：[www.zust-lang.com](https://www.zust-lang.com)
 
-项目已经接近成熟的开源版本。当前 workspace 内各 crate 独立发版：VM crate 为 `0.9.70`，dynamic crate 为 `0.9.14`，compiler 为 `0.9.32`，parser 为 `0.9.13`，SPIR-V 后端为 `0.9.8`，Metal 后端为 `0.9.9`，编辑器相关包为 `0.9.2`。
+项目已经接近成熟的开源版本。当前 workspace 内各 crate 独立发版：VM crate 为 `0.9.77`，dynamic crate 为 `0.9.14`，compiler 为 `0.9.32`，parser 为 `0.9.13`，SPIR-V 后端为 `0.9.8`，Metal 后端为 `0.9.9`，编辑器相关包为 `0.9.2`。
 
 English: [README.md](README.md)
 
@@ -319,7 +319,9 @@ pub struct BigFloat<N> {
 
 ## 运行时 Native 模块
 
-`Vm::with_all()` 会注册下面这些 native 模块和辅助类型。它们以 `Dynamic` 作为主要边界，因此 Zust 脚本可以直接传 map、list、字符串、数字和 bytes。
+`zust-vm` 默认不启用扩展 feature。`Vm::new()` 注册 core 能力：VM 内存运行时、`std`、`Any`、`Vec` 和 `root`。`Vm::with_all()` 会注册当前编译进来的全部能力；启用 `full` 时会包含 `http`、`db`、`llm` 和 `gpu`。`oss` 跟随 `llm` feature 注册；`http::upload` 只有同时启用 `http` 和 `llm` 时可用。`vulkan` 和 `metal` 是 GPU 运行后端 feature，分别建立在 `gpu` 之上。
+
+下面这些 native 模块和辅助类型都以 `Dynamic` 作为主要边界，因此 Zust 脚本可以直接传 map、list、字符串、数字和 bytes。
 
 ### 标准函数
 
@@ -356,7 +358,7 @@ spawn(|x, y| {
 - 构造和类型辅助：`Any::null()`、`is_map()`、`is_list()`、`is_string()`、`is_null()`、`clone()`。
 - 长度和转换辅助：`len()`、`keys()`、`to_string()`、`Any::from_i64(value)`、`Any::to_i64(value)`、`Any::from_bool(value)`、`Any::to_bool(value)`、`Any::from_f64(value)`、`Any::to_f64(value)`。
 - List 和字符串辅助：`push(value)`、`pop()`、`split(sep)`、`slice(start, stop, inclusive)`。
-- Map 和索引辅助：`get_idx(idx)`、`set_idx(idx, value)`、`get_key(key)`、`set_key(key, value)`、`del_key(key)`、`contains(value)`、`starts_with(prefix)`。
+- Map 和索引辅助：`get_idx(idx)`、`set_idx(idx, value)`、`get(key)`、`get_key(key)`、`set_key(key, value)`、`del_key(key)`、`contains(value)`、`starts_with(prefix)`。
 - 迭代辅助：`iter()`、`next()`。
 - 动态表达式辅助：`Any::binary(left, op, right)`、`Any::logic(left, op, right)`，主要由编译器生成调用。
 
@@ -366,7 +368,7 @@ spawn(|x, y| {
 let data = {name: "zust", tags: ["vm", "native"]};
 
 if data.is_map() && data.contains("name") {
-    print(data.get_key("name"));
+    print(data.get("name"));
 }
 
 data.tags.push("script");

@@ -84,17 +84,11 @@ fn zusts_path(path: &str) -> PathBuf {
 }
 
 fn vm_import_file(vm: &vm::Vm, name: &str, path: &str) -> Result<()> {
-    vm.jit
-        .write()
-        .unwrap()
-        .compiler
-        .import_file(name, zusts_path(path).to_str().expect("zust test path is valid utf-8"))
-        .map(|_| ())
-        .with_context(|| format!("import {path} as {name}"))
+    vm.jit.write().compiler.import_file(name, zusts_path(path).to_str().expect("zust test path is valid utf-8")).map(|_| ()).with_context(|| format!("import {path} as {name}"))
 }
 
 fn run_test(vm: &vm::Vm, fn_name: &str, tys: &[Type]) -> Result<()> {
-    match vm.jit.write().unwrap().get_fn_ptr(fn_name, tys) {
+    match vm.jit.write().get_fn_ptr(fn_name, tys) {
         Ok((ptr, _ret)) => {
             let test_fn: extern "C" fn() -> *mut Dynamic = unsafe { std::mem::transmute(ptr) };
             let result = unsafe { Box::from_raw(test_fn()) };
@@ -109,7 +103,7 @@ fn run_test(vm: &vm::Vm, fn_name: &str, tys: &[Type]) -> Result<()> {
 }
 
 fn run_bool_test(vm: &vm::Vm, fn_name: &str) -> Result<()> {
-    let (ptr, ret) = vm.jit.write().unwrap().get_fn_ptr(fn_name, &[])?;
+    let (ptr, ret) = vm.jit.write().get_fn_ptr(fn_name, &[])?;
     anyhow::ensure!(ret == Type::Bool, "{fn_name} should return bool, got {:?}", ret);
     let test_fn: extern "C" fn() -> bool = unsafe { std::mem::transmute(ptr) };
     let result = test_fn();

@@ -8,9 +8,9 @@ fn main() -> Result<()> {
 
     println!("=== Bug 1: 递归函数类型推断错误 (已修复) ===\n");
 
-    vm.jit.write().unwrap().compiler.import_file("rec_demo", dir.join("zs/rec_bug_demo.zs").to_str().unwrap())?;
+    vm.jit.write().compiler.import_file("rec_demo", dir.join("zs/rec_bug_demo.zs").to_str().unwrap())?;
 
-    let (ptr, ret) = vm.jit.write().unwrap().get_fn_ptr("rec_demo::bench", &[Type::I64])?;
+    let (ptr, ret) = vm.jit.write().get_fn_ptr("rec_demo::bench", &[Type::I64])?;
     println!("编译器推断的返回类型: {:?}", ret);
     println!("期望返回类型: I64\n");
 
@@ -25,9 +25,9 @@ fn main() -> Result<()> {
 
     println!("=== Bug 2: 动态列表 JIT 正确性 (已修复) ===\n");
 
-    vm.jit.write().unwrap().compiler.import_file("dynlist_demo", dir.join("zs/dynlist_bug_demo.zs").to_str().unwrap())?;
+    vm.jit.write().compiler.import_file("dynlist_demo", dir.join("zs/dynlist_bug_demo.zs").to_str().unwrap())?;
 
-    let (ptr, _ret) = vm.jit.write().unwrap().get_fn_ptr("dynlist_demo::bench", &[Type::I64])?;
+    let (ptr, _ret) = vm.jit.write().get_fn_ptr("dynlist_demo::bench", &[Type::I64])?;
     let f: extern "C" fn(i64) -> i64 = unsafe { std::mem::transmute(ptr) };
 
     let n = 100000i64;

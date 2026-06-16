@@ -14,16 +14,22 @@ mod rt;
 use cranelift::prelude::types;
 use dynamic::{Dynamic, Type};
 pub use rt::JITRunTime;
+#[cfg(feature = "db")]
 mod db_module;
 mod gpu_layout;
+#[cfg(feature = "gpu")]
 mod gpu_module;
+#[cfg(feature = "http")]
 mod http_module;
+#[cfg(feature = "llm")]
 mod llm_module;
+#[cfg(feature = "llm")]
 mod oss_module;
 mod root_module;
 pub use gpu_layout::{GpuFieldLayout, GpuStructLayout};
+pub use parking_lot::RwLock;
 
-use std::sync::{OnceLock, RwLock, Weak};
+use std::sync::{OnceLock, Weak};
 static PTR_TYPE: OnceLock<types::Type> = OnceLock::new();
 pub fn ptr_type() -> types::Type {
     PTR_TYPE.get().cloned().unwrap()
@@ -93,20 +99,21 @@ fn add_native_module_fns(jit: &mut JITRunTime, module: &str, fns: &[(&str, &[Typ
 
 impl JITRunTime {
     fn add_memory_runtime(&mut self) -> Result<()> {
-        self.native_symbols.write().unwrap().insert("__vm_scope_enter".to_string(), memory::scope_enter as *const () as usize);
-        self.native_symbols.write().unwrap().insert("__vm_scope_exit_void".to_string(), memory::scope_exit_void as *const () as usize);
-        self.native_symbols.write().unwrap().insert("__vm_scope_exit_dynamic".to_string(), memory::scope_exit_dynamic as *const () as usize);
-        self.native_symbols.write().unwrap().insert("__vm_scope_exit_bytes".to_string(), memory::scope_exit_bytes as *const () as usize);
-        self.native_symbols.write().unwrap().insert("__vm_struct_alloc".to_string(), native::struct_alloc as *const () as usize);
-        self.native_symbols.write().unwrap().insert("__vm_repeat_fill".to_string(), native::repeat_fill as *const () as usize);
-        self.native_symbols.write().unwrap().insert("__vm_strcat".to_string(), native::strcat as *const () as usize);
-        self.native_symbols.write().unwrap().insert("__vm_strcat_i64".to_string(), native::strcat_i64 as *const () as usize);
-        self.native_symbols.write().unwrap().insert("__vm_strcat_assign".to_string(), native::strcat_assign as *const () as usize);
-        self.native_symbols.write().unwrap().insert("__vm_callback_new".to_string(), native::callback_new as *const () as usize);
-        self.native_symbols.write().unwrap().insert("__vm_spawn_ptr".to_string(), native::spawn_ptr as *const () as usize);
-        self.native_symbols.write().unwrap().insert("__vm_struct_from_ptr".to_string(), native::struct_from_ptr as *const () as usize);
-        self.native_symbols.write().unwrap().insert("__vm_array_from_ptr".to_string(), native::array_from_ptr as *const () as usize);
-        self.native_symbols.write().unwrap().insert("__vm_array_to_ptr".to_string(), native::array_to_ptr as *const () as usize);
+        self.native_symbols.write().insert("__vm_scope_enter".to_string(), memory::scope_enter as *const () as usize);
+        self.native_symbols.write().insert("__vm_scope_exit_void".to_string(), memory::scope_exit_void as *const () as usize);
+        self.native_symbols.write().insert("__vm_scope_exit_dynamic".to_string(), memory::scope_exit_dynamic as *const () as usize);
+        self.native_symbols.write().insert("__vm_scope_exit_bytes".to_string(), memory::scope_exit_bytes as *const () as usize);
+        self.native_symbols.write().insert("__vm_struct_alloc".to_string(), native::struct_alloc as *const () as usize);
+        self.native_symbols.write().insert("__vm_repeat_fill".to_string(), native::repeat_fill as *const () as usize);
+        self.native_symbols.write().insert("__vm_strcat".to_string(), native::strcat as *const () as usize);
+        self.native_symbols.write().insert("__vm_strcat_i64".to_string(), native::strcat_i64 as *const () as usize);
+        self.native_symbols.write().insert("__vm_strcat_assign".to_string(), native::strcat_assign as *const () as usize);
+        self.native_symbols.write().insert("__vm_callback_new".to_string(), native::callback_new as *const () as usize);
+        self.native_symbols.write().insert("__vm_spawn_ptr".to_string(), native::spawn_ptr as *const () as usize);
+        self.native_symbols.write().insert("__vm_struct_from_ptr".to_string(), native::struct_from_ptr as *const () as usize);
+        self.native_symbols.write().insert("__vm_array_from_ptr".to_string(), native::array_from_ptr as *const () as usize);
+        self.native_symbols.write().insert("__vm_array_to_ptr".to_string(), native::array_to_ptr as *const () as usize);
+        self.native_symbols.write().insert("__vm_arith_fault".to_string(), memory::arith_fault as *const () as usize);
 
         let void_sig = self.get_sig(&[], Type::Void)?;
         self.scope_enter_fn = Some(self.module.declare_function("__vm_scope_enter", cranelift_module::Linkage::Import, &void_sig)?);
@@ -115,7 +122,7 @@ impl JITRunTime {
         let dynamic_sig = self.get_sig(&[Type::Any], Type::Any)?;
         self.scope_exit_dynamic_fn = Some(self.module.declare_function("__vm_scope_exit_dynamic", cranelift_module::Linkage::Import, &dynamic_sig)?);
 
-        let bytes_sig = self.get_sig(&[Type::Any, Type::I64], Type::Any)?;
+        let bytes_sig = self.get_sig(&[Type::Any, Type::I64, Type::I64], Type::Any)?;
         self.scope_exit_bytes_fn = Some(self.module.declare_function("__vm_scope_exit_bytes", cranelift_module::Linkage::Import, &bytes_sig)?);
 
         let struct_alloc_sig = self.get_sig(&[Type::I64], Type::Any)?;
@@ -144,6 +151,8 @@ impl JITRunTime {
         self.array_from_ptr_fn = Some(self.module.declare_function("__vm_array_from_ptr", cranelift_module::Linkage::Import, &struct_from_ptr_sig)?);
         let array_to_ptr_sig = self.get_sig(&[Type::Any, Type::Any, Type::I64], Type::Void)?;
         self.array_to_ptr_fn = Some(self.module.declare_function("__vm_array_to_ptr", cranelift_module::Linkage::Import, &array_to_ptr_sig)?);
+
+        self.arith_fault_fn = Some(self.module.declare_function("__vm_arith_fault", cranelift_module::Linkage::Import, &void_sig)?);
         Ok(())
     }
 
@@ -219,6 +228,9 @@ impl JITRunTime {
     }
 
     pub fn add_vec(&mut self) -> Result<()> {
+        if self.compiler.symbols.get_id("Vec::get_idx").is_ok() {
+            return Ok(());
+        }
         self.add_empty_type("Vec")?;
         let vec_def = Type::Symbol { id: self.get_id("Vec")?, params: Vec::new() };
         self.add_inline("Vec::swap", vec![vec_def.clone(), Type::I64, Type::I64], Type::Void, |ctx: Option<&mut BuildContext>, args: Vec<Value>| {
@@ -249,30 +261,46 @@ impl JITRunTime {
         Ok(())
     }
 
+    #[cfg(feature = "llm")]
     pub fn add_llm(&mut self) -> Result<()> {
-        add_native_module_fns(self, "llm", &llm_module::LLM_NATIVE)
+        if self.compiler.symbols.get_id("llm::complete").is_ok() {
+            return Ok(());
+        }
+        add_native_module_fns(self, "llm", &llm_module::LLM_NATIVE)?;
+        add_native_module_fns(self, "oss", &oss_module::OSS_NATIVE)
     }
 
     pub fn add_root(&mut self) -> Result<()> {
+        if self.compiler.symbols.get_id("root::get").is_ok() {
+            return Ok(());
+        }
         add_native_module_fns(self, "root", &root_module::ROOT_NATIVE)?;
         self.add_native_module_context_ptr("root", "add_fn", &[Type::Any, Type::Any], Type::Bool, root_module::root_add_fn_with_vm as *const u8)?;
         Ok(())
     }
 
+    #[cfg(feature = "http")]
     pub fn add_http(&mut self) -> Result<()> {
+        if self.compiler.symbols.get_id("http::request").is_ok() {
+            return Ok(());
+        }
         add_native_module_fns(self, "http", &http_module::HTTP_NATIVE)?;
         http_module::add_root_handlers()
     }
 
-    pub fn add_oss(&mut self) -> Result<()> {
-        add_native_module_fns(self, "oss", &oss_module::OSS_NATIVE)
-    }
-
+    #[cfg(feature = "db")]
     pub fn add_db(&mut self) -> Result<()> {
+        if self.compiler.symbols.get_id("db::select").is_ok() {
+            return Ok(());
+        }
         add_native_module_fns(self, "db", &db_module::DB_NATIVE)
     }
 
+    #[cfg(feature = "gpu")]
     pub fn add_gpu(&mut self) -> Result<()> {
+        if self.compiler.symbols.get_id("gpu::spirv_check").is_ok() {
+            return Ok(());
+        }
         add_native_module_fns(self, "gpu", &gpu_module::GPU_NATIVE)
     }
 
@@ -280,11 +308,14 @@ impl JITRunTime {
         self.add_std()?;
         self.add_any()?;
         self.add_vec()?;
-        self.add_llm()?;
         self.add_root()?;
+        #[cfg(feature = "llm")]
+        self.add_llm()?;
+        #[cfg(feature = "http")]
         self.add_http()?;
-        self.add_oss()?;
+        #[cfg(feature = "db")]
         self.add_db()?;
+        #[cfg(feature = "gpu")]
         self.add_gpu()?;
         Ok(())
     }
@@ -292,7 +323,7 @@ impl JITRunTime {
 
 #[derive(Clone)]
 pub struct Vm {
-    pub jit: Arc<RwLock<JITRunTime>>,
+    pub jit: Arc<parking_lot::RwLock<JITRunTime>>,
 }
 
 impl Vm {
@@ -300,31 +331,35 @@ impl Vm {
         dynamic::set_dynamic_return_handler(memory::take_dynamic_return);
         let jit = Arc::new(RwLock::new(JITRunTime::new(|_| {})));
         {
-            let mut guard = jit.write().unwrap();
+            let mut guard = jit.write();
             guard.set_owner(Arc::downgrade(&jit));
             guard.add_memory_runtime().expect("register VM memory runtime");
             guard.add_std().expect("register VM std runtime");
             guard.add_any().expect("register VM Any runtime");
+            guard.add_vec().expect("register VM Vec runtime");
+            guard.add_root().expect("register VM root runtime");
         }
         Self { jit }
     }
 
     pub fn with_all() -> Result<Self> {
         let vm = Self::new();
-        vm.jit.write().unwrap().add_all()?;
+        vm.jit.write().add_all()?;
         Ok(vm)
     }
 
     pub fn import(&self, name: &str, path: &str) -> Result<()> {
-        if root::contains(path) {
-            let code = root::get(path).unwrap();
+        // 之前用 contains + get 两步会因其他线程并发 add/remove 出现 race;
+        // 改用 if let Some 一次性持有,失败返回明确的错误而不是 host panic。
+        if let Ok(code) = root::get(path) {
             if code.is_str() {
-                self.jit.write().unwrap().import_code(name, code.as_str().as_bytes().to_vec())
+                self.jit.write().import_code(name, code.as_str().as_bytes().to_vec())?;
             } else {
-                self.jit.write().unwrap().import_code(name, code.get_dynamic("code").ok_or(anyhow!("{:?} 没有 code 成员", code))?.as_str().as_bytes().to_vec())
+                self.jit.write().import_code(name, code.get_dynamic("code").ok_or_else(|| anyhow!("{:?} 没有 code 成员", code))?.as_str().as_bytes().to_vec())?;
             }
+            Ok(())
         } else {
-            self.jit.write().unwrap().compiler.import_file(name, path)?;
+            self.jit.write().compiler.import_file(name, path)?;
             Ok(())
         }
     }
@@ -341,7 +376,6 @@ mod tests {
     use super::{GpuStructLayout, Vm, ZustCallback};
     use dynamic::{CustomProperty, Dynamic, ToJson, Type};
     use std::collections::BTreeMap;
-    use std::sync::{Mutex, RwLock};
 
     /// Test-only wrapper for a compiled function pointer + return type.
     struct TestFn {
@@ -350,11 +384,15 @@ mod tests {
     }
 
     impl TestFn {
-        fn ptr(&self) -> *const u8 { self.ptr }
-        fn ret_ty(&self) -> &Type { &self.ret }
+        fn ptr(&self) -> *const u8 {
+            self.ptr
+        }
+        fn ret_ty(&self) -> &Type {
+            &self.ret
+        }
     }
 
-    /// Test-only convenience wrapping `vm.jit.write().unwrap()` calls.
+    /// Test-only convenience wrapping `vm.jit.write()` calls.
     trait VmTestExt {
         fn import_code(&self, name: &str, code: Vec<u8>) -> anyhow::Result<()>;
         fn get_fn(&self, name: &str, arg_tys: &[Type]) -> anyhow::Result<TestFn>;
@@ -373,46 +411,46 @@ mod tests {
 
     impl VmTestExt for Vm {
         fn import_code(&self, name: &str, code: Vec<u8>) -> anyhow::Result<()> {
-            self.jit.write().unwrap().import_code(name, code)
+            self.jit.write().import_code(name, code)
         }
         fn get_fn(&self, name: &str, arg_tys: &[Type]) -> anyhow::Result<TestFn> {
-            let (ptr, ret) = self.jit.write().unwrap().get_fn_ptr(name, arg_tys)?;
+            let (ptr, ret) = self.jit.write().get_fn_ptr(name, arg_tys)?;
             Ok(TestFn { ptr, ret })
         }
         fn get_fn_with_params(&self, name: &str, arg_tys: &[Type], generic_args: &[Type]) -> anyhow::Result<TestFn> {
-            let (ptr, ret) = self.jit.write().unwrap().get_fn_ptr_with_params(name, arg_tys, generic_args)?;
+            let (ptr, ret) = self.jit.write().get_fn_ptr_with_params(name, arg_tys, generic_args)?;
             Ok(TestFn { ptr, ret })
         }
         fn get_fn_ptr(&self, name: &str, arg_tys: &[Type]) -> anyhow::Result<(*const u8, Type)> {
-            self.jit.write().unwrap().get_fn_ptr(name, arg_tys)
+            self.jit.write().get_fn_ptr(name, arg_tys)
         }
         fn infer(&self, name: &str, arg_tys: &[Type]) -> anyhow::Result<Type> {
-            self.jit.write().unwrap().get_type(name, arg_tys)
+            self.jit.write().get_type(name, arg_tys)
         }
         fn add_native_module_ptr(&self, module: &str, name: &str, arg_tys: &[Type], ret_ty: Type, ptr: *const u8) -> anyhow::Result<u32> {
-            self.jit.write().unwrap().add_native_module_ptr(module, name, arg_tys, ret_ty, ptr)
+            self.jit.write().add_native_module_ptr(module, name, arg_tys, ret_ty, ptr)
         }
         fn add_native_method_ptr(&self, def: &str, method: &str, arg_tys: &[Type], ret_ty: Type, ptr: *const u8) -> anyhow::Result<u32> {
-            self.jit.write().unwrap().add_native_method_ptr(def, method, arg_tys, ret_ty, ptr)
+            self.jit.write().add_native_method_ptr(def, method, arg_tys, ret_ty, ptr)
         }
         fn add_empty_type(&self, name: &str) -> anyhow::Result<u32> {
-            self.jit.write().unwrap().add_empty_type(name)
+            self.jit.write().add_empty_type(name)
         }
         fn add_std(&self) -> anyhow::Result<()> {
-            self.jit.write().unwrap().add_std()
+            self.jit.write().add_std()
         }
         fn add_any(&self) -> anyhow::Result<()> {
-            self.jit.write().unwrap().add_any()
+            self.jit.write().add_any()
         }
         fn get_symbol(&self, name: &str, params: Vec<Type>) -> anyhow::Result<Type> {
-            Ok(Type::Symbol { id: self.jit.write().unwrap().get_id(name)?, params })
+            Ok(Type::Symbol { id: self.jit.write().get_id(name)?, params })
         }
         fn gpu_struct_layout(&self, name: &str, params: &[Type]) -> anyhow::Result<GpuStructLayout> {
-            let jit = self.jit.write().unwrap();
+            let jit = self.jit.write();
             GpuStructLayout::from_symbol_table(&jit.compiler.symbols, name, params)
         }
         fn load(&self, code: Vec<u8>, arg_name: smol_str::SmolStr) -> anyhow::Result<(i64, Type)> {
-            self.jit.write().unwrap().load(code, arg_name)
+            self.jit.write().load(code, arg_name)
         }
     }
 
@@ -601,6 +639,64 @@ mod tests {
     }
 
     #[test]
+    fn returned_nested_struct_dynamic_fields_are_read_inline() -> anyhow::Result<()> {
+        let vm = Vm::with_all()?;
+        vm.import_code(
+            "vm_returned_nested_struct_dynamic",
+            br#"
+            pub struct Inner {
+                value: i64,
+            }
+
+            pub struct Outer {
+                inner: Inner,
+                tag: i64,
+            }
+
+            pub fn make() {
+                Outer{inner: Inner{value: 17}, tag: 3}
+            }
+            "#
+            .to_vec(),
+        )?;
+
+        let compiled = vm.get_fn("vm_returned_nested_struct_dynamic::make", &[])?;
+        let make: extern "C" fn() -> *const u8 = unsafe { std::mem::transmute(compiled.ptr()) };
+        let ty = compiled.ret_ty().clone();
+        let value = Dynamic::struct_view(make() as usize, ty);
+        let inner = value.get_dynamic("inner").expect("inner field");
+        assert_eq!(inner.get_dynamic("value").and_then(|value| value.as_int()), Some(17));
+        assert_eq!(value.get_dynamic("tag").and_then(|value| value.as_int()), Some(3));
+        Ok(())
+    }
+
+    #[test]
+    fn returned_struct_with_dynamic_field_survives_scope_exit() -> anyhow::Result<()> {
+        let vm = Vm::with_all()?;
+        vm.import_code(
+            "vm_returned_struct_dynamic_field",
+            br#"
+            pub struct Bag {
+                name: string,
+                value: string,
+            }
+
+            pub fn make() {
+                Bag{name: "alpha", value: "omega"}
+            }
+            "#
+            .to_vec(),
+        )?;
+
+        let compiled = vm.get_fn("vm_returned_struct_dynamic_field::make", &[])?;
+        let make: extern "C" fn() -> *const u8 = unsafe { std::mem::transmute(compiled.ptr()) };
+        let value = Dynamic::struct_view(make() as usize, compiled.ret_ty().clone());
+        assert_eq!(value.get_dynamic("name").map(|value| value.as_str().to_string()), Some("alpha".to_string()));
+        assert_eq!(value.get_dynamic("value").map(|value| value.as_str().to_string()), Some("omega".to_string()));
+        Ok(())
+    }
+
+    #[test]
     fn any_push_does_not_consume_reused_value() -> anyhow::Result<()> {
         let vm = Vm::with_all()?;
         vm.import_code(
@@ -627,6 +723,120 @@ mod tests {
         assert_eq!(result.get_dynamic("ok").and_then(|value| value.as_bool()), Some(true));
         assert_eq!(result.get_dynamic("user_id").map(|value| value.as_str().to_string()), Some("acct_role_2".to_string()));
         assert_eq!(result.get_dynamic("first").map(|value| value.as_str().to_string()), Some("acct_role_2".to_string()));
+        Ok(())
+    }
+
+    #[test]
+    fn negate_narrow_integers() -> anyhow::Result<()> {
+        let vm = Vm::with_all()?;
+        vm.import_code(
+            "vm_neg_narrow",
+            br#"
+            pub fn neg_i8(a: i8) { -a }
+            pub fn neg_i16(a: i16) { -a }
+            "#
+            .to_vec(),
+        )?;
+
+        let neg_i8 = vm.get_fn("vm_neg_narrow::neg_i8", &[Type::I8])?;
+        assert_eq!(neg_i8.ret_ty(), &Type::I8);
+        let neg_i8: extern "C" fn(i8) -> i8 = unsafe { std::mem::transmute(neg_i8.ptr()) };
+        assert_eq!(neg_i8(5), -5);
+        assert_eq!(neg_i8(-7), 7);
+
+        let neg_i16 = vm.get_fn("vm_neg_narrow::neg_i16", &[Type::I16])?;
+        assert_eq!(neg_i16.ret_ty(), &Type::I16);
+        let neg_i16: extern "C" fn(i16) -> i16 = unsafe { std::mem::transmute(neg_i16.ptr()) };
+        assert_eq!(neg_i16(5), -5);
+        assert_eq!(neg_i16(-300), 300);
+        Ok(())
+    }
+
+    #[test]
+    fn integer_divide_by_zero_does_not_crash() -> anyhow::Result<()> {
+        let vm = Vm::with_all()?;
+        vm.import_code(
+            "vm_div_by_zero",
+            br#"
+            pub fn divz(a: i64, b: i64) { a / b }
+            pub fn modz(a: i64, b: i64) { a % b }
+            pub fn overflow(a: i64, b: i64) { a / b }
+            "#
+            .to_vec(),
+        )?;
+
+        let divz = vm.get_fn("vm_div_by_zero::divz", &[Type::I64, Type::I64])?;
+        let modz = vm.get_fn("vm_div_by_zero::modz", &[Type::I64, Type::I64])?;
+        let overflow = vm.get_fn("vm_div_by_zero::overflow", &[Type::I64, Type::I64])?;
+        let divz: extern "C" fn(i64, i64) -> i64 = unsafe { std::mem::transmute(divz.ptr()) };
+        let modz: extern "C" fn(i64, i64) -> i64 = unsafe { std::mem::transmute(modz.ptr()) };
+        let overflow: extern "C" fn(i64, i64) -> i64 = unsafe { std::mem::transmute(overflow.ptr()) };
+
+        // 正常路径不受守卫影响
+        let _ = dynamic::take_fault();
+        assert_eq!(divz(7, 2), 3);
+        assert_eq!(modz(7, 2), 1);
+        assert!(dynamic::take_fault().is_none());
+
+        // 除零:返回 0 且置 fault,而不是 trap 杀进程
+        assert_eq!(divz(7, 0), 0);
+        assert!(dynamic::take_fault().is_some());
+        assert_eq!(modz(7, 0), 0);
+        assert!(dynamic::take_fault().is_some());
+
+        // INT_MIN / -1 溢出同样被守卫
+        assert_eq!(overflow(i64::MIN, -1), 0);
+        assert!(dynamic::take_fault().is_some());
+        Ok(())
+    }
+
+    #[test]
+    fn constant_divide_by_zero_does_not_crash() -> anyhow::Result<()> {
+        let vm = Vm::with_all()?;
+        vm.import_code(
+            "vm_const_div_zero",
+            br#"
+            pub fn divz(a: i64) { a / 0 }
+            pub fn modz(a: i64) { a % 0 }
+            pub fn divc(a: i64) { a / 7 }
+            "#
+            .to_vec(),
+        )?;
+        let divz: extern "C" fn(i64) -> i64 = unsafe { std::mem::transmute(vm.get_fn("vm_const_div_zero::divz", &[Type::I64])?.ptr()) };
+        let modz: extern "C" fn(i64) -> i64 = unsafe { std::mem::transmute(vm.get_fn("vm_const_div_zero::modz", &[Type::I64])?.ptr()) };
+        let divc: extern "C" fn(i64) -> i64 = unsafe { std::mem::transmute(vm.get_fn("vm_const_div_zero::divc", &[Type::I64])?.ptr()) };
+
+        let _ = dynamic::take_fault();
+        // 常量除零:编译期判定 → 返回 0 + 置 fault,不 trap
+        assert_eq!(divz(42), 0);
+        assert!(dynamic::take_fault().is_some());
+        assert_eq!(modz(42), 0);
+        assert!(dynamic::take_fault().is_some());
+        // 非零常量除数:正常计算,不置 fault(走无守卫快路径)
+        assert_eq!(divc(42), 6);
+        assert!(dynamic::take_fault().is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn dynamic_divide_by_zero_returns_null() -> anyhow::Result<()> {
+        let vm = Vm::with_all()?;
+        vm.import_code(
+            "vm_any_div_by_zero",
+            br#"
+            pub fn divz(a, b) { a / b }
+            "#
+            .to_vec(),
+        )?;
+
+        let divz = vm.get_fn("vm_any_div_by_zero::divz", &[Type::Any, Type::Any])?;
+        let divz: extern "C" fn(*const Dynamic, *const Dynamic) -> *const Dynamic = unsafe { std::mem::transmute(divz.ptr()) };
+        let a = Dynamic::from(7i64);
+        let zero = Dynamic::from(0i64);
+        let _ = dynamic::take_fault();
+        let result = unsafe { &*divz(&a, &zero) };
+        assert!(result.is_null());
+        assert!(dynamic::take_fault().is_some());
         Ok(())
     }
 
@@ -872,6 +1082,57 @@ mod tests {
         let non_map_keys: extern "C" fn(*const Dynamic) -> bool = unsafe { std::mem::transmute(compiled.ptr()) };
         let value = Dynamic::from("alpha");
         assert!(non_map_keys(&value));
+        Ok(())
+    }
+
+    #[test]
+    fn any_logic_comparisons_use_bool_abi() -> anyhow::Result<()> {
+        let vm = Vm::with_all()?;
+        vm.import_code(
+            "vm_any_logic_abi",
+            br#"
+            pub fn ne_empty(value) {
+                value != ""
+            }
+
+            pub fn eq_empty(value) {
+                value == ""
+            }
+
+            pub fn less_than_ten(value) {
+                value < 10
+            }
+
+            pub fn contains_key(value) {
+                value.contains("alpha") == true
+            }
+            "#
+            .to_vec(),
+        )?;
+
+        let compiled = vm.get_fn("vm_any_logic_abi::ne_empty", &[Type::Any])?;
+        assert_eq!(compiled.ret_ty(), &Type::Bool);
+        let ne_empty: extern "C" fn(*const Dynamic) -> bool = unsafe { std::mem::transmute(compiled.ptr()) };
+        assert!(ne_empty(&Dynamic::from("x")));
+        assert!(!ne_empty(&Dynamic::from("")));
+
+        let compiled = vm.get_fn("vm_any_logic_abi::eq_empty", &[Type::Any])?;
+        assert_eq!(compiled.ret_ty(), &Type::Bool);
+        let eq_empty: extern "C" fn(*const Dynamic) -> bool = unsafe { std::mem::transmute(compiled.ptr()) };
+        assert!(eq_empty(&Dynamic::from("")));
+        assert!(!eq_empty(&Dynamic::from("x")));
+
+        let compiled = vm.get_fn("vm_any_logic_abi::less_than_ten", &[Type::Any])?;
+        assert_eq!(compiled.ret_ty(), &Type::Bool);
+        let less_than_ten: extern "C" fn(*const Dynamic) -> bool = unsafe { std::mem::transmute(compiled.ptr()) };
+        assert!(less_than_ten(&Dynamic::from(4i64)));
+        assert!(!less_than_ten(&Dynamic::from(14i64)));
+
+        let compiled = vm.get_fn("vm_any_logic_abi::contains_key", &[Type::Any])?;
+        assert_eq!(compiled.ret_ty(), &Type::Bool);
+        let contains_key: extern "C" fn(*const Dynamic) -> bool = unsafe { std::mem::transmute(compiled.ptr()) };
+        assert!(contains_key(&dynamic::map!("alpha"=> 1i64)));
+        assert!(!contains_key(&dynamic::map!("beta"=> 1i64)));
         Ok(())
     }
 
@@ -1324,7 +1585,7 @@ mod tests {
 
         assert_eq!(vm.infer("root::contains", &[Type::Any])?, Type::Bool);
         let compiled = vm.get_fn("vm_root_contains_condition::exists", &[Type::Any])?;
-        assert_eq!(compiled.ret_ty(), &Type::I32);
+        assert_eq!(compiled.ret_ty(), &Type::I64);
         Ok(())
     }
 
@@ -1388,7 +1649,7 @@ mod tests {
         )?;
 
         let compiled = vm.get_fn("vm_unary_not_any_loop_var::count_missing", &[Type::Any])?;
-        assert_eq!(compiled.ret_ty(), &Type::I32);
+        assert_eq!(compiled.ret_ty(), &Type::I64);
         Ok(())
     }
 
@@ -1630,7 +1891,7 @@ mod tests {
 
     #[test]
     fn native_can_save_and_later_call_closure_callback() -> anyhow::Result<()> {
-        static SAVED_CALLBACK: Mutex<Option<ZustCallback>> = Mutex::new(None);
+        static SAVED_CALLBACK: parking_lot::Mutex<Option<ZustCallback>> = parking_lot::Mutex::new(None);
 
         extern "C" fn save_callback(callback: *const Dynamic) -> bool {
             if callback.is_null() {
@@ -1639,13 +1900,13 @@ mod tests {
             let Some(callback) = (unsafe { &*callback }).as_custom::<ZustCallback>().cloned() else {
                 return false;
             };
-            *SAVED_CALLBACK.lock().unwrap() = Some(callback);
+            *SAVED_CALLBACK.lock() = Some(callback);
             true
         }
 
         let path = "local/vm_callback/result";
         let _ = root::remove(path);
-        *SAVED_CALLBACK.lock().unwrap() = None;
+        *SAVED_CALLBACK.lock() = None;
 
         let vm = Vm::with_all()?;
         vm.add_native_module_ptr("callback_test", "save", &[Type::Any], Type::Bool, save_callback as *const u8)?;
@@ -1669,7 +1930,7 @@ mod tests {
         assert!(register());
         assert!(root::get(path).is_err());
 
-        let callback = SAVED_CALLBACK.lock().unwrap().clone().expect("callback should be saved");
+        let callback = SAVED_CALLBACK.lock().clone().expect("callback should be saved");
         let result = callback.call0()?;
         assert_eq!(result.as_bool(), Some(true));
         assert_eq!(root::get(path)?.as_int(), Some(42));
@@ -1677,8 +1938,8 @@ mod tests {
     }
 
     #[test]
-    fn native_can_save_and_later_call_named_function_callback() -> anyhow::Result<()> {
-        static SAVED_CALLBACK: Mutex<Option<ZustCallback>> = Mutex::new(None);
+    fn closure_captures_share_state_between_callbacks() -> anyhow::Result<()> {
+        static SAVED_CALLBACKS: parking_lot::Mutex<Vec<ZustCallback>> = parking_lot::Mutex::new(Vec::new());
 
         extern "C" fn save_callback(callback: *const Dynamic) -> bool {
             if callback.is_null() {
@@ -1687,13 +1948,65 @@ mod tests {
             let Some(callback) = (unsafe { &*callback }).as_custom::<ZustCallback>().cloned() else {
                 return false;
             };
-            *SAVED_CALLBACK.lock().unwrap() = Some(callback);
+            SAVED_CALLBACKS.lock().push(callback);
+            true
+        }
+
+        SAVED_CALLBACKS.lock().clear();
+
+        let vm = Vm::with_all()?;
+        vm.add_native_module_ptr("capture_test", "save", &[Type::Any], Type::Bool, save_callback as *const u8)?;
+        vm.import_code(
+            "vm_shared_capture",
+            br#"
+            pub fn register() {
+                let state = {};
+                state.drag_kind = 0;
+                capture_test::save(|| {
+                    state.drag_kind = 2;
+                    true
+                });
+                capture_test::save(|| {
+                    state.drag_kind
+                })
+            }
+            "#
+            .to_vec(),
+        )?;
+
+        let register = vm.get_fn("vm_shared_capture::register", &[])?;
+        let register: extern "C" fn() -> bool = unsafe { std::mem::transmute(register.ptr()) };
+        assert!(register());
+
+        let (writer, reader) = {
+            let saved = SAVED_CALLBACKS.lock();
+            assert_eq!(saved.len(), 2);
+            (saved[0].clone(), saved[1].clone())
+        };
+        assert_eq!(reader.call0()?.as_int(), Some(0));
+        assert_eq!(writer.call0()?.as_bool(), Some(true));
+        assert_eq!(reader.call0()?.as_int(), Some(2));
+        Ok(())
+    }
+
+    #[test]
+    fn native_can_save_and_later_call_named_function_callback() -> anyhow::Result<()> {
+        static SAVED_CALLBACK: parking_lot::Mutex<Option<ZustCallback>> = parking_lot::Mutex::new(None);
+
+        extern "C" fn save_callback(callback: *const Dynamic) -> bool {
+            if callback.is_null() {
+                return false;
+            }
+            let Some(callback) = (unsafe { &*callback }).as_custom::<ZustCallback>().cloned() else {
+                return false;
+            };
+            *SAVED_CALLBACK.lock() = Some(callback);
             true
         }
 
         let path = "local/vm_named_callback/result";
         let _ = root::remove(path);
-        *SAVED_CALLBACK.lock().unwrap() = None;
+        *SAVED_CALLBACK.lock() = None;
 
         let vm = Vm::with_all()?;
         vm.add_native_module_ptr("callback_test", "save", &[Type::Any], Type::Bool, save_callback as *const u8)?;
@@ -1717,7 +2030,7 @@ mod tests {
         assert!(register());
         assert!(root::get(path).is_err());
 
-        let callback = SAVED_CALLBACK.lock().unwrap().clone().expect("callback should be saved");
+        let callback = SAVED_CALLBACK.lock().clone().expect("callback should be saved");
         assert_eq!(callback.call1(dynamic::map!("text"=> "done"))?.as_bool(), Some(true));
         assert_eq!(root::get(path)?.as_str(), "done");
         Ok(())
@@ -1725,8 +2038,8 @@ mod tests {
 
     #[test]
     fn native_callback_can_receive_later_dynamic_args() -> anyhow::Result<()> {
-        static SAVED_PATH_CALLBACK: Mutex<Option<ZustCallback>> = Mutex::new(None);
-        static SAVED_SUM_CALLBACK: Mutex<Option<ZustCallback>> = Mutex::new(None);
+        static SAVED_PATH_CALLBACK: parking_lot::Mutex<Option<ZustCallback>> = parking_lot::Mutex::new(None);
+        static SAVED_SUM_CALLBACK: parking_lot::Mutex<Option<ZustCallback>> = parking_lot::Mutex::new(None);
 
         extern "C" fn save_path_callback(callback: *const Dynamic) -> bool {
             if callback.is_null() {
@@ -1735,7 +2048,7 @@ mod tests {
             let Some(callback) = (unsafe { &*callback }).as_custom::<ZustCallback>().cloned() else {
                 return false;
             };
-            *SAVED_PATH_CALLBACK.lock().unwrap() = Some(callback);
+            *SAVED_PATH_CALLBACK.lock() = Some(callback);
             true
         }
 
@@ -1746,7 +2059,7 @@ mod tests {
             let Some(callback) = (unsafe { &*callback }).as_custom::<ZustCallback>().cloned() else {
                 return false;
             };
-            *SAVED_SUM_CALLBACK.lock().unwrap() = Some(callback);
+            *SAVED_SUM_CALLBACK.lock() = Some(callback);
             true
         }
 
@@ -1754,8 +2067,8 @@ mod tests {
         let sum_result = "local/vm_callback/sum8";
         let _ = root::remove(path_result);
         let _ = root::remove(sum_result);
-        *SAVED_PATH_CALLBACK.lock().unwrap() = None;
-        *SAVED_SUM_CALLBACK.lock().unwrap() = None;
+        *SAVED_PATH_CALLBACK.lock() = None;
+        *SAVED_SUM_CALLBACK.lock() = None;
 
         let vm = Vm::with_all()?;
         vm.add_native_module_ptr("callback_test", "save_path", &[Type::Any], Type::Bool, save_path_callback as *const u8)?;
@@ -1789,11 +2102,11 @@ mod tests {
         let register_sum: extern "C" fn() -> bool = unsafe { std::mem::transmute(register_sum.ptr()) };
         assert!(register_sum());
 
-        let path_callback = SAVED_PATH_CALLBACK.lock().unwrap().clone().expect("path callback should be saved");
+        let path_callback = SAVED_PATH_CALLBACK.lock().clone().expect("path callback should be saved");
         assert_eq!(path_callback.call1(Dynamic::from("picked.txt"))?.as_bool(), Some(true));
         assert_eq!(root::get(path_result)?.as_str(), "picked.txt");
 
-        let sum_callback = SAVED_SUM_CALLBACK.lock().unwrap().clone().expect("sum callback should be saved");
+        let sum_callback = SAVED_SUM_CALLBACK.lock().clone().expect("sum callback should be saved");
         let sum_args = (1i64..=8).map(Dynamic::from).collect();
         assert_eq!(sum_callback.call(sum_args)?.as_bool(), Some(true));
         assert_eq!(root::get(sum_result)?.as_int(), Some(36));
@@ -1802,7 +2115,7 @@ mod tests {
 
     #[test]
     fn callback_with_16_explicit_args_and_captures() -> anyhow::Result<()> {
-        static SAVED_SUM16: Mutex<Option<ZustCallback>> = Mutex::new(None);
+        static SAVED_SUM16: parking_lot::Mutex<Option<ZustCallback>> = parking_lot::Mutex::new(None);
 
         extern "C" fn save_sum16(callback: *const Dynamic) -> bool {
             if callback.is_null() {
@@ -1811,13 +2124,13 @@ mod tests {
             let Some(callback) = (unsafe { &*callback }).as_custom::<ZustCallback>().cloned() else {
                 return false;
             };
-            *SAVED_SUM16.lock().unwrap() = Some(callback);
+            *SAVED_SUM16.lock() = Some(callback);
             true
         }
 
         let sum16_path = "local/vm_callback/sum16";
         let _ = root::remove(sum16_path);
-        *SAVED_SUM16.lock().unwrap() = None;
+        *SAVED_SUM16.lock() = None;
 
         let vm = Vm::with_all()?;
         vm.add_native_module_ptr("callback_test", "save_sum16", &[Type::Any], Type::Bool, save_sum16 as *const u8)?;
@@ -1840,7 +2153,7 @@ mod tests {
         let register: extern "C" fn() -> bool = unsafe { std::mem::transmute(register.ptr()) };
         assert!(register());
 
-        let callback = SAVED_SUM16.lock().unwrap().clone().expect("sum16 callback saved");
+        let callback = SAVED_SUM16.lock().clone().expect("sum16 callback saved");
         let args: Vec<Dynamic> = (1i64..=16).map(Dynamic::from).collect();
         assert_eq!(callback.call(args)?.as_bool(), Some(true));
         assert_eq!(root::get(sum16_path)?.as_str(), "sum=136");
@@ -1959,6 +2272,28 @@ mod tests {
         )?;
 
         assert!(vm.get_fn_ptr("vm_registered_string_concat::send_panel", &[Type::Any]).is_ok());
+        Ok(())
+    }
+
+    #[test]
+    fn dynamic_method_error_reports_source_location() -> anyhow::Result<()> {
+        let vm = Vm::with_all()?;
+        vm.import_code(
+            "vm_bad_dynamic_method",
+            br#"
+            pub fn main(value) {
+                let out = "";
+                out = out + value.fetch("name");
+            }
+            "#
+            .to_vec(),
+        )?;
+
+        let err = vm.get_fn_ptr("vm_bad_dynamic_method::main", &[Type::Any]).expect_err("bad dynamic method should fail to compile");
+        let msg = format!("{err:#}");
+        assert!(msg.contains("vm_bad_dynamic_method:4:"), "{msg}");
+        assert!(msg.contains("`Any.fetch` 不是成员函数"), "{msg}");
+        assert!(msg.contains(r#"out = out + value.fetch("name");"#), "{msg}");
         Ok(())
     }
 
@@ -2203,6 +2538,39 @@ mod tests {
         let result = unsafe { &*read_action(&action_map, &panel_id, &action_id) };
 
         assert_eq!(result.get_dynamic("id").map(|value| value.as_str().to_string()), Some("open".to_string()));
+        Ok(())
+    }
+
+    #[test]
+    fn map_get_alias_matches_get_key() -> anyhow::Result<()> {
+        let vm = Vm::with_all()?;
+        vm.import_code(
+            "vm_map_get_alias",
+            br#"
+            pub fn read_name(data) {
+                data.get("name")
+            }
+
+            pub fn read_missing(data) {
+                data.get("missing")
+            }
+            "#
+            .to_vec(),
+        )?;
+
+        let data = dynamic::map!("name"=> "zust");
+
+        let compiled = vm.get_fn("vm_map_get_alias::read_name", &[Type::Any])?;
+        assert_eq!(compiled.ret_ty(), &Type::Any);
+        let read_name: extern "C" fn(*const Dynamic) -> *const Dynamic = unsafe { std::mem::transmute(compiled.ptr()) };
+        let result = unsafe { &*read_name(&data) };
+        assert_eq!(result.as_str(), "zust");
+
+        let compiled = vm.get_fn("vm_map_get_alias::read_missing", &[Type::Any])?;
+        assert_eq!(compiled.ret_ty(), &Type::Any);
+        let read_missing: extern "C" fn(*const Dynamic) -> *const Dynamic = unsafe { std::mem::transmute(compiled.ptr()) };
+        let result = unsafe { &*read_missing(&data) };
+        assert!(result.is_null());
         Ok(())
     }
 
@@ -2821,6 +3189,7 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(feature = "http")]
     #[test]
     fn http_serve_accepts_inline_config_map() -> anyhow::Result<()> {
         let vm = Vm::with_all()?;
@@ -2840,6 +3209,7 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(feature = "http")]
     #[test]
     fn http_serve_accepts_variable_and_quoted_static_key() -> anyhow::Result<()> {
         let vm = Vm::with_all()?;
@@ -2867,6 +3237,7 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(all(feature = "http", feature = "llm"))]
     #[test]
     fn oss_helpers_accept_explicit_config() -> anyhow::Result<()> {
         let vm = Vm::with_all()?;
@@ -2894,6 +3265,7 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(feature = "http")]
     #[test]
     fn load_script_accepts_http_serve_inline_config() -> anyhow::Result<()> {
         let vm = Vm::with_all()?;
@@ -3044,16 +3416,16 @@ mod tests {
 
     #[derive(Debug, Default)]
     struct PropertyForwardingObject {
-        values: RwLock<BTreeMap<String, Dynamic>>,
+        values: parking_lot::RwLock<BTreeMap<String, Dynamic>>,
     }
 
     impl CustomProperty for PropertyForwardingObject {
         fn get_key(&self, key: &str) -> Option<Dynamic> {
-            self.values.read().unwrap().get(key).cloned()
+            self.values.read().get(key).cloned()
         }
 
         fn set_key(&self, key: &str, value: Dynamic) -> bool {
-            self.values.write().unwrap().insert(key.to_string(), value);
+            self.values.write().insert(key.to_string(), value);
             true
         }
     }
@@ -3221,6 +3593,31 @@ mod tests {
     }
 
     #[test]
+    fn void_and_null_are_false_in_boolean_context() -> anyhow::Result<()> {
+        let vm = Vm::with_all()?;
+        vm.import_code(
+            "vm_void_bool_context",
+            br#"
+            pub fn run() {
+                let items = [1i32, 2i32];
+                let ok1 = !(items.push(3i32) && false);
+                let ok2 = !(true && items.push(4i32));
+                let ok3 = null || true;
+                let ok4 = null || items.len() == 4;
+                ok1 && ok2 && ok3 && ok4
+            }
+            "#
+            .to_vec(),
+        )?;
+
+        let compiled = vm.get_fn("vm_void_bool_context::run", &[])?;
+        assert_eq!(compiled.ret_ty(), &Type::Bool);
+        let run: extern "C" fn() -> bool = unsafe { std::mem::transmute(compiled.ptr()) };
+        assert!(run());
+        Ok(())
+    }
+
+    #[test]
     fn empty_for_loop_range_has_zero_iterations() -> anyhow::Result<()> {
         let vm = Vm::with_all()?;
         vm.import_code(
@@ -3245,15 +3642,47 @@ mod tests {
             .to_vec(),
         )?;
 
+        // 无后缀 range 字面量(0..0 / 5..=5)默认 I64,累加器随复合赋值提升为 I64
         let compiled = vm.get_fn("vm_empty_for_range::empty_exclusive", &[])?;
-        assert_eq!(compiled.ret_ty(), &Type::I32);
-        let empty_exclusive: extern "C" fn() -> i32 = unsafe { std::mem::transmute(compiled.ptr()) };
+        assert_eq!(compiled.ret_ty(), &Type::I64);
+        let empty_exclusive: extern "C" fn() -> i64 = unsafe { std::mem::transmute(compiled.ptr()) };
         assert_eq!(empty_exclusive(), 0);
 
         let compiled = vm.get_fn("vm_empty_for_range::single_inclusive_iteration", &[])?;
-        assert_eq!(compiled.ret_ty(), &Type::I32);
-        let single_inclusive: extern "C" fn() -> i32 = unsafe { std::mem::transmute(compiled.ptr()) };
+        assert_eq!(compiled.ret_ty(), &Type::I64);
+        let single_inclusive: extern "C" fn() -> i64 = unsafe { std::mem::transmute(compiled.ptr()) };
         assert_eq!(single_inclusive(), 5);
+        Ok(())
+    }
+
+    #[test]
+    fn for_loop_range_accepts_dynamic_i64_bounds() -> anyhow::Result<()> {
+        let vm = Vm::with_all()?;
+        vm.import_code(
+            "vm_dynamic_for_range",
+            br#"
+            pub fn main() {
+                let view = {};
+                view.grid_min_x = -2i64;
+                view.grid_max_x = 2i64;
+
+                let end_x = view.grid_max_x + 1i64;
+                let count = 0i64;
+
+                for x in view.grid_min_x..end_x {
+                    count += 1i64;
+                }
+
+                count
+            }
+            "#
+            .to_vec(),
+        )?;
+
+        let compiled = vm.get_fn("vm_dynamic_for_range::main", &[])?;
+        assert_eq!(compiled.ret_ty(), &Type::I64);
+        let main: extern "C" fn() -> i64 = unsafe { std::mem::transmute(compiled.ptr()) };
+        assert_eq!(main(), 5);
         Ok(())
     }
 
@@ -3371,8 +3800,8 @@ mod tests {
         )?;
 
         let compiled = vm.get_fn("vm_any_method_chain::get_tags", &[Type::Any])?;
-        assert_eq!(compiled.ret_ty(), &Type::I32);
-        let get_tags: extern "C" fn(*const Dynamic) -> i32 = unsafe { std::mem::transmute(compiled.ptr()) };
+        assert_eq!(compiled.ret_ty(), &Type::I64);
+        let get_tags: extern "C" fn(*const Dynamic) -> i64 = unsafe { std::mem::transmute(compiled.ptr()) };
         let data = dynamic::map!("tags"=> Dynamic::list(vec!["a".into(), "b".into(), "c".into()]));
         assert_eq!(get_tags(&data), 3);
 
@@ -3770,12 +4199,35 @@ mod tests {
         )?;
 
         let compiled = vm.get_fn("vm_dynamic_index_sum::sum_list", &[Type::I64])?;
-        let sum_list_id = vm.jit.write().unwrap().compiler.symbols.get_id("vm_dynamic_index_sum::sum_list")?;
-        let hints = vm.jit.write().unwrap().compiler.inferred_local_type_hints(sum_list_id, &[], &[Type::I64]);
+        let sum_list_id = vm.jit.write().compiler.symbols.get_id("vm_dynamic_index_sum::sum_list")?;
+        let hints = vm.jit.write().compiler.inferred_local_type_hints(sum_list_id, &[], &[Type::I64]);
         assert!(hints.iter().any(|ty| matches!(ty, Some(Type::List(elem)) if elem.as_ref() == &Type::I64)), "local type hints: {:?}", hints);
         assert_eq!(compiled.ret_ty(), &Type::I64);
         let sum_list: extern "C" fn(i64) -> i64 = unsafe { std::mem::transmute(compiled.ptr()) };
         assert_eq!(sum_list(1000), 499500);
+        Ok(())
+    }
+
+    #[test]
+    fn loop_pushed_list_is_typed_vector() -> anyhow::Result<()> {
+        let vm = Vm::with_all()?;
+        vm.import_code(
+            "vm_loop_pushed_list",
+            br#"
+            pub fn make(n: i64) {
+                let l = [];
+                for i in 0..n {
+                    l.push(i);
+                }
+                l
+            }
+            "#
+            .to_vec(),
+        )?;
+        let compiled = vm.get_fn("vm_loop_pushed_list::make", &[Type::I64])?;
+        let make: extern "C" fn(i64) -> *const Dynamic = unsafe { std::mem::transmute(compiled.ptr()) };
+        let result = unsafe { &*make(3) };
+        assert!(matches!(result, Dynamic::VecI64(v) if v == &vec![0, 1, 2]), "expected flat VecI64, got: {:?}", result);
         Ok(())
     }
 
@@ -3799,6 +4251,51 @@ mod tests {
         let make: extern "C" fn() -> *const Dynamic = unsafe { std::mem::transmute(compiled.ptr()) };
         let result = unsafe { &*make() };
         assert!(matches!(result, Dynamic::VecI64(values) if values == &vec![1]), "result: {:?}", result);
+        Ok(())
+    }
+
+    #[test]
+    fn for_in_iterates_list_filled_in_same_function() -> anyhow::Result<()> {
+        let vm = Vm::with_all()?;
+        vm.import_code(
+            "vm_for_in_local_pushed_list",
+            br#"
+            pub fn sum_i32_items() {
+                let items = [];
+                items.push(6000i32);
+                items.push(4000i32);
+                let total = 0i32;
+                for item in items {
+                    total += item;
+                }
+                total
+            }
+
+            pub fn sum_split_bps() {
+                let splits = [];
+                splits.push({ bps: "6000" });
+                splits.push({ bps: 4000 });
+                let total = 0i32;
+                let count = 0i32;
+                for split in splits {
+                    total += split.bps as i32;
+                    count += 1i32;
+                }
+                total + count
+            }
+            "#
+            .to_vec(),
+        )?;
+
+        let compiled = vm.get_fn("vm_for_in_local_pushed_list::sum_i32_items", &[])?;
+        assert_eq!(compiled.ret_ty(), &Type::I32);
+        let sum_i32_items: extern "C" fn() -> i32 = unsafe { std::mem::transmute(compiled.ptr()) };
+        assert_eq!(sum_i32_items(), 10000);
+
+        let compiled = vm.get_fn("vm_for_in_local_pushed_list::sum_split_bps", &[])?;
+        assert_eq!(compiled.ret_ty(), &Type::I32);
+        let sum_split_bps: extern "C" fn() -> i32 = unsafe { std::mem::transmute(compiled.ptr()) };
+        assert_eq!(sum_split_bps(), 10002);
         Ok(())
     }
 
@@ -3856,40 +4353,40 @@ mod tests {
         )?;
 
         let compiled = vm.get_fn("vm_inferred_list_shortcuts::second_bool", &[])?;
-        let second_bool_id = vm.jit.write().unwrap().compiler.symbols.get_id("vm_inferred_list_shortcuts::second_bool")?;
-        let hints = vm.jit.write().unwrap().compiler.inferred_local_type_hints(second_bool_id, &[], &[]);
+        let second_bool_id = vm.jit.write().compiler.symbols.get_id("vm_inferred_list_shortcuts::second_bool")?;
+        let hints = vm.jit.write().compiler.inferred_local_type_hints(second_bool_id, &[], &[]);
         assert!(hints.iter().any(|ty| matches!(ty, Some(Type::List(elem)) if elem.as_ref() == &Type::Bool)), "bool local type hints: {:?}", hints);
         assert_eq!(compiled.ret_ty(), &Type::Bool);
         let second_bool: extern "C" fn() -> bool = unsafe { std::mem::transmute(compiled.ptr()) };
         assert!(!second_bool());
 
         let compiled = vm.get_fn("vm_inferred_list_shortcuts::first_u8", &[])?;
-        let first_u8_id = vm.jit.write().unwrap().compiler.symbols.get_id("vm_inferred_list_shortcuts::first_u8")?;
-        let hints = vm.jit.write().unwrap().compiler.inferred_local_type_hints(first_u8_id, &[], &[]);
+        let first_u8_id = vm.jit.write().compiler.symbols.get_id("vm_inferred_list_shortcuts::first_u8")?;
+        let hints = vm.jit.write().compiler.inferred_local_type_hints(first_u8_id, &[], &[]);
         assert!(hints.iter().any(|ty| matches!(ty, Some(Type::List(elem)) if elem.as_ref() == &Type::U8)), "u8 local type hints: {:?}", hints);
         assert_eq!(compiled.ret_ty(), &Type::U8);
         let first_u8: extern "C" fn() -> u8 = unsafe { std::mem::transmute(compiled.ptr()) };
         assert_eq!(first_u8(), 7);
 
         let compiled = vm.get_fn("vm_inferred_list_shortcuts::sum_i32", &[Type::I64])?;
-        let sum_i32_id = vm.jit.write().unwrap().compiler.symbols.get_id("vm_inferred_list_shortcuts::sum_i32")?;
-        let hints = vm.jit.write().unwrap().compiler.inferred_local_type_hints(sum_i32_id, &[], &[Type::I64]);
+        let sum_i32_id = vm.jit.write().compiler.symbols.get_id("vm_inferred_list_shortcuts::sum_i32")?;
+        let hints = vm.jit.write().compiler.inferred_local_type_hints(sum_i32_id, &[], &[Type::I64]);
         assert!(hints.iter().any(|ty| matches!(ty, Some(Type::List(elem)) if elem.as_ref() == &Type::I32)), "i32 local type hints: {:?}", hints);
         assert_eq!(compiled.ret_ty(), &Type::I32);
         let sum_i32: extern "C" fn(i64) -> i32 = unsafe { std::mem::transmute(compiled.ptr()) };
         assert_eq!(sum_i32(100), 4950);
 
         let compiled = vm.get_fn("vm_inferred_list_shortcuts::sum_f32", &[Type::I64])?;
-        let sum_f32_id = vm.jit.write().unwrap().compiler.symbols.get_id("vm_inferred_list_shortcuts::sum_f32")?;
-        let hints = vm.jit.write().unwrap().compiler.inferred_local_type_hints(sum_f32_id, &[], &[Type::I64]);
+        let sum_f32_id = vm.jit.write().compiler.symbols.get_id("vm_inferred_list_shortcuts::sum_f32")?;
+        let hints = vm.jit.write().compiler.inferred_local_type_hints(sum_f32_id, &[], &[Type::I64]);
         assert!(hints.iter().any(|ty| matches!(ty, Some(Type::List(elem)) if elem.as_ref() == &Type::F32)), "f32 local type hints: {:?}", hints);
         assert_eq!(compiled.ret_ty(), &Type::F32);
         let sum_f32: extern "C" fn(i64) -> f32 = unsafe { std::mem::transmute(compiled.ptr()) };
         assert_eq!(sum_f32(10), 45.0);
 
         let compiled = vm.get_fn("vm_inferred_list_shortcuts::second_str", &[])?;
-        let second_str_id = vm.jit.write().unwrap().compiler.symbols.get_id("vm_inferred_list_shortcuts::second_str")?;
-        let hints = vm.jit.write().unwrap().compiler.inferred_local_type_hints(second_str_id, &[], &[]);
+        let second_str_id = vm.jit.write().compiler.symbols.get_id("vm_inferred_list_shortcuts::second_str")?;
+        let hints = vm.jit.write().compiler.inferred_local_type_hints(second_str_id, &[], &[]);
         assert!(hints.iter().any(|ty| matches!(ty, Some(Type::List(elem)) if elem.as_ref() == &Type::Str)), "str local type hints: {:?}", hints);
         assert_eq!(compiled.ret_ty(), &Type::Str);
         let second_str: extern "C" fn() -> *const Dynamic = unsafe { std::mem::transmute(compiled.ptr()) };

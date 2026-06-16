@@ -10,6 +10,12 @@ struct ReturnInfo {
     shape: Option<Type>,
 }
 
+/// 类型推断递归链的硬上限。同一实例化由 `self.fns` 记忆化挡住,但互递归的泛型
+/// 函数每次可能产生新的 (generic_args, fn_tys) 实例化,记忆化命不中,会无限递归
+/// 直至栈溢出。超过此深度即把推断结果回退成 [`Type::Any`],把"挂起/崩溃"降级为
+/// 一个保守但安全的类型。正常代码的推断链远不及此。
+const MAX_INFER_DEPTH: usize = 64;
+
 impl Compiler {
     fn current_infer_key(&self) -> Option<(u32, Vec<Type>, Vec<Type>)> {
         self.infer_stack.last().cloned()
@@ -52,8 +58,7 @@ impl Compiler {
     fn try_find_base_return_ty(&self, body: &Stmt) -> Option<Type> {
         match &body.kind {
             StmtKind::Block(stmts) => stmts.iter().find_map(|s| self.try_find_base_return_ty(s)),
-            StmtKind::If { then_body, else_body, .. } => self.try_find_base_return_ty(then_body)
-                .or_else(|| else_body.as_ref().and_then(|b| self.try_find_base_return_ty(b))),
+            StmtKind::If { then_body, else_body, .. } => self.try_find_base_return_ty(then_body).or_else(|| else_body.as_ref().and_then(|b| self.try_find_base_return_ty(b))),
             StmtKind::Return(Some(expr)) => Self::try_literal_type(expr),
             StmtKind::Expr(expr, false) => Self::try_literal_type(expr),
             _ => None,
@@ -76,15 +81,22 @@ impl Compiler {
     fn try_find_base_return_ty_with_scope_inner(&mut self, body: &Stmt, fn_id: u32, fn_name: &str) -> Option<Type> {
         match &body.kind {
             StmtKind::Block(stmts) => stmts.iter().find_map(|s| self.try_find_base_return_ty_with_scope_inner(s, fn_id, fn_name)),
-            StmtKind::If { then_body, else_body, .. } => self.try_find_base_return_ty_with_scope_inner(then_body, fn_id, fn_name)
-                .or_else(|| else_body.as_ref().and_then(|b| self.try_find_base_return_ty_with_scope_inner(b, fn_id, fn_name))),
+            StmtKind::If { then_body, else_body, .. } => {
+                self.try_find_base_return_ty_with_scope_inner(then_body, fn_id, fn_name).or_else(|| else_body.as_ref().and_then(|b| self.try_find_base_return_ty_with_scope_inner(b, fn_id, fn_name)))
+            }
             StmtKind::Return(Some(expr)) => {
-                if Self::expr_calls_fn(expr, fn_id, fn_name) { None }
-                else { self.infer_return_expr(expr).ok().map(|info| info.ty) }
+                if Self::expr_calls_fn(expr, fn_id, fn_name) {
+                    None
+                } else {
+                    self.infer_return_expr(expr).ok().map(|info| info.ty)
+                }
             }
             StmtKind::Expr(expr, false) => {
-                if Self::expr_calls_fn(expr, fn_id, fn_name) { None }
-                else { self.infer_return_expr(expr).ok().map(|info| info.ty) }
+                if Self::expr_calls_fn(expr, fn_id, fn_name) {
+                    None
+                } else {
+                    self.infer_return_expr(expr).ok().map(|info| info.ty)
+                }
             }
             _ => None,
         }
@@ -93,9 +105,13 @@ impl Compiler {
     fn expr_calls_fn(expr: &Expr, fn_id: u32, fn_name: &str) -> bool {
         match &expr.kind {
             ExprKind::Call { obj, params } => {
-                if let ExprKind::Id(id, _) = &obj.kind { return *id == fn_id; }
+                if let ExprKind::Id(id, _) = &obj.kind {
+                    return *id == fn_id;
+                }
                 if let ExprKind::Ident(name) = &obj.kind {
-                    if name.as_str() == fn_name || fn_name.ends_with(&format!("::{}", name)) { return true; }
+                    if name.as_str() == fn_name || fn_name.ends_with(&format!("::{}", name)) {
+                        return true;
+                    }
                 }
                 params.iter().any(|p| Self::expr_calls_fn(p, fn_id, fn_name))
             }
@@ -171,9 +187,11 @@ impl Compiler {
             stop_ty
         } else if stop_ty.is_any() {
             start_ty
-        } else if start_ty == Type::I32 && stop_ty.is_uint() {
+        // 无后缀整数字面量(默认 I32/I64)在 range 里向另一端的具体无符号类型靠拢,
+        // 这样 `0..n`(n: u32)仍是 u32 range,而不是被默认 I64 拖宽成 i64(会拆穿 GPU 后端)。
+        } else if matches!(start_ty, Type::I32 | Type::I64) && stop_ty.is_uint() {
             stop_ty
-        } else if stop_ty == Type::I32 && start_ty.is_uint() {
+        } else if matches!(stop_ty, Type::I32 | Type::I64) && start_ty.is_uint() {
             start_ty
         } else {
             start_ty + stop_ty
@@ -203,7 +221,7 @@ impl Compiler {
             ExprKind::List(_) | ExprKind::Tuple(_) => Some(Type::list_any()),
             ExprKind::Dict(_) => Some(Type::Map),
             ExprKind::Value(value) => Self::dynamic_return_shape(value.get_type()),
-            ExprKind::Const(idx) => self.consts.get(*idx).and_then(|value| Self::dynamic_return_shape(value.get_type())),
+            ExprKind::Const(idx) => self.consts.get_index(*idx).and_then(|(_, value)| Self::dynamic_return_shape(value.get_type())),
             ExprKind::Typed { ty, .. } => Some(ty.clone()),
             _ => None,
         }
@@ -398,9 +416,9 @@ impl Compiler {
             ExprKind::Value(v) if v.is_list() => Ok(v.get_type()),
             ExprKind::Value(v) if v.is_map() => Ok(Type::Any),
             ExprKind::Value(v) => Ok(v.get_type()),
-            ExprKind::Const(idx) => Ok(match self.consts.get(*idx) {
-                Some(value) if value.is_str() => Type::Str,
-                Some(value) if value.is_list() && value.len() == 0 => Type::list_any(),
+            ExprKind::Const(idx) => Ok(match self.consts.get_index(*idx) {
+                Some((_, value)) if value.is_str() => Type::Str,
+                Some((_, value)) if value.is_list() && value.len() == 0 => Type::list_any(),
                 _ => Type::Any,
             }),
             ExprKind::Var(idx) => {
@@ -477,7 +495,14 @@ impl Compiler {
                     } else {
                         let left_ty = self.symbols.get_type(&left_ty)?;
                         let right_ty = if right.is_value() || right.is_const() {
-                            let right_value = if let ExprKind::Const(c) = &right.kind { self.consts[*c].clone() } else { right.clone().value()? };
+                            let right_value = if let ExprKind::Const(c) = &right.kind {
+                                match self.consts.get_index(*c) {
+                                    Some((_, v)) => v.clone(),
+                                    None => right.clone().value()?,
+                                }
+                            } else {
+                                right.clone().value()?
+                            };
                             if right_value.is_str() {
                                 if left_ty.is_any() {
                                     return Ok(Type::Any);
@@ -754,6 +779,11 @@ impl Compiler {
     }
 
     pub fn infer_fn_with_params(&mut self, id: u32, arg_tys: &[Type], generic_args: &[Type]) -> Result<Type> {
+        // 病态(互)递归泛型推断会不断产生新实例化、绕过记忆化;到达深度上限即回退 Any,
+        // 避免推断阶段栈溢出崩溃。
+        if self.infer_stack.len() > MAX_INFER_DEPTH {
+            return Ok(Type::Any);
+        }
         let (name, s) = self.symbols.get_symbol(id).map(|(n, s)| (n.clone(), s.clone()))?;
         if let Symbol::Fn { ty, args, generic_params, cap, body, .. } = s {
             if let Type::Fn { tys, ret: _ } = ty {

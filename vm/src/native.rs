@@ -1,7 +1,8 @@
 use super::FnVariant;
 use crate::JITRunTime;
+use crate::RwLock;
 use crate::memory::{alloc_dynamic, alloc_struct_bytes, take_dynamic_return};
-use anyhow::Result;
+use anyhow::{Result, anyhow};
 use cranelift::prelude::AbiParam;
 use cranelift_module::{Linkage, Module};
 use dynamic::{Dynamic, Type};
@@ -10,7 +11,7 @@ use rand::RngExt;
 use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
-use std::sync::{RwLock, Weak};
+use std::sync::Weak;
 
 #[derive(Clone, Debug)]
 pub struct ZustCallback {
@@ -30,11 +31,22 @@ impl ZustCallback {
     }
 
     pub fn call0(&self) -> Result<Dynamic> {
+        if matches!(self.explicit_arg_len, usize::MAX | 0) {
+            return self.call_with_arg_ptrs(&[]);
+        }
         self.call(Vec::new())
     }
 
     pub fn call1(&self, arg: Dynamic) -> Result<Dynamic> {
-        self.call(vec![arg])
+        match self.explicit_arg_len {
+            0 => self.call0(),
+            usize::MAX | 1 => {
+                let mut ptrs = Vec::with_capacity(1 + self.captures.len());
+                ptrs.push(&arg as *const Dynamic);
+                self.call_with_arg_ptrs(&ptrs)
+            }
+            _ => self.call(vec![arg]),
+        }
     }
 
     pub fn call(&self, mut args: Vec<Dynamic>) -> Result<Dynamic> {
@@ -44,10 +56,15 @@ impl ZustCallback {
                 args.push(Dynamic::Null);
             }
         }
-        let args: Vec<Box<Dynamic>> = args.into_iter().map(Box::new).collect();
-        let mut ptrs: Vec<*const Dynamic> = args.iter().map(|arg| arg.as_ref() as *const Dynamic).collect();
+        let ptrs: Vec<*const Dynamic> = args.iter().map(|arg| arg as *const Dynamic).collect();
+        self.call_with_arg_ptrs(&ptrs)
+    }
+
+    fn call_with_arg_ptrs(&self, args: &[*const Dynamic]) -> Result<Dynamic> {
+        let mut ptrs = Vec::with_capacity(args.len() + self.captures.len());
+        ptrs.extend_from_slice(args);
         ptrs.extend(self.captures.iter().map(|value| value as *const Dynamic));
-        unsafe { call_callback(self.fn_ptr as *const u8, &self.ret_ty, &ptrs) }
+        call_jit_isolated(|| unsafe { call_callback(self.fn_ptr as *const u8, &self.ret_ty, &ptrs) })
     }
 }
 
@@ -204,7 +221,7 @@ pub(crate) extern "C" fn strcat_assign(left: *mut Dynamic, right: *const Dynamic
 
 pub(crate) extern "C" fn struct_from_ptr(addr: i64, ty: i64) -> *const Dynamic {
     let ty = unsafe { (&*(ty as *const Type)).clone() };
-    alloc_dynamic(Dynamic::Struct { addr: addr as usize, ty })
+    alloc_dynamic(Dynamic::owned_struct_from_ptr(addr as usize, ty))
 }
 
 pub(crate) extern "C" fn array_from_ptr(addr: i64, ty: i64) -> *const Dynamic {
@@ -305,7 +322,9 @@ pub(crate) extern "C" fn import_with_vm(context: *const Weak<RwLock<JITRunTime>>
         let name = unsafe { &*addr }.as_str();
         let path = unsafe { &*path }.as_str();
         jit.import(name, path)
-    }).map_err(|e| log::error!("import failed: {e:#}")).is_ok()
+    })
+    .map_err(|e| log::error!("import failed: {e:#}"))
+    .is_ok()
 }
 
 pub(crate) extern "C" fn spawn_with_vm(context: *const Weak<RwLock<JITRunTime>>, fn_name: *const Dynamic, args: *const Dynamic) -> bool {
@@ -331,7 +350,7 @@ pub(crate) extern "C" fn spawn_with_vm(context: *const Weak<RwLock<JITRunTime>>,
 fn spawn_args(args: Dynamic) -> Vec<Dynamic> {
     match args {
         Dynamic::Null => Vec::new(),
-        Dynamic::List(values) => values.read().unwrap().iter().map(Dynamic::deep_clone).collect(),
+        Dynamic::List(values) => values.read().iter().map(Dynamic::deep_clone).collect(),
         value => vec![value],
     }
 }
@@ -342,13 +361,10 @@ fn spawn_run(context: Weak<RwLock<JITRunTime>>, fn_name: &str, args: Dynamic) ->
         anyhow::bail!("spawn supports at most 16 args, got {}", args.len());
     }
     let arg_tys = vec![Type::Any; args.len()];
-    let (ptr, ret_ty) = super::with_vm_context(&context as *const Weak<RwLock<JITRunTime>>, |vm| vm.jit.write().unwrap().get_fn_ptr(fn_name, &arg_tys))?;
+    let (ptr, ret_ty) = super::with_vm_context(&context as *const Weak<RwLock<JITRunTime>>, |vm| vm.jit.write().get_fn_ptr(fn_name, &arg_tys))?;
     let args: Vec<Box<Dynamic>> = args.into_iter().map(Box::new).collect();
     let ptrs: Vec<*const Dynamic> = args.iter().map(|arg| arg.as_ref() as *const Dynamic).collect();
-    unsafe {
-        call_spawned(ptr, &ret_ty, &ptrs)?;
-    }
-    Ok(())
+    call_jit_isolated(|| unsafe { call_spawned(ptr, &ret_ty, &ptrs) })
 }
 
 pub(crate) extern "C" fn spawn_ptr(fn_ptr: i64, ret_ty: i64, args: *const Dynamic) -> bool {
@@ -377,9 +393,11 @@ pub(crate) extern "C" fn callback_new(fn_ptr: i64, ret_ty: i64, explicit_arg_len
     let captures = if captures.is_null() {
         Vec::new()
     } else {
+        // 闭包捕获按引用共享:浅 clone 只复制 Arc 句柄,多个闭包捕获同一个
+        // Map/List 时读写同一份数据(spawn 跨线程才需要 deep_clone 隔离)。
         match unsafe { &*captures } {
-            Dynamic::List(values) => values.read().unwrap().iter().map(Dynamic::deep_clone).collect(),
-            value => vec![value.deep_clone()],
+            Dynamic::List(values) => values.read().to_vec(),
+            value => vec![value.clone()],
         }
     };
     alloc_dynamic(Dynamic::custom(ZustCallback::new_with_arg_len(fn_ptr as usize, ret_ty, explicit_arg_len, captures)))
@@ -392,10 +410,30 @@ fn spawn_run_ptr(fn_ptr: usize, ret_ty: Type, args: Dynamic) -> Result<()> {
     }
     let args: Vec<Box<Dynamic>> = args.into_iter().map(Box::new).collect();
     let ptrs: Vec<*const Dynamic> = args.iter().map(|arg| arg.as_ref() as *const Dynamic).collect();
-    unsafe {
-        call_spawned(fn_ptr as *const u8, &ret_ty, &ptrs)?;
+    call_jit_isolated(|| unsafe { call_spawned(fn_ptr as *const u8, &ret_ty, &ptrs) })
+}
+
+/// 脚本执行的隔离边界。
+///
+/// JIT 代码无法返回 `Result`,运行期错误(整数除零等)通过 [`dynamic`] 的线程
+/// 局部 fault 标志上报(由 `__vm_arith_fault` 与 `Dynamic` 的除法守卫设置)。这里
+/// 在调用前清掉陈旧标志,调用后读取它,把"脚本出错"降级为一次失败的 `Result`,
+/// 而不是让进程崩溃。`catch_unwind` 额外兜住宿主侧 Rust 代码(参数编组、返回值
+/// 取出)的 panic。
+///
+/// 注意:若 panic 发生在 JIT 的 `extern "C"` 帧之内再向外穿越,Rust 默认会 abort,
+/// `catch_unwind` 无法拦截——这类路径靠的是各 native 助手不 panic(除零已改为置
+/// fault 标志)。
+pub(crate) fn call_jit_isolated<T>(f: impl FnOnce() -> Result<T>) -> Result<T> {
+    let _ = dynamic::take_fault();
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
+    match outcome {
+        Ok(inner) => match dynamic::take_fault() {
+            Some(reason) => Err(anyhow!("脚本运行期错误: {}", reason)),
+            None => inner,
+        },
+        Err(_) => Err(anyhow!("脚本执行 panic,已隔离")),
     }
-    Ok(())
 }
 
 unsafe fn call_callback(ptr: *const u8, ret_ty: &Type, args: &[*const Dynamic]) -> Result<Dynamic> {
@@ -514,39 +552,120 @@ unsafe fn call_spawned(ptr: *const u8, ret_ty: &Type, args: &[*const Dynamic]) -
                     )
                 },
                 [a, b, c, d, e, f, g, h, i, j] => unsafe {
-                    std::mem::transmute::<_, extern "C" fn(*const Dynamic, *const Dynamic, *const Dynamic, *const Dynamic, *const Dynamic, *const Dynamic, *const Dynamic, *const Dynamic, *const Dynamic, *const Dynamic)>(ptr)(
-                        *a, *b, *c, *d, *e, *f, *g, *h, *i, *j,
-                    )
+                    std::mem::transmute::<_, extern "C" fn(*const Dynamic, *const Dynamic, *const Dynamic, *const Dynamic, *const Dynamic, *const Dynamic, *const Dynamic, *const Dynamic, *const Dynamic, *const Dynamic)>(
+                        ptr,
+                    )(*a, *b, *c, *d, *e, *f, *g, *h, *i, *j)
                 },
                 [a, b, c, d, e, f, g, h, i, j, k] => unsafe {
-                    std::mem::transmute::<_, extern "C" fn(*const Dynamic, *const Dynamic, *const Dynamic, *const Dynamic, *const Dynamic, *const Dynamic, *const Dynamic, *const Dynamic, *const Dynamic, *const Dynamic, *const Dynamic)>(ptr)(
-                        *a, *b, *c, *d, *e, *f, *g, *h, *i, *j, *k,
-                    )
+                    std::mem::transmute::<
+                        _,
+                        extern "C" fn(*const Dynamic, *const Dynamic, *const Dynamic, *const Dynamic, *const Dynamic, *const Dynamic, *const Dynamic, *const Dynamic, *const Dynamic, *const Dynamic, *const Dynamic),
+                    >(ptr)(*a, *b, *c, *d, *e, *f, *g, *h, *i, *j, *k)
                 },
                 [a, b, c, d, e, f, g, h, i, j, k, l] => unsafe {
-                    std::mem::transmute::<_, extern "C" fn(*const Dynamic, *const Dynamic, *const Dynamic, *const Dynamic, *const Dynamic, *const Dynamic, *const Dynamic, *const Dynamic, *const Dynamic, *const Dynamic, *const Dynamic, *const Dynamic)>(ptr)(
-                        *a, *b, *c, *d, *e, *f, *g, *h, *i, *j, *k, *l,
-                    )
+                    std::mem::transmute::<
+                        _,
+                        extern "C" fn(
+                            *const Dynamic,
+                            *const Dynamic,
+                            *const Dynamic,
+                            *const Dynamic,
+                            *const Dynamic,
+                            *const Dynamic,
+                            *const Dynamic,
+                            *const Dynamic,
+                            *const Dynamic,
+                            *const Dynamic,
+                            *const Dynamic,
+                            *const Dynamic,
+                        ),
+                    >(ptr)(*a, *b, *c, *d, *e, *f, *g, *h, *i, *j, *k, *l)
                 },
                 [a, b, c, d, e, f, g, h, i, j, k, l, m] => unsafe {
-                    std::mem::transmute::<_, extern "C" fn(*const Dynamic, *const Dynamic, *const Dynamic, *const Dynamic, *const Dynamic, *const Dynamic, *const Dynamic, *const Dynamic, *const Dynamic, *const Dynamic, *const Dynamic, *const Dynamic, *const Dynamic)>(ptr)(
-                        *a, *b, *c, *d, *e, *f, *g, *h, *i, *j, *k, *l, *m,
-                    )
+                    std::mem::transmute::<
+                        _,
+                        extern "C" fn(
+                            *const Dynamic,
+                            *const Dynamic,
+                            *const Dynamic,
+                            *const Dynamic,
+                            *const Dynamic,
+                            *const Dynamic,
+                            *const Dynamic,
+                            *const Dynamic,
+                            *const Dynamic,
+                            *const Dynamic,
+                            *const Dynamic,
+                            *const Dynamic,
+                            *const Dynamic,
+                        ),
+                    >(ptr)(*a, *b, *c, *d, *e, *f, *g, *h, *i, *j, *k, *l, *m)
                 },
                 [a, b, c, d, e, f, g, h, i, j, k, l, m, n] => unsafe {
-                    std::mem::transmute::<_, extern "C" fn(*const Dynamic, *const Dynamic, *const Dynamic, *const Dynamic, *const Dynamic, *const Dynamic, *const Dynamic, *const Dynamic, *const Dynamic, *const Dynamic, *const Dynamic, *const Dynamic, *const Dynamic, *const Dynamic)>(ptr)(
-                        *a, *b, *c, *d, *e, *f, *g, *h, *i, *j, *k, *l, *m, *n,
-                    )
+                    std::mem::transmute::<
+                        _,
+                        extern "C" fn(
+                            *const Dynamic,
+                            *const Dynamic,
+                            *const Dynamic,
+                            *const Dynamic,
+                            *const Dynamic,
+                            *const Dynamic,
+                            *const Dynamic,
+                            *const Dynamic,
+                            *const Dynamic,
+                            *const Dynamic,
+                            *const Dynamic,
+                            *const Dynamic,
+                            *const Dynamic,
+                            *const Dynamic,
+                        ),
+                    >(ptr)(*a, *b, *c, *d, *e, *f, *g, *h, *i, *j, *k, *l, *m, *n)
                 },
                 [a, b, c, d, e, f, g, h, i, j, k, l, m, n, o] => unsafe {
-                    std::mem::transmute::<_, extern "C" fn(*const Dynamic, *const Dynamic, *const Dynamic, *const Dynamic, *const Dynamic, *const Dynamic, *const Dynamic, *const Dynamic, *const Dynamic, *const Dynamic, *const Dynamic, *const Dynamic, *const Dynamic, *const Dynamic, *const Dynamic)>(ptr)(
-                        *a, *b, *c, *d, *e, *f, *g, *h, *i, *j, *k, *l, *m, *n, *o,
-                    )
+                    std::mem::transmute::<
+                        _,
+                        extern "C" fn(
+                            *const Dynamic,
+                            *const Dynamic,
+                            *const Dynamic,
+                            *const Dynamic,
+                            *const Dynamic,
+                            *const Dynamic,
+                            *const Dynamic,
+                            *const Dynamic,
+                            *const Dynamic,
+                            *const Dynamic,
+                            *const Dynamic,
+                            *const Dynamic,
+                            *const Dynamic,
+                            *const Dynamic,
+                            *const Dynamic,
+                        ),
+                    >(ptr)(*a, *b, *c, *d, *e, *f, *g, *h, *i, *j, *k, *l, *m, *n, *o)
                 },
                 [a, b, c, d, e, f, g, h, i, j, k, l, m, n, o, p] => unsafe {
-                    std::mem::transmute::<_, extern "C" fn(*const Dynamic, *const Dynamic, *const Dynamic, *const Dynamic, *const Dynamic, *const Dynamic, *const Dynamic, *const Dynamic, *const Dynamic, *const Dynamic, *const Dynamic, *const Dynamic, *const Dynamic, *const Dynamic, *const Dynamic, *const Dynamic)>(ptr)(
-                        *a, *b, *c, *d, *e, *f, *g, *h, *i, *j, *k, *l, *m, *n, *o, *p,
-                    )
+                    std::mem::transmute::<
+                        _,
+                        extern "C" fn(
+                            *const Dynamic,
+                            *const Dynamic,
+                            *const Dynamic,
+                            *const Dynamic,
+                            *const Dynamic,
+                            *const Dynamic,
+                            *const Dynamic,
+                            *const Dynamic,
+                            *const Dynamic,
+                            *const Dynamic,
+                            *const Dynamic,
+                            *const Dynamic,
+                            *const Dynamic,
+                            *const Dynamic,
+                            *const Dynamic,
+                            *const Dynamic,
+                        ),
+                    >(ptr)(*a, *b, *c, *d, *e, *f, *g, *h, *i, *j, *k, *l, *m, *n, *o, *p)
                 },
                 _ => unreachable!(),
             }
@@ -598,35 +717,124 @@ unsafe fn call_spawned(ptr: *const u8, ret_ty: &Type, args: &[*const Dynamic]) -
                     $drop_result(fn_ptr(*a, *b, *c, *d, *e, *f, *g, *h));
                 }
                 [a, b, c, d, e, f, g, h, i] => {
-                    let fn_ptr: extern "C" fn(*const Dynamic, *const Dynamic, *const Dynamic, *const Dynamic, *const Dynamic, *const Dynamic, *const Dynamic, *const Dynamic, *const Dynamic) -> $ret = unsafe { std::mem::transmute(ptr) };
+                    let fn_ptr: extern "C" fn(*const Dynamic, *const Dynamic, *const Dynamic, *const Dynamic, *const Dynamic, *const Dynamic, *const Dynamic, *const Dynamic, *const Dynamic) -> $ret =
+                        unsafe { std::mem::transmute(ptr) };
                     $drop_result(fn_ptr(*a, *b, *c, *d, *e, *f, *g, *h, *i));
                 }
                 [a, b, c, d, e, f, g, h, i, j] => {
-                    let fn_ptr: extern "C" fn(*const Dynamic, *const Dynamic, *const Dynamic, *const Dynamic, *const Dynamic, *const Dynamic, *const Dynamic, *const Dynamic, *const Dynamic, *const Dynamic) -> $ret = unsafe { std::mem::transmute(ptr) };
+                    let fn_ptr: extern "C" fn(*const Dynamic, *const Dynamic, *const Dynamic, *const Dynamic, *const Dynamic, *const Dynamic, *const Dynamic, *const Dynamic, *const Dynamic, *const Dynamic) -> $ret =
+                        unsafe { std::mem::transmute(ptr) };
                     $drop_result(fn_ptr(*a, *b, *c, *d, *e, *f, *g, *h, *i, *j));
                 }
                 [a, b, c, d, e, f, g, h, i, j, k] => {
-                    let fn_ptr: extern "C" fn(*const Dynamic, *const Dynamic, *const Dynamic, *const Dynamic, *const Dynamic, *const Dynamic, *const Dynamic, *const Dynamic, *const Dynamic, *const Dynamic, *const Dynamic) -> $ret = unsafe { std::mem::transmute(ptr) };
+                    let fn_ptr: extern "C" fn(
+                        *const Dynamic,
+                        *const Dynamic,
+                        *const Dynamic,
+                        *const Dynamic,
+                        *const Dynamic,
+                        *const Dynamic,
+                        *const Dynamic,
+                        *const Dynamic,
+                        *const Dynamic,
+                        *const Dynamic,
+                        *const Dynamic,
+                    ) -> $ret = unsafe { std::mem::transmute(ptr) };
                     $drop_result(fn_ptr(*a, *b, *c, *d, *e, *f, *g, *h, *i, *j, *k));
                 }
                 [a, b, c, d, e, f, g, h, i, j, k, l] => {
-                    let fn_ptr: extern "C" fn(*const Dynamic, *const Dynamic, *const Dynamic, *const Dynamic, *const Dynamic, *const Dynamic, *const Dynamic, *const Dynamic, *const Dynamic, *const Dynamic, *const Dynamic, *const Dynamic) -> $ret = unsafe { std::mem::transmute(ptr) };
+                    let fn_ptr: extern "C" fn(
+                        *const Dynamic,
+                        *const Dynamic,
+                        *const Dynamic,
+                        *const Dynamic,
+                        *const Dynamic,
+                        *const Dynamic,
+                        *const Dynamic,
+                        *const Dynamic,
+                        *const Dynamic,
+                        *const Dynamic,
+                        *const Dynamic,
+                        *const Dynamic,
+                    ) -> $ret = unsafe { std::mem::transmute(ptr) };
                     $drop_result(fn_ptr(*a, *b, *c, *d, *e, *f, *g, *h, *i, *j, *k, *l));
                 }
                 [a, b, c, d, e, f, g, h, i, j, k, l, m] => {
-                    let fn_ptr: extern "C" fn(*const Dynamic, *const Dynamic, *const Dynamic, *const Dynamic, *const Dynamic, *const Dynamic, *const Dynamic, *const Dynamic, *const Dynamic, *const Dynamic, *const Dynamic, *const Dynamic, *const Dynamic) -> $ret = unsafe { std::mem::transmute(ptr) };
+                    let fn_ptr: extern "C" fn(
+                        *const Dynamic,
+                        *const Dynamic,
+                        *const Dynamic,
+                        *const Dynamic,
+                        *const Dynamic,
+                        *const Dynamic,
+                        *const Dynamic,
+                        *const Dynamic,
+                        *const Dynamic,
+                        *const Dynamic,
+                        *const Dynamic,
+                        *const Dynamic,
+                        *const Dynamic,
+                    ) -> $ret = unsafe { std::mem::transmute(ptr) };
                     $drop_result(fn_ptr(*a, *b, *c, *d, *e, *f, *g, *h, *i, *j, *k, *l, *m));
                 }
                 [a, b, c, d, e, f, g, h, i, j, k, l, m, n] => {
-                    let fn_ptr: extern "C" fn(*const Dynamic, *const Dynamic, *const Dynamic, *const Dynamic, *const Dynamic, *const Dynamic, *const Dynamic, *const Dynamic, *const Dynamic, *const Dynamic, *const Dynamic, *const Dynamic, *const Dynamic, *const Dynamic) -> $ret = unsafe { std::mem::transmute(ptr) };
+                    let fn_ptr: extern "C" fn(
+                        *const Dynamic,
+                        *const Dynamic,
+                        *const Dynamic,
+                        *const Dynamic,
+                        *const Dynamic,
+                        *const Dynamic,
+                        *const Dynamic,
+                        *const Dynamic,
+                        *const Dynamic,
+                        *const Dynamic,
+                        *const Dynamic,
+                        *const Dynamic,
+                        *const Dynamic,
+                        *const Dynamic,
+                    ) -> $ret = unsafe { std::mem::transmute(ptr) };
                     $drop_result(fn_ptr(*a, *b, *c, *d, *e, *f, *g, *h, *i, *j, *k, *l, *m, *n));
                 }
                 [a, b, c, d, e, f, g, h, i, j, k, l, m, n, o] => {
-                    let fn_ptr: extern "C" fn(*const Dynamic, *const Dynamic, *const Dynamic, *const Dynamic, *const Dynamic, *const Dynamic, *const Dynamic, *const Dynamic, *const Dynamic, *const Dynamic, *const Dynamic, *const Dynamic, *const Dynamic, *const Dynamic, *const Dynamic) -> $ret = unsafe { std::mem::transmute(ptr) };
+                    let fn_ptr: extern "C" fn(
+                        *const Dynamic,
+                        *const Dynamic,
+                        *const Dynamic,
+                        *const Dynamic,
+                        *const Dynamic,
+                        *const Dynamic,
+                        *const Dynamic,
+                        *const Dynamic,
+                        *const Dynamic,
+                        *const Dynamic,
+                        *const Dynamic,
+                        *const Dynamic,
+                        *const Dynamic,
+                        *const Dynamic,
+                        *const Dynamic,
+                    ) -> $ret = unsafe { std::mem::transmute(ptr) };
                     $drop_result(fn_ptr(*a, *b, *c, *d, *e, *f, *g, *h, *i, *j, *k, *l, *m, *n, *o));
                 }
                 [a, b, c, d, e, f, g, h, i, j, k, l, m, n, o, p] => {
-                    let fn_ptr: extern "C" fn(*const Dynamic, *const Dynamic, *const Dynamic, *const Dynamic, *const Dynamic, *const Dynamic, *const Dynamic, *const Dynamic, *const Dynamic, *const Dynamic, *const Dynamic, *const Dynamic, *const Dynamic, *const Dynamic, *const Dynamic, *const Dynamic) -> $ret = unsafe { std::mem::transmute(ptr) };
+                    let fn_ptr: extern "C" fn(
+                        *const Dynamic,
+                        *const Dynamic,
+                        *const Dynamic,
+                        *const Dynamic,
+                        *const Dynamic,
+                        *const Dynamic,
+                        *const Dynamic,
+                        *const Dynamic,
+                        *const Dynamic,
+                        *const Dynamic,
+                        *const Dynamic,
+                        *const Dynamic,
+                        *const Dynamic,
+                        *const Dynamic,
+                        *const Dynamic,
+                        *const Dynamic,
+                    ) -> $ret = unsafe { std::mem::transmute(ptr) };
                     $drop_result(fn_ptr(*a, *b, *c, *d, *e, *f, *g, *h, *i, *j, *k, *l, *m, *n, *o, *p));
                 }
                 _ => unreachable!(),
@@ -672,7 +880,7 @@ extern "C" fn any_keys(addr: *const Dynamic) -> *const Dynamic {
         return alloc_dynamic(Dynamic::list(Vec::new()));
     }
     let keys = match unsafe { &*addr } {
-        Dynamic::Map(map) => map.read().unwrap().keys().map(|key| Dynamic::from(key.as_str())).collect(),
+        Dynamic::Map(map) => map.read().keys().map(|key| Dynamic::from(key.as_str())).collect(),
         _ => Vec::new(),
     };
     alloc_dynamic(Dynamic::list(keys))
@@ -966,7 +1174,7 @@ extern "C" fn slice(addr: *const Dynamic, start: i64, stop: *const Dynamic, incl
         Dynamic::from(value.as_str().chars().skip(start).take(stop.saturating_sub(start)).collect::<String>())
     } else {
         match value {
-            Dynamic::List(list) => Dynamic::list(list.read().unwrap()[start..stop].to_vec()),
+            Dynamic::List(list) => Dynamic::list(list.read()[start..stop].to_vec()),
             _ => Dynamic::Null,
         }
     };
@@ -1091,14 +1299,14 @@ extern "C" fn any_binary(left: *const Dynamic, op: i32, right: *const Dynamic) -
     }
 }
 
-extern "C" fn any_logic(left: *const Dynamic, op: i32, right: *const Dynamic) -> i32 {
+extern "C" fn any_logic(left: *const Dynamic, op: i32, right: *const Dynamic) -> bool {
     let op = BinaryOp::try_from(op).unwrap_or(BinaryOp::Unknow);
     unsafe {
         let expr = Expr::new(
             ExprKind::Binary { left: Box::new(Expr::new(ExprKind::Value((&*left).clone()), Span::default())), op, right: Box::new(Expr::new(ExprKind::Value((&*right).clone()), Span::default())) },
             Span::default(),
         );
-        if expr.compact().and_then(|r| r.as_bool()).unwrap_or(false) { 1 } else { 0 }
+        expr.compact().and_then(|r| r.as_bool()).unwrap_or(false)
     }
 }
 
@@ -1110,7 +1318,7 @@ pub const STD: [(&str, &[Type], Type, *const u8); 5] = [
     ("rand", &[Type::Any, Type::Any], Type::Any, random as *const u8),
 ];
 
-pub const ANY: [(&str, &[Type], Type, *const u8); 68] = [
+pub const ANY: [(&str, &[Type], Type, *const u8); 69] = [
     ("Any::null", &[], Type::Any, any_null as *const u8),
     ("Any::is_map", &[Type::Any], Type::Bool, any_is_map as *const u8),
     ("Any::is_list", &[Type::Any], Type::Bool, any_is_list as *const u8),
@@ -1162,6 +1370,7 @@ pub const ANY: [(&str, &[Type], Type, *const u8); 68] = [
     ("Any::slice", &[Type::Any, Type::I64, Type::Any, Type::Bool], Type::Any, slice as *const u8),
     ("Any::contains", &[Type::Any, Type::Any], Type::Bool, contains as *const u8),
     ("Any::starts_with", &[Type::Any, Type::Any], Type::Bool, starts_with as *const u8),
+    ("Any::get", &[Type::Any, Type::Any], Type::Any, get_key as *const u8),
     ("Any::get_key", &[Type::Any, Type::Any], Type::Any, get_key as *const u8),
     ("Any::del_key", &[Type::Any, Type::Any], Type::Any, del_key as *const u8),
     ("Any::set_idx", &[Type::Any, Type::I64, Type::Any], Type::Void, set_idx as *const u8),
@@ -1184,12 +1393,12 @@ pub const ANY: [(&str, &[Type], Type, *const u8); 68] = [
 use std::rc::Rc;
 impl JITRunTime {
     pub fn add_native_ptr(&mut self, full_name: &str, name: &str, arg_tys: &[Type], ret_ty: Type, fn_ptr: *const u8) -> Result<u32> {
-        self.native_symbols.write().unwrap().insert(full_name.to_string(), fn_ptr as usize);
+        self.native_symbols.write().insert(full_name.to_string(), fn_ptr as usize);
         self.add_native(full_name, name, arg_tys, ret_ty)
     }
 
     pub(crate) fn add_context_native_ptr(&mut self, full_name: &str, name: &str, arg_tys: &[Type], ret_ty: Type, fn_ptr: *const u8) -> Result<u32> {
-        self.native_symbols.write().unwrap().insert(full_name.to_string(), fn_ptr as usize);
+        self.native_symbols.write().insert(full_name.to_string(), fn_ptr as usize);
         self.add_context_native(full_name, name, arg_tys, ret_ty)
     }
 

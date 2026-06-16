@@ -2,9 +2,10 @@
 use dynamic::{Dynamic, Type};
 
 use crate::JITRunTime;
+use crate::RwLock;
 use crate::memory::alloc_dynamic;
 use root::{Object, get_mount};
-use std::sync::{RwLock, Weak};
+use std::sync::Weak;
 extern "C" fn root_add(name: *const Dynamic, value: *const Dynamic) -> bool {
     unsafe {
         let obj = Object::Value((*value).clone());
@@ -93,7 +94,7 @@ extern "C" fn root_get_key(name: *const Dynamic, key: *const Dynamic) -> *const 
 pub(crate) extern "C" fn root_add_fn_with_vm(context: *const Weak<RwLock<JITRunTime>>, name: *const Dynamic, fn_name: *const Dynamic) -> bool {
     let name = unsafe { (*name).clone() };
     let fn_name = unsafe { (*fn_name).clone() };
-    match crate::with_vm_context(context, |vm| vm.jit.write().unwrap().get_fn_ptr(fn_name.as_str(), &[Type::Any])) {
+    match crate::with_vm_context(context, |vm| vm.jit.write().get_fn_ptr(fn_name.as_str(), &[Type::Any])) {
         Ok((fn_ptr, ty)) => {
             if let Ok((m, name)) = get_mount(name.as_str()) {
                 return m.add(name, Object::Func(fn_ptr as i64, ty.clone()));

@@ -1684,6 +1684,53 @@ mod tests {
     }
 
     #[test]
+    fn small_expression_calls_keep_direct_semantics() -> anyhow::Result<()> {
+        let vm = Vm::with_all()?;
+        vm.import_code(
+            "vm_small_expression_inline",
+            br#"
+            pub fn add_i64(left: i64, right: i64) {
+                left + right
+            }
+
+            pub fn normal_caller() {
+                add_i64(1i64, 2i64)
+            }
+
+            pub fn closure_caller() {
+                let add = |left: i64, right: i64| { left + right };
+                add(add_i64(1i64, 2i64), 4i64)
+            }
+
+            pub fn closure_assignment() {
+                let acc = 0i64;
+                let add = |left: i64, right: i64| { left + right };
+                acc = add(acc, 4i64);
+                acc
+            }
+            "#
+            .to_vec(),
+        )?;
+
+        let compiled = vm.get_fn("vm_small_expression_inline::normal_caller", &[])?;
+        assert_eq!(compiled.ret_ty(), &Type::I64);
+        let normal_caller: extern "C" fn() -> i64 = unsafe { std::mem::transmute(compiled.ptr()) };
+        assert_eq!(normal_caller(), 3);
+
+        let compiled = vm.get_fn("vm_small_expression_inline::closure_caller", &[])?;
+        assert_eq!(compiled.ret_ty(), &Type::Any);
+        let closure_caller: extern "C" fn() -> *const Dynamic = unsafe { std::mem::transmute(compiled.ptr()) };
+        let result = unsafe { &*closure_caller() };
+        assert_eq!(result.as_int(), Some(7));
+
+        let compiled = vm.get_fn("vm_small_expression_inline::closure_assignment", &[])?;
+        assert_eq!(compiled.ret_ty(), &Type::I64);
+        let closure_assignment: extern "C" fn() -> i64 = unsafe { std::mem::transmute(compiled.ptr()) };
+        assert_eq!(closure_assignment(), 4);
+        Ok(())
+    }
+
+    #[test]
     fn nested_closure_captures_outer_closure_arg() -> anyhow::Result<()> {
         let vm = Vm::with_all()?;
         vm.import_code(
@@ -4318,6 +4365,31 @@ mod tests {
                 l[0]
             }
 
+            pub fn sum_u8_for_in() {
+                let l = [];
+                l.push(7u8);
+                l.push(8u8);
+                let sum = 0i64;
+                for item in l {
+                    sum = sum + item as i64;
+                }
+                sum
+            }
+
+            pub fn count_bool_for_in() {
+                let l = [];
+                l.push(true);
+                l.push(false);
+                l.push(true);
+                let count = 0i64;
+                for item in l {
+                    if item {
+                        count += 1i64;
+                    }
+                }
+                count
+            }
+
             pub fn sum_i32(n: i64) {
                 let l = [];
                 for i in 0..n {
@@ -4367,6 +4439,16 @@ mod tests {
         assert_eq!(compiled.ret_ty(), &Type::U8);
         let first_u8: extern "C" fn() -> u8 = unsafe { std::mem::transmute(compiled.ptr()) };
         assert_eq!(first_u8(), 7);
+
+        let compiled = vm.get_fn("vm_inferred_list_shortcuts::sum_u8_for_in", &[])?;
+        assert_eq!(compiled.ret_ty(), &Type::I64);
+        let sum_u8_for_in: extern "C" fn() -> i64 = unsafe { std::mem::transmute(compiled.ptr()) };
+        assert_eq!(sum_u8_for_in(), 15);
+
+        let compiled = vm.get_fn("vm_inferred_list_shortcuts::count_bool_for_in", &[])?;
+        assert_eq!(compiled.ret_ty(), &Type::I64);
+        let count_bool_for_in: extern "C" fn() -> i64 = unsafe { std::mem::transmute(compiled.ptr()) };
+        assert_eq!(count_bool_for_in(), 2);
 
         let compiled = vm.get_fn("vm_inferred_list_shortcuts::sum_i32", &[Type::I64])?;
         let sum_i32_id = vm.jit.write().compiler.symbols.get_id("vm_inferred_list_shortcuts::sum_i32")?;

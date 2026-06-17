@@ -97,9 +97,17 @@ pub struct BuildContext<'a> {
     pub builder: FunctionBuilder<'a>,
     pub(crate) vars: Vec<LocalVar>,
     pub(crate) local_type_hints: Vec<Option<Type>>,
+    pub(crate) list_fast_paths: Vec<ListFastPath>,
     pub(crate) fn_name: Option<SmolStr>,
     pub(crate) fn_refs: Vec<(FuncId, FuncRef)>,
     pub(crate) ret_ty: Type,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct ListFastPath {
+    pub var_idx: u32,
+    pub elem_ty: Type,
+    pub data: Value,
 }
 
 impl<'a> BuildContext<'a> {
@@ -115,7 +123,7 @@ impl<'a> BuildContext<'a> {
         for (idx, ty) in arg_tys.iter().enumerate() {
             vars.push(LocalVar::Value { val: builder.block_params(entry_block)[idx], ty: ty.clone() });
         }
-        Ok(Self { builder, vars, local_type_hints, fn_name: None, fn_refs: Vec::new(), ret_ty })
+        Ok(Self { builder, vars, local_type_hints, list_fast_paths: Vec::new(), fn_name: None, fn_refs: Vec::new(), ret_ty })
     }
 
     pub fn get_fn_ref(&mut self, fn_id: FuncId) -> Option<FuncRef> {
@@ -155,6 +163,22 @@ impl<'a> BuildContext<'a> {
             }
         }
         Ok(())
+    }
+
+    pub(crate) fn push_list_fast_path(&mut self, fast_path: ListFastPath) {
+        self.list_fast_paths.push(fast_path);
+    }
+
+    pub(crate) fn truncate_list_fast_paths(&mut self, len: usize) {
+        self.list_fast_paths.truncate(len);
+    }
+
+    pub(crate) fn list_fast_path_len(&self) -> usize {
+        self.list_fast_paths.len()
+    }
+
+    pub(crate) fn list_fast_path(&self, var_idx: u32) -> Option<ListFastPath> {
+        self.list_fast_paths.iter().rev().find(|item| item.var_idx == var_idx).cloned()
     }
 
     pub fn get_const(&mut self, v: &Dynamic) -> Result<(Value, Type)> {

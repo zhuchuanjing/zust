@@ -3,7 +3,7 @@ use dynamic::{Dynamic, Type};
 use parser::{BinaryOp, Expr, ExprKind, PatternKind, Span, Stmt, StmtKind, UnaryOp};
 use std::collections::{BTreeMap, HashMap, VecDeque};
 
-use crate::context::LocalVar;
+use crate::context::{ListFastPath, LocalVar};
 
 use super::{FnInfo, FnVariant, PTR_TYPE, context::BuildContext, get_type, ptr_type};
 use cranelift::prelude::*;
@@ -23,6 +23,9 @@ pub struct JITRunTime {
     pub(crate) owner: Weak<RwLock<JITRunTime>>,
     pub(crate) pending_fns: VecDeque<PendingFn>,
     pub(crate) compile_depth: usize,
+    inline_depth: usize,
+    inline_budget: usize,
+    inline_stack: Vec<u32>,
     native_fn_cache: Vec<(SmolStr, Vec<Type>, FnInfo)>,
     #[cfg(feature = "ir-disassembly")]
     pub ir_disassembly: BTreeMap<SmolStr, String>,
@@ -212,6 +215,9 @@ impl JITRunTime {
             owner: Weak::new(),
             pending_fns: VecDeque::new(),
             compile_depth: 0,
+            inline_depth: 0,
+            inline_budget: 256,
+            inline_stack: Vec::new(),
             native_fn_cache: Vec::new(),
             #[cfg(feature = "ir-disassembly")]
             ir_disassembly: BTreeMap::new(),
@@ -792,12 +798,7 @@ impl JITRunTime {
                 let right_value = right.clone().value()?;
                 if let Some(idx) = right_value.as_int() {
                     let idx = ctx.builder.ins().iconst(types::I64, idx);
-                    if let Type::List(elem_ty) = &left.1
-                        && let Some((fn_name, value_ty)) = Self::list_set_idx_shortcut(elem_ty)
-                    {
-                        let stored = self.convert(ctx, value.clone(), value_ty.clone())?;
-                        let set_idx_fn = self.get_native_fn_cached(fn_name, &[Type::Any, Type::I64, value_ty])?;
-                        self.call_for_side_effect(ctx, set_idx_fn, vec![left.0, idx, stored])?;
+                    if self.intrinsic_list_set_idx(ctx, left.clone(), (idx, Type::I64), value.clone())? {
                         return Ok(value);
                     }
                     let f = self.get_method(&left.1, "set_idx")?;
@@ -816,13 +817,7 @@ impl JITRunTime {
                     let args = self.adjust_args(ctx, vec![left, right, value.clone()], f.arg_tys()?)?;
                     self.call_for_side_effect(ctx, f, args)?;
                 } else {
-                    if let Type::List(elem_ty) = &left.1
-                        && let Some((fn_name, value_ty)) = Self::list_set_idx_shortcut(elem_ty)
-                    {
-                        let idx = self.convert(ctx, right.clone(), Type::I64)?;
-                        let stored = self.convert(ctx, value.clone(), value_ty.clone())?;
-                        let set_idx_fn = self.get_native_fn_cached(fn_name, &[Type::Any, Type::I64, value_ty])?;
-                        self.call_for_side_effect(ctx, set_idx_fn, vec![left.0, idx, stored])?;
+                    if self.intrinsic_list_set_idx(ctx, left.clone(), right.clone(), value.clone())? {
                         return Ok(value);
                     }
                     let f = self.get_method(&left.1, "set_idx")?;
@@ -881,20 +876,29 @@ impl JITRunTime {
         }
     }
 
-    fn list_get_idx_shortcut(elem_ty: &Type) -> Option<(&'static str, Type)> {
+    fn list_get_idx_shortcut(elem_ty: &Type) -> Option<(&'static str, Type, Type)> {
         match elem_ty {
-            Type::Bool => Some(("Any::get_idx_bool", Type::Bool)),
-            Type::U8 => Some(("Any::get_idx_u8", Type::U8)),
-            Type::I8 => Some(("Any::get_idx_i8", Type::I8)),
-            Type::U16 => Some(("Any::get_idx_u16", Type::U16)),
-            Type::I16 => Some(("Any::get_idx_i16", Type::I16)),
-            Type::U32 => Some(("Any::get_idx_u32", Type::U32)),
-            Type::I32 => Some(("Any::get_idx_i32", Type::I32)),
-            Type::F32 => Some(("Any::get_idx_f32", Type::F32)),
-            Type::U64 => Some(("Any::get_idx_u64", Type::U64)),
-            Type::I64 => Some(("Any::get_idx_i64", Type::I64)),
-            Type::F64 => Some(("Any::get_idx_f64", Type::F64)),
-            Type::Str => Some(("Any::get_idx_str", Type::Str)),
+            Type::Bool => Some(("Any::get_idx_bool_i64", Type::I64, Type::Bool)),
+            Type::U8 => Some(("Any::get_idx_u8_i64", Type::I64, Type::U8)),
+            Type::I8 => Some(("Any::get_idx_i8_i64", Type::I64, Type::I8)),
+            Type::U16 => Some(("Any::get_idx_u16_i64", Type::I64, Type::U16)),
+            Type::I16 => Some(("Any::get_idx_i16_i64", Type::I64, Type::I16)),
+            Type::U32 => Some(("Any::get_idx_u32", Type::U32, Type::U32)),
+            Type::I32 => Some(("Any::get_idx_i32", Type::I32, Type::I32)),
+            Type::F32 => Some(("Any::get_idx_f32", Type::F32, Type::F32)),
+            Type::U64 => Some(("Any::get_idx_u64", Type::U64, Type::U64)),
+            Type::I64 => Some(("Any::get_idx_i64", Type::I64, Type::I64)),
+            Type::F64 => Some(("Any::get_idx_f64", Type::F64, Type::F64)),
+            Type::Str => Some(("Any::get_idx_str", Type::Str, Type::Str)),
+            _ => None,
+        }
+    }
+
+    fn list_data_ptr_shortcut(elem_ty: &Type) -> Option<(&'static str, Type)> {
+        match elem_ty {
+            Type::U64 => Some(("Any::data_ptr_u64", Type::U64)),
+            Type::I64 => Some(("Any::data_ptr_i64", Type::I64)),
+            Type::F64 => Some(("Any::data_ptr_f64", Type::F64)),
             _ => None,
         }
     }
@@ -917,6 +921,82 @@ impl JITRunTime {
         }
     }
 
+    fn intrinsic_list_get_idx(&mut self, ctx: &mut BuildContext, list: (Value, Type), idx: (Value, Type)) -> Result<Option<(Value, Type)>> {
+        let Type::List(elem_ty) = &list.1 else {
+            return Ok(None);
+        };
+        let Some((fn_name, abi_ret_ty, value_ty)) = Self::list_get_idx_shortcut(elem_ty) else {
+            return Ok(None);
+        };
+        let idx = self.convert(ctx, idx, Type::I64)?;
+        let get_idx_fn = self.get_native_fn_cached(fn_name, &[Type::Any, Type::I64])?;
+        let value = self.call(ctx, get_idx_fn, vec![list.0, idx])?;
+        if value_ty.is_bool() {
+            let is_true = ctx.builder.ins().icmp_imm(IntCC::NotEqual, value.0, 0);
+            let zero = ctx.builder.ins().iconst(types::I8, 0);
+            let one = ctx.builder.ins().iconst(types::I8, 1);
+            return Ok(Some((ctx.builder.ins().select(is_true, one, zero), Type::Bool)));
+        }
+        if value.1 != value_ty {
+            let narrowed = self.convert(ctx, (value.0, abi_ret_ty), value_ty.clone())?;
+            return Ok(Some((narrowed, value_ty)));
+        }
+        Ok(Some(value))
+    }
+
+    fn intrinsic_list_fast_path_get_idx(&mut self, ctx: &mut BuildContext, var_idx: u32, list: (Value, Type), idx: (Value, Type)) -> Result<Option<(Value, Type)>> {
+        let Some(fast_path) = ctx.list_fast_path(var_idx) else {
+            return Ok(None);
+        };
+        let Type::List(elem_ty) = &list.1 else {
+            return Ok(None);
+        };
+        if elem_ty.as_ref() != &fast_path.elem_ty {
+            return Ok(None);
+        }
+        let idx = self.convert(ctx, idx, Type::I64)?;
+        let offset = ctx.builder.ins().imul_imm(idx, fast_path.elem_ty.width() as i64);
+        let addr = ctx.builder.ins().iadd(fast_path.data, offset);
+        let value = ctx.builder.ins().load(get_type(&fast_path.elem_ty)?, MemFlags::trusted(), addr, 0);
+        Ok(Some((value, fast_path.elem_ty)))
+    }
+
+    fn intrinsic_list_set_idx(&mut self, ctx: &mut BuildContext, list: (Value, Type), idx: (Value, Type), value: (Value, Type)) -> Result<bool> {
+        let Type::List(elem_ty) = &list.1 else {
+            return Ok(false);
+        };
+        let Some((fn_name, value_ty)) = Self::list_set_idx_shortcut(elem_ty) else {
+            return Ok(false);
+        };
+        let idx = self.convert(ctx, idx, Type::I64)?;
+        let stored = self.convert(ctx, value, value_ty.clone())?;
+        let set_idx_fn = self.get_native_fn_cached(fn_name, &[Type::Any, Type::I64, value_ty])?;
+        self.call_for_side_effect(ctx, set_idx_fn, vec![list.0, idx, stored])?;
+        Ok(true)
+    }
+
+    fn try_intrinsic_collection_call(&mut self, ctx: &mut BuildContext, fn_name: &str, args: &[(Value, Type)]) -> Result<Option<LocalVar>> {
+        if let [list, value] = args
+            && fn_name == "Any::push"
+            && let Type::List(elem_ty) = &list.1
+            && let Some((fn_name, value_ty)) = Self::list_push_shortcut(elem_ty)
+        {
+            let value = self.convert(ctx, (value.0, value.1.clone()), value_ty.clone())?;
+            let push_fn = self.get_native_fn_cached(fn_name, &[Type::Any, value_ty])?;
+            self.call_for_side_effect(ctx, push_fn, vec![list.0, value])?;
+            return Ok(Some(LocalVar::None));
+        }
+
+        if let [list, idx] = args
+            && fn_name == "Any::get_idx"
+            && let Some(value) = self.intrinsic_list_get_idx(ctx, (list.0, list.1.clone()), (idx.0, idx.1.clone()))?
+        {
+            return Ok(Some(value.into()));
+        }
+
+        Ok(None)
+    }
+
     fn expr_is_empty_list(&self, expr: &Expr) -> bool {
         match &expr.kind {
             ExprKind::Value(value) => value.is_list() && value.len() == 0,
@@ -924,6 +1004,117 @@ impl JITRunTime {
             ExprKind::Typed { value, .. } => self.expr_is_empty_list(value),
             _ => false,
         }
+    }
+
+    fn expr_uses_var(expr: &Expr, var_idx: u32) -> bool {
+        match &expr.kind {
+            ExprKind::Var(idx) => *idx == var_idx,
+            ExprKind::Typed { value, .. } | ExprKind::Unary { value, .. } | ExprKind::Generic { obj: value, .. } => Self::expr_uses_var(value, var_idx),
+            ExprKind::Stmt(stmt) => Self::stmt_uses_var(stmt, var_idx),
+            ExprKind::Binary { left, right, .. } | ExprKind::Range { start: left, stop: right, .. } => Self::expr_uses_var(left, var_idx) || Self::expr_uses_var(right, var_idx),
+            ExprKind::Tuple(items) | ExprKind::List(items) => items.iter().any(|item| Self::expr_uses_var(item, var_idx)),
+            ExprKind::Repeat { value, .. } => Self::expr_uses_var(value, var_idx),
+            ExprKind::Dict(items) => items.iter().any(|(_, value)| Self::expr_uses_var(value, var_idx)),
+            ExprKind::Id(_, obj) => obj.as_deref().is_some_and(|obj| Self::expr_uses_var(obj, var_idx)),
+            ExprKind::Call { obj, params } => Self::expr_uses_var(obj, var_idx) || params.iter().any(|param| Self::expr_uses_var(param, var_idx)),
+            ExprKind::Closure { body, .. } => Self::stmt_uses_var(body, var_idx),
+            _ => false,
+        }
+    }
+
+    fn stmt_uses_var(stmt: &Stmt, var_idx: u32) -> bool {
+        match &stmt.kind {
+            StmtKind::Let { value, .. } => Self::stmt_uses_var(value, var_idx),
+            StmtKind::Expr(expr, _) | StmtKind::Return(Some(expr)) => Self::expr_uses_var(expr, var_idx),
+            StmtKind::Block(stmts) => stmts.iter().any(|stmt| Self::stmt_uses_var(stmt, var_idx)),
+            StmtKind::While { cond, body } => Self::expr_uses_var(cond, var_idx) || Self::stmt_uses_var(body, var_idx),
+            StmtKind::Loop(body) => Self::stmt_uses_var(body, var_idx),
+            StmtKind::For { range, body, .. } => Self::expr_uses_var(range, var_idx) || Self::stmt_uses_var(body, var_idx),
+            StmtKind::If { cond, then_body, else_body } => Self::expr_uses_var(cond, var_idx) || Self::stmt_uses_var(then_body, var_idx) || else_body.as_deref().is_some_and(|body| Self::stmt_uses_var(body, var_idx)),
+            StmtKind::Fn { body, .. } | StmtKind::Impl { body, .. } => Self::stmt_uses_var(body, var_idx),
+            StmtKind::Static { value, .. } => value.as_ref().is_some_and(|value| Self::expr_uses_var(value, var_idx)),
+            StmtKind::Const { value, .. } => Self::expr_uses_var(value, var_idx),
+            _ => false,
+        }
+    }
+
+    fn expr_reads_list_index(expr: &Expr, var_idx: u32) -> bool {
+        match &expr.kind {
+            ExprKind::Binary { left, op: BinaryOp::Idx, right } if matches!(left.kind, ExprKind::Var(idx) if idx == var_idx) => !Self::expr_uses_var(right, var_idx),
+            ExprKind::Typed { value, .. } | ExprKind::Unary { value, .. } | ExprKind::Generic { obj: value, .. } => Self::expr_reads_list_index(value, var_idx),
+            ExprKind::Stmt(stmt) => Self::stmt_reads_list_index(stmt, var_idx),
+            ExprKind::Binary { left, right, .. } | ExprKind::Range { start: left, stop: right, .. } => Self::expr_reads_list_index(left, var_idx) || Self::expr_reads_list_index(right, var_idx),
+            ExprKind::Tuple(items) | ExprKind::List(items) => items.iter().any(|item| Self::expr_reads_list_index(item, var_idx)),
+            ExprKind::Repeat { value, .. } => Self::expr_reads_list_index(value, var_idx),
+            ExprKind::Dict(items) => items.iter().any(|(_, value)| Self::expr_reads_list_index(value, var_idx)),
+            ExprKind::Id(_, obj) => obj.as_deref().is_some_and(|obj| Self::expr_reads_list_index(obj, var_idx)),
+            ExprKind::Call { obj, params } => Self::expr_reads_list_index(obj, var_idx) || params.iter().any(|param| Self::expr_reads_list_index(param, var_idx)),
+            _ => false,
+        }
+    }
+
+    fn stmt_reads_list_index(stmt: &Stmt, var_idx: u32) -> bool {
+        match &stmt.kind {
+            StmtKind::Let { value, .. } => Self::stmt_reads_list_index(value, var_idx),
+            StmtKind::Expr(expr, _) | StmtKind::Return(Some(expr)) => Self::expr_reads_list_index(expr, var_idx),
+            StmtKind::Block(stmts) => stmts.iter().any(|stmt| Self::stmt_reads_list_index(stmt, var_idx)),
+            StmtKind::If { cond, then_body, else_body } => {
+                Self::expr_reads_list_index(cond, var_idx) || Self::stmt_reads_list_index(then_body, var_idx) || else_body.as_deref().is_some_and(|body| Self::stmt_reads_list_index(body, var_idx))
+            }
+            _ => false,
+        }
+    }
+
+    fn expr_allows_list_fast_path(expr: &Expr, var_idx: u32) -> bool {
+        match &expr.kind {
+            ExprKind::Var(idx) => *idx != var_idx,
+            ExprKind::Binary { left, op, right } if op.is_assign() => !Self::expr_uses_var(left, var_idx) && Self::expr_allows_list_fast_path(right, var_idx),
+            ExprKind::Binary { left, op: BinaryOp::Idx, right } if matches!(left.kind, ExprKind::Var(idx) if idx == var_idx) => !Self::expr_uses_var(right, var_idx),
+            ExprKind::Typed { value, .. } | ExprKind::Unary { value, .. } | ExprKind::Generic { obj: value, .. } => Self::expr_allows_list_fast_path(value, var_idx),
+            ExprKind::Stmt(stmt) => Self::stmt_allows_list_fast_path(stmt, var_idx),
+            ExprKind::Binary { left, right, .. } | ExprKind::Range { start: left, stop: right, .. } => Self::expr_allows_list_fast_path(left, var_idx) && Self::expr_allows_list_fast_path(right, var_idx),
+            ExprKind::Tuple(items) | ExprKind::List(items) => items.iter().all(|item| Self::expr_allows_list_fast_path(item, var_idx)),
+            ExprKind::Repeat { value, .. } => Self::expr_allows_list_fast_path(value, var_idx),
+            ExprKind::Dict(items) => items.iter().all(|(_, value)| Self::expr_allows_list_fast_path(value, var_idx)),
+            ExprKind::Id(_, obj) => obj.as_deref().map(|obj| Self::expr_allows_list_fast_path(obj, var_idx)).unwrap_or(true),
+            ExprKind::Call { obj, params } => Self::expr_allows_list_fast_path(obj, var_idx) && params.iter().all(|param| Self::expr_allows_list_fast_path(param, var_idx)),
+            ExprKind::Closure { .. } => false,
+            _ => true,
+        }
+    }
+
+    fn stmt_allows_list_fast_path(stmt: &Stmt, var_idx: u32) -> bool {
+        match &stmt.kind {
+            StmtKind::Let { value, .. } => Self::stmt_allows_list_fast_path(value, var_idx),
+            StmtKind::Expr(expr, _) | StmtKind::Return(Some(expr)) => Self::expr_allows_list_fast_path(expr, var_idx),
+            StmtKind::Block(stmts) => stmts.iter().all(|stmt| Self::stmt_allows_list_fast_path(stmt, var_idx)),
+            StmtKind::If { cond, then_body, else_body } => {
+                Self::expr_allows_list_fast_path(cond, var_idx) && Self::stmt_allows_list_fast_path(then_body, var_idx) && else_body.as_deref().map(|body| Self::stmt_allows_list_fast_path(body, var_idx)).unwrap_or(true)
+            }
+            _ => false,
+        }
+    }
+
+    fn push_loop_list_fast_paths(&mut self, ctx: &mut BuildContext, body: &Stmt) -> Result<usize> {
+        let saved_len = ctx.list_fast_path_len();
+        for var_idx in 0..ctx.vars.len() as u32 {
+            if !Self::stmt_reads_list_index(body, var_idx) || !Self::stmt_allows_list_fast_path(body, var_idx) {
+                continue;
+            }
+            let Some(Type::List(elem_ty)) = ctx.local_type_hint(var_idx) else {
+                continue;
+            };
+            let Some((ptr_fn_name, elem_ty)) = Self::list_data_ptr_shortcut(elem_ty.as_ref()) else {
+                continue;
+            };
+            let Some(list) = ctx.get_var(var_idx)?.get(ctx) else {
+                continue;
+            };
+            let data_ptr_fn = self.get_native_fn_cached(ptr_fn_name, &[Type::Any])?;
+            let data = self.call(ctx, data_ptr_fn, vec![list.0])?;
+            ctx.push_list_fast_path(ListFastPath { var_idx, elem_ty, data: data.0 });
+        }
+        Ok(saved_len)
     }
 
     fn closure_value(&self, ctx: &mut BuildContext, id: u32) -> Result<LocalVar> {
@@ -1037,6 +1228,233 @@ impl JITRunTime {
         Ok((ctx.builder.inst_results(call_inst)[0], Type::Bool).into())
     }
 
+    fn inline_expr_weight(expr: &Expr) -> usize {
+        match &expr.kind {
+            ExprKind::Typed { value, .. } | ExprKind::Unary { value, .. } => 1 + Self::inline_expr_weight(value),
+            ExprKind::Binary { left, right, .. } => 1 + Self::inline_expr_weight(left) + Self::inline_expr_weight(right),
+            ExprKind::Generic { obj, .. } => 1 + Self::inline_expr_weight(obj),
+            ExprKind::Tuple(items) | ExprKind::List(items) => 1 + items.iter().map(Self::inline_expr_weight).sum::<usize>(),
+            ExprKind::Repeat { value, .. } => 1 + Self::inline_expr_weight(value),
+            ExprKind::Dict(items) => 1 + items.iter().map(|(_, value)| Self::inline_expr_weight(value)).sum::<usize>(),
+            ExprKind::Range { start, stop, .. } => 1 + Self::inline_expr_weight(start) + Self::inline_expr_weight(stop),
+            ExprKind::Call { obj, params } => 1 + Self::inline_expr_weight(obj) + params.iter().map(Self::inline_expr_weight).sum::<usize>(),
+            ExprKind::Stmt(_) | ExprKind::Closure { .. } => usize::MAX,
+            _ => 1,
+        }
+    }
+
+    fn inline_stmt_weight(stmt: &Stmt) -> usize {
+        match &stmt.kind {
+            StmtKind::Expr(expr, _) | StmtKind::Return(Some(expr)) => 1 + Self::inline_expr_weight(expr),
+            StmtKind::Block(stmts) => 1 + stmts.iter().map(Self::inline_stmt_weight).sum::<usize>(),
+            StmtKind::If { cond, then_body, else_body } => 1 + Self::inline_expr_weight(cond) + Self::inline_stmt_weight(then_body) + else_body.as_deref().map(Self::inline_stmt_weight).unwrap_or(0),
+            StmtKind::While { body, .. } | StmtKind::Loop(body) | StmtKind::For { body, .. } => {
+                if Self::inline_stmt_contains_return(body) {
+                    usize::MAX
+                } else {
+                    16 + Self::inline_stmt_weight(body)
+                }
+            }
+            _ => usize::MAX,
+        }
+    }
+
+    fn inline_stmt_contains_return(stmt: &Stmt) -> bool {
+        match &stmt.kind {
+            StmtKind::Return(_) => true,
+            StmtKind::Block(stmts) => stmts.iter().any(Self::inline_stmt_contains_return),
+            StmtKind::If { then_body, else_body, .. } => Self::inline_stmt_contains_return(then_body) || else_body.as_deref().is_some_and(Self::inline_stmt_contains_return),
+            StmtKind::While { body, .. } | StmtKind::Loop(body) | StmtKind::For { body, .. } => Self::inline_stmt_contains_return(body),
+            _ => false,
+        }
+    }
+
+    fn inline_stmt_returns_value(stmt: &Stmt) -> bool {
+        match &stmt.kind {
+            StmtKind::Return(Some(_)) => true,
+            StmtKind::Expr(_, close) => !*close,
+            StmtKind::Block(stmts) => {
+                for stmt in stmts {
+                    if Self::inline_stmt_returns_value(stmt) {
+                        return true;
+                    }
+                }
+                false
+            }
+            StmtKind::If { then_body, else_body: Some(else_body), .. } => Self::inline_stmt_returns_value(then_body) && Self::inline_stmt_returns_value(else_body),
+            _ => false,
+        }
+    }
+
+    fn inline_return_types(stmt: &Stmt, out: &mut Vec<Type>) {
+        match &stmt.kind {
+            StmtKind::Return(Some(expr)) => out.push(expr.get_type()),
+            StmtKind::Expr(expr, close) if !*close => out.push(expr.get_type()),
+            StmtKind::Block(stmts) => stmts.iter().for_each(|stmt| Self::inline_return_types(stmt, out)),
+            StmtKind::If { then_body, else_body, .. } => {
+                Self::inline_return_types(then_body, out);
+                if let Some(else_body) = else_body {
+                    Self::inline_return_types(else_body, out);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn inline_return_ty(fn_name: &str, ret_ty: &Type, body: &Stmt) -> Type {
+        if !ret_ty.is_any() || !fn_name.starts_with("__closure_") {
+            return ret_ty.clone();
+        }
+        let mut return_tys = Vec::new();
+        Self::inline_return_types(body, &mut return_tys);
+        let Some(first) = return_tys.first() else {
+            return ret_ty.clone();
+        };
+        if first.is_any() || return_tys.iter().any(|ty| ty != first) { ret_ty.clone() } else { first.clone() }
+    }
+
+    fn can_inline_stmt(stmt: &Stmt) -> bool {
+        match &stmt.kind {
+            StmtKind::Expr(expr, _) | StmtKind::Return(Some(expr)) => Self::inline_expr_weight(expr) != usize::MAX,
+            StmtKind::Block(stmts) => stmts.iter().all(Self::can_inline_stmt),
+            StmtKind::If { cond, then_body, else_body } => Self::inline_expr_weight(cond) != usize::MAX && Self::can_inline_stmt(then_body) && else_body.as_deref().map(Self::can_inline_stmt).unwrap_or(true),
+            StmtKind::While { body, .. } | StmtKind::Loop(body) | StmtKind::For { body, .. } => !Self::inline_stmt_contains_return(body),
+            _ => false,
+        }
+    }
+
+    fn gen_inline_return(&mut self, ctx: &mut BuildContext, ret_ty: &Type, exit_block: Block, value: Option<&Expr>) -> Result<()> {
+        let value = value.ok_or_else(|| anyhow!("inline non-void function returned without value"))?;
+        let value = self.eval(ctx, value)?.get(ctx).ok_or_else(|| anyhow!("inline return expression has no value: {:?}", value))?;
+        let value = if value.1 != *ret_ty { self.convert(ctx, value, ret_ty.clone())? } else { value.0 };
+        ctx.builder.ins().jump(exit_block, &[cranelift::codegen::ir::BlockArg::Value(value)]);
+        Ok(())
+    }
+
+    fn gen_inline_stmt(&mut self, ctx: &mut BuildContext, stmt: &Stmt, ret_ty: &Type, exit_block: Block) -> Result<bool> {
+        match &stmt.kind {
+            StmtKind::Expr(expr, close) => {
+                if *close {
+                    let _ = self.eval(ctx, expr)?;
+                    Ok(false)
+                } else {
+                    self.gen_inline_return(ctx, ret_ty, exit_block, Some(expr))?;
+                    Ok(true)
+                }
+            }
+            StmtKind::Return(expr) => {
+                self.gen_inline_return(ctx, ret_ty, exit_block, expr.as_ref())?;
+                Ok(true)
+            }
+            StmtKind::Block(stmts) => {
+                for stmt in stmts {
+                    if self.gen_inline_stmt(ctx, stmt, ret_ty, exit_block)? {
+                        return Ok(true);
+                    }
+                }
+                Ok(false)
+            }
+            StmtKind::If { cond, then_body, else_body } => {
+                self.declare_assigned_vars(ctx, then_body)?;
+                if let Some(else_body) = else_body {
+                    self.declare_assigned_vars(ctx, else_body)?;
+                }
+                let then_block = ctx.builder.create_block();
+                let cond = self.eval(ctx, cond)?.get(ctx).ok_or(anyhow!("未知的条件 {:?}", cond))?;
+                let cond = self.bool_value(ctx, cond)?;
+                let mut end_block = None;
+                if let Some(else_body) = else_body {
+                    let else_block = ctx.builder.create_block();
+                    ctx.builder.ins().brif(cond, then_block, &[], else_block, &[]);
+                    ctx.builder.switch_to_block(then_block);
+                    if !self.gen_inline_stmt(ctx, then_body, ret_ty, exit_block)? {
+                        let block = ctx.builder.create_block();
+                        ctx.builder.ins().jump(block, &[]);
+                        end_block = Some(block);
+                    }
+                    ctx.builder.switch_to_block(else_block);
+                    if !self.gen_inline_stmt(ctx, else_body, ret_ty, exit_block)? {
+                        if end_block.is_none() {
+                            end_block = Some(ctx.builder.create_block());
+                        }
+                        ctx.builder.ins().jump(end_block.unwrap(), &[]);
+                    }
+                    ctx.builder.seal_block(else_block);
+                } else {
+                    let block = ctx.builder.create_block();
+                    ctx.builder.ins().brif(cond, then_block, &[], block, &[]);
+                    end_block = Some(block);
+                    ctx.builder.switch_to_block(then_block);
+                    if !self.gen_inline_stmt(ctx, then_body, ret_ty, exit_block)? {
+                        ctx.builder.ins().jump(end_block.unwrap(), &[]);
+                    }
+                }
+                if let Some(block) = end_block {
+                    ctx.builder.switch_to_block(block);
+                }
+                ctx.builder.seal_block(then_block);
+                Ok(end_block.is_none())
+            }
+            _ => self.gen_stmt(ctx, stmt, None, None),
+        }
+    }
+
+    fn try_inline_call(&mut self, ctx: &mut BuildContext, id: u32, generic_args: &[Type], args: &[(Value, Type)], capture_len: usize) -> Result<Option<LocalVar>> {
+        if self.inline_depth >= 4 || self.inline_stack.contains(&id) || !generic_args.is_empty() || capture_len != 0 {
+            return Ok(None);
+        }
+        let (fn_name, symbol) = self.compiler.symbols.get_symbol(id).map(|(name, symbol)| (name.clone(), symbol.clone()))?;
+        let Symbol::Fn { ty: Type::Fn { tys, .. }, generic_params, cap, body, .. } = symbol else {
+            return Ok(None);
+        };
+        if !generic_params.is_empty() || !cap.vars.is_empty() || tys.len() != args.len() {
+            return Ok(None);
+        }
+        let body = body.as_ref().clone();
+        if !Self::can_inline_stmt(&body) || !Self::inline_stmt_returns_value(&body) {
+            return Ok(None);
+        };
+        let weight = Self::inline_stmt_weight(&body);
+        if weight > 64 || weight > self.inline_budget {
+            return Ok(None);
+        }
+
+        let arg_tys: Vec<Type> = args.iter().map(|(_, ty)| ty.clone()).collect();
+        let ret_ty = self.compiler.infer_fn_with_params(id, &arg_tys, generic_args)?;
+        if ret_ty.is_void() {
+            return Ok(None);
+        }
+        let inline_ret_ty = Self::inline_return_ty(fn_name.as_str(), &ret_ty, &body);
+        let local_type_hints = self.compiler.inferred_local_type_hints(id, generic_args, &arg_tys);
+        let mut inline_vars = Vec::with_capacity(args.len());
+        for (value, ty) in args.iter().cloned() {
+            inline_vars.push(LocalVar::Value { val: value, ty });
+        }
+
+        let saved_vars = std::mem::replace(&mut ctx.vars, inline_vars);
+        let saved_hints = std::mem::replace(&mut ctx.local_type_hints, local_type_hints);
+        self.inline_stack.push(id);
+        self.inline_depth += 1;
+        self.inline_budget -= weight;
+        let result = (|| -> Result<LocalVar> {
+            let exit_block = ctx.builder.create_block();
+            ctx.builder.append_block_param(exit_block, get_type(&inline_ret_ty)?);
+            let terminated = self.gen_inline_stmt(ctx, &body, &inline_ret_ty, exit_block)?;
+            if !terminated {
+                return Err(anyhow!("inline candidate did not return on all paths: {}", fn_name));
+            }
+            ctx.builder.switch_to_block(exit_block);
+            ctx.builder.seal_block(exit_block);
+            Ok(LocalVar::Value { val: ctx.builder.block_params(exit_block)[0], ty: inline_ret_ty })
+        })();
+        self.inline_budget += weight;
+        self.inline_depth -= 1;
+        self.inline_stack.pop();
+        ctx.local_type_hints = saved_hints;
+        ctx.vars = saved_vars;
+        result.map(Some)
+    }
+
     pub(crate) fn call_fn(&mut self, ctx: &mut BuildContext, id: u32, obj: Option<Expr>, params: &Vec<Expr>) -> Result<LocalVar> {
         self.call_fn_with_params(ctx, id, &[], obj, params)
     }
@@ -1047,6 +1465,7 @@ impl JITRunTime {
 
     pub(crate) fn call_fn_with_capture_values(&mut self, ctx: &mut BuildContext, id: u32, generic_args: &[Type], obj: Option<Expr>, params: &Vec<Expr>, capture_values: Option<Vec<(Value, Type)>>) -> Result<LocalVar> {
         let fn_name = self.compiler.symbols.get_symbol(id).map(|(name, _)| name.clone())?;
+        let has_receiver = obj.is_some();
         if capture_values.is_none()
             && generic_args.is_empty()
             && obj.is_none()
@@ -1068,24 +1487,8 @@ impl JITRunTime {
         if let Some(captures) = &capture_values {
             args.extend(captures.iter().cloned());
         }
-        if let [list, value] = args.as_slice()
-            && fn_name.as_str() == "Any::push"
-            && let Type::List(elem_ty) = &list.1
-            && let Some((fn_name, value_ty)) = Self::list_push_shortcut(elem_ty)
-        {
-            let value = self.convert(ctx, (value.0, value.1.clone()), value_ty.clone())?;
-            let push_fn = self.get_native_fn_cached(fn_name, &[Type::Any, value_ty])?;
-            self.call_for_side_effect(ctx, push_fn, vec![list.0, value])?;
-            return Ok(LocalVar::None);
-        }
-        if let [list, idx] = args.as_slice()
-            && fn_name.as_str() == "Any::get_idx"
-            && let Type::List(elem_ty) = &list.1
-            && let Some((fn_name, _ret_ty)) = Self::list_get_idx_shortcut(elem_ty)
-        {
-            let idx = self.convert(ctx, (idx.0, idx.1.clone()), Type::I64)?;
-            let get_idx_fn = self.get_native_fn_cached(fn_name, &[Type::Any, Type::I64])?;
-            return self.call(ctx, get_idx_fn, vec![list.0, idx]).map(|value| value.into());
+        if let Some(value) = self.try_intrinsic_collection_call(ctx, fn_name.as_str(), &args)? {
+            return Ok(value);
         }
         if fn_name.as_str().ends_with("Vec::swap")
             && let Some((base, vec_ty)) = args.first().cloned()
@@ -1097,6 +1500,9 @@ impl JITRunTime {
         }
         let visible_arg_len = args.len() - capture_values.as_ref().map(|captures| captures.len()).unwrap_or(0);
         let arg_tys: Vec<Type> = args.iter().take(visible_arg_len).map(|(_, ty)| ty.clone()).collect();
+        if !has_receiver && let Some(inlined) = self.try_inline_call(ctx, id, generic_args, &args, args.len() - visible_arg_len)? {
+            return Ok(inlined);
+        }
         let fn_info = match if generic_args.is_empty() { self.get_fn(id, &arg_tys) } else { Err(anyhow!("generic function needs specialization")) } {
             Ok(info) => info,
             Err(_) => self.gen_fn_with_params(Some(ctx), id, &arg_tys, generic_args).map_err(|e| {
@@ -1178,6 +1584,7 @@ impl JITRunTime {
                     }
                     let assign_expr = if op.is_assign() { Some(left.clone()) } else { None };
                     let assign_expected = if op.is_assign() { self.assignment_target_ty(ctx, left) } else { None };
+                    let left_var_idx = if let ExprKind::Var(idx) = &left.kind { Some(*idx) } else { None };
                     let left = match self.eval(ctx, left)?.get(ctx) {
                         Some(left) => left,
                         None => return Err(anyhow!("binary left has no value: {:?}", left)),
@@ -1211,6 +1618,14 @@ impl JITRunTime {
                             let right_value = right.clone().value()?;
                             if let Some(idx) = right_value.as_int() {
                                 let idx = ctx.builder.ins().iconst(types::I64, idx);
+                                if let Some(var_idx) = left_var_idx
+                                    && let Some(value) = self.intrinsic_list_fast_path_get_idx(ctx, var_idx, left.clone(), (idx, Type::I64))?
+                                {
+                                    return Ok(value.into());
+                                }
+                                if let Some(value) = self.intrinsic_list_get_idx(ctx, left.clone(), (idx, Type::I64))? {
+                                    return Ok(value.into());
+                                }
                                 self.call(ctx, self.get_method(&left.1, "get_idx")?, vec![left.0, idx]).map(|r| r.into())
                             } else {
                                 let key = ctx.get_const(&right_value)?;
@@ -1230,11 +1645,13 @@ impl JITRunTime {
                                 self.call(ctx, self.get_method(&left.1, "get_key")?, vec![left.0, right]).map(|r| r.into())
                             } else {
                                 let right = self.convert(ctx, right, Type::I64)?;
-                                if let Type::List(elem_ty) = &left.1
-                                    && let Some((fn_name, _ret_ty)) = Self::list_get_idx_shortcut(elem_ty)
+                                if let Some(var_idx) = left_var_idx
+                                    && let Some(value) = self.intrinsic_list_fast_path_get_idx(ctx, var_idx, left.clone(), (right, Type::I64))?
                                 {
-                                    let get_idx_fn = self.get_native_fn_cached(fn_name, &[Type::Any, Type::I64])?;
-                                    return self.call(ctx, get_idx_fn, vec![left.0, right]).map(|r| r.into());
+                                    return Ok(value.into());
+                                }
+                                if let Some(value) = self.intrinsic_list_get_idx(ctx, left.clone(), (right, Type::I64))? {
+                                    return Ok(value.into());
                                 }
                                 self.call(ctx, self.get_method(&left.1, "get_idx")?, vec![left.0, right]).map(|r| r.into())
                             }
@@ -1488,6 +1905,7 @@ impl JITRunTime {
                         let stop = self.convert(ctx, stop, range_ty.clone())?;
                         ctx.set_var(*idx, (start, range_ty.clone()).into())?;
                         self.declare_assigned_vars(ctx, body)?;
+                        let list_fast_path_len = self.push_loop_list_fast_paths(ctx, body)?;
 
                         let start_block = ctx.builder.create_block();
                         let body_block = ctx.builder.create_block();
@@ -1528,25 +1946,22 @@ impl JITRunTime {
                         ctx.builder.seal_block(continue_block);
                         ctx.builder.seal_block(start_block);
                         ctx.builder.switch_to_block(end_block);
+                        ctx.truncate_list_fast_paths(list_fast_path_len);
                     }
                 } else if let PatternKind::Var { idx, .. } = &pat.kind {
                     let vt = self.eval(ctx, range)?.get(ctx).unwrap();
-                    if let Type::List(elem_ty) = &vt.1 {
+                    if let Type::List(_) = &vt.1 {
                         let len_fn = self.get_native_fn_cached("Any::len", &[Type::Any])?;
                         let len = self.call(ctx, len_fn, vec![vt.0])?;
                         let len = self.convert(ctx, len.into(), Type::I64)?;
                         let zero = ctx.builder.ins().iconst(types::I64, 0);
-                        let get_idx_fn = if let Some((fn_name, _)) = Self::list_get_idx_shortcut(elem_ty) {
-                            self.get_native_fn_cached(fn_name, &[Type::Any, Type::I64])?
+                        let first = if let Some(first) = self.intrinsic_list_get_idx(ctx, vt.clone(), (zero, Type::I64))? {
+                            first
                         } else {
-                            self.get_native_fn_cached("Any::get_idx", &[Type::Any, Type::I64])?
+                            let get_idx_fn = self.get_native_fn_cached("Any::get_idx", &[Type::Any, Type::I64])?;
+                            self.call(ctx, get_idx_fn, vec![vt.0, zero])?
                         };
-                        let get_idx_ret_ty = get_idx_fn.get_type()?;
-                        let get_idx_id = get_idx_fn.get_id()?;
-                        let get_idx_ref = self.get_fn_ref(ctx, get_idx_id);
-                        let call_inst = ctx.builder.ins().call(get_idx_ref, &[vt.0, zero]);
-                        let first = ctx.builder.inst_results(call_inst)[0];
-                        ctx.set_var(*idx, (first, get_idx_ret_ty.clone()).into())?;
+                        ctx.set_var(*idx, first.into())?;
                         self.declare_assigned_vars(ctx, body)?;
 
                         let index_var = ctx.builder.declare_var(types::I64);
@@ -1562,10 +1977,13 @@ impl JITRunTime {
                         ctx.builder.ins().brif(cond, body_block, &[], end_block, &[]);
 
                         ctx.builder.switch_to_block(body_block);
-                        let get_idx_ref = ctx.get_fn_ref(get_idx_id).unwrap();
-                        let call_inst = ctx.builder.ins().call(get_idx_ref, &[vt.0, index]);
-                        let item = ctx.builder.inst_results(call_inst)[0];
-                        ctx.set_var(*idx, (item, get_idx_ret_ty).into())?;
+                        let item = if let Some(item) = self.intrinsic_list_get_idx(ctx, vt.clone(), (index, Type::I64))? {
+                            item
+                        } else {
+                            let get_idx_fn = self.get_native_fn_cached("Any::get_idx", &[Type::Any, Type::I64])?;
+                            self.call(ctx, get_idx_fn, vec![vt.0, index])?
+                        };
+                        ctx.set_var(*idx, item.into())?;
                         let body_terminated = self.gen_stmt(ctx, body, Some(end_block), Some(continue_block))?;
                         if !body_terminated {
                             ctx.builder.ins().jump(continue_block, &[]);

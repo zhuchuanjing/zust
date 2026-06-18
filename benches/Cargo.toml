@@ -16,6 +16,10 @@ path = "src/bug_demo.rs"
 name = "debug-sieve"
 path = "src/debug_sieve.rs"
 
+[[bin]]
+name = "spectral_concurrent"
+path = "src/spectral_concurrent.rs"
+
 [dependencies]
 dynamic = { package = "zust-dynamic", version = "0.9.5", path = "../dynamic" }
 vm = { package = "zust-vm", version = "0.9.11", path = "../vm" }

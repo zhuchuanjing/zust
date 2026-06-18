@@ -1871,7 +1871,7 @@ impl Compiler {
                 } else {
                     Type::Any
                 };
-                let pat = self.pat_to_var(pat, expr_ty)?;
+                let pat = self.pat_to_var(pat, expr_ty.clone())?;
                 compiled.last_mut().ok_or_else(|| Self::semantic_error(stmt_span, "没有生成可绑定模式的编译语句")).and_then(|stmt| stmt.bind_pattern(pat))?;
             }
             StmtKind::Expr(expr, close) => {

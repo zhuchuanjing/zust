@@ -530,7 +530,9 @@ let vision = llm::complete(model, {
     image: "https://example.com/image.png",
 });
 
-let task_id = llm::deep(model, {prompt: "写一份长报告"}, "local/llm/progress");
+let task_id = llm::deep(model, {prompt: "写一份长报告"}, |result| {
+    root::add("local/llm/report", result);
+});
 ```
 
 可灵官方 API 的凭证是 Access Key 和 Secret Key。配置里传 `access_key` 和 `secret_key`，`zust-llm` 会为创建任务和轮询任务生成可灵要求的 HS256 JWT Bearer token。
@@ -546,16 +548,18 @@ let kling = {
 let image = llm::image(kling, {
     prompt: "清晨的安静山村",
     model_name: "kling-v2-1",
-}, "");
+}, |result| {
+    root::add("local/llm/image", result);
+});
 ```
 
 常用函数：
 
 - `llm::complete(model, value)`：文本、图片 URL、视频 URL 等多模态输入，返回 `Dynamic`。
-- `llm::image(model, value, notifier)`：图片生成或编辑，返回本地任务 id，完成后结果也会发给 notifier。
+- `llm::image(model, value, callback)`：图片生成或编辑，返回本地任务 id，完成后结果会传给 callback closure。
 - `llm::audio(model, value)`：语音识别，输入可用 URL 或 bytes，输出文字。
 - `llm::tts(model, value)`：输入文字或 `{text/input: ...}`，输出音频 bytes 或音频 URL。
-- `llm::deep(model, value, notifier)`：启动异步补全任务，并通过 ROOT 通知进度。
+- `llm::deep(model, value, callback)`：启动异步补全任务，完成后结果会传给 callback closure。
 
 大体积二进制输入应优先上传到对象存储，再把 URL 传给支持 URL 输入的模型，避免把大 payload 塞进 LLM 请求体。
 

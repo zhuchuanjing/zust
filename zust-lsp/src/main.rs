@@ -464,6 +464,13 @@ fn collect_pattern_symbols(text: &str, pat: &Pattern, symbols: &mut Vec<SymbolIn
             }
         }
         PatternKind::Member(inner, _) | PatternKind::Idx(inner, _) => collect_pattern_symbols(text, inner, symbols),
+        PatternKind::Struct { fields, .. } => {
+            for (_, sub) in fields {
+                if let Some(sub) = sub {
+                    collect_pattern_symbols(text, sub, symbols);
+                }
+            }
+        }
         PatternKind::Wildcard | PatternKind::Var { .. } | PatternKind::Literal(_) => {}
     }
 }

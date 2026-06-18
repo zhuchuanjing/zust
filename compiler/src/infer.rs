@@ -158,7 +158,7 @@ impl Compiler {
                 self.add_name("".into());
                 self.add_ty(expr_ty);
             }
-            PatternKind::Literal(_) | PatternKind::Member(_, _) | PatternKind::Idx(_, _) => {}
+            PatternKind::Literal(_) | PatternKind::Member(_, _) | PatternKind::Idx(_, _) | PatternKind::Struct { .. } => {}
         }
         Ok(())
     }
@@ -486,6 +486,15 @@ impl Compiler {
                     Type::Bool
                 } else if op == &BinaryOp::Idx {
                     let left_ty = self.infer_expr(left)?;
+                    if matches!(right.kind, ExprKind::Range { .. }) {
+                        // 切片 `arr[a..b]` 仍产生同元素类型的 list,
+                        // 长度未定所以固定返回 `Type::List(elem)`。
+                        let elem_ty = match &left_ty {
+                            Type::Array(e, _) | Type::Vec(e, _) | Type::List(e) => (**e).clone(),
+                            _ => Type::Any,
+                        };
+                        return Ok(Type::List(std::rc::Rc::new(elem_ty)));
+                    }
                     if let Type::Array(elem_ty, _) = left_ty {
                         (*elem_ty).clone()
                     } else if let Type::Vec(elem_ty, _) = left_ty {

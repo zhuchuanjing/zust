@@ -1,6 +1,6 @@
 use crate::ZustCallback;
 use crate::memory::alloc_dynamic;
-use anyhow::Result;
+use anyhow::{Result, anyhow};
 use dynamic::{Dynamic, Type};
 use std::future::Future;
 
@@ -68,43 +68,42 @@ where
     id.into()
 }
 
-fn llm_tx(notifier: &Dynamic) -> Option<Dynamic> {
-    if notifier.as_custom::<ZustCallback>().is_some() { None } else { Some(notifier.clone()) }
+fn llm_callback(value: &Dynamic, fn_name: &str) -> Result<ZustCallback> {
+    value.as_custom::<ZustCallback>().cloned().ok_or_else(|| anyhow!("{fn_name} callback must be closure"))
 }
 
-fn notify_or_call(notifier: &Dynamic, result: Dynamic) -> Result<()> {
-    if let Some(callback) = notifier.as_custom::<ZustCallback>() {
-        callback.call1(result)?;
-        Ok(())
-    } else {
-        llm::notify(notifier, result)
-    }
+fn callback_arg_error(err: anyhow::Error) -> Dynamic {
+    dynamic::map!("ok"=> false, "error"=> err.to_string())
 }
 
-extern "C" fn llm_deep(openai: *const Dynamic, value: *const Dynamic, notifier: *const Dynamic) -> *const Dynamic {
-    //启动一个任务 使用 消息点来接收 中间消息
+extern "C" fn llm_deep(openai: *const Dynamic, value: *const Dynamic, callback: *const Dynamic) -> *const Dynamic {
     let openai = unsafe { (&*openai).clone() };
     let value = unsafe { (&*value).clone() };
-    let notifier = unsafe { (&*notifier).clone() };
-    let tx = llm_tx(&notifier);
+    let callback = unsafe { (&*callback).clone() };
+    let callback = match llm_callback(&callback, "llm::deep") {
+        Ok(callback) => callback,
+        Err(err) => return alloc_dynamic(callback_arg_error(err)),
+    };
     let id = start_llm_task(value.clone(), || async move {
-        let r = llm::complete(openai, value, tx).await?;
-        notify_or_call(&notifier, r.clone())?;
+        let r = llm::complete(openai, value, None).await?;
+        callback.call1(r.clone())?;
         Ok(r)
     });
     alloc_dynamic(id.into())
 }
 
-extern "C" fn llm_image(openai: *const Dynamic, value: *const Dynamic, notifier: *const Dynamic) -> *const Dynamic {
-    //启动一个任务 使用 消息点来接收 中间消息
+extern "C" fn llm_image(openai: *const Dynamic, value: *const Dynamic, callback: *const Dynamic) -> *const Dynamic {
     let openai = unsafe { (&*openai).clone() };
     let value = unsafe { (&*value).clone() };
-    let notifier = unsafe { (&*notifier).clone() };
-    let tx = llm_tx(&notifier);
+    let callback = unsafe { (&*callback).clone() };
+    let callback = match llm_callback(&callback, "llm::image") {
+        Ok(callback) => callback,
+        Err(err) => return alloc_dynamic(callback_arg_error(err)),
+    };
     let id = start_llm_task(value.clone(), || async move {
-        match llm::image(openai, value, tx).await {
+        match llm::image(openai, value, None).await {
             Ok(r) => {
-                let _ = notify_or_call(&notifier, r.clone());
+                let _ = callback.call1(r.clone());
                 Ok(r)
             }
             Err(err) => {
@@ -113,7 +112,7 @@ extern "C" fn llm_image(openai: *const Dynamic, value: *const Dynamic, notifier:
                     "error" => err.to_string(),
                     "errorDebug" => format!("{err:?}")
                 );
-                let _ = notify_or_call(&notifier, fail.clone());
+                let _ = callback.call1(fail.clone());
                 Err(err)
             }
         }
@@ -145,12 +144,19 @@ mod tests {
     }
 
     #[test]
-    fn llm_notifier_can_call_zust_callback() -> anyhow::Result<()> {
+    fn llm_async_callback_requires_zust_callback() -> anyhow::Result<()> {
+        let error = llm_callback(&Dynamic::from("local/llm/progress"), "llm::deep").expect_err("root notifier path should be rejected");
+        assert_eq!(callback_arg_error(error).get_dynamic("ok").and_then(|value| value.as_bool()), Some(false));
+        Ok(())
+    }
+
+    #[test]
+    fn llm_async_callback_can_call_zust_callback() -> anyhow::Result<()> {
         *CALLBACK_RESULT.lock() = None;
         let callback = Dynamic::custom(ZustCallback::new(record_callback_result as *const () as usize, Type::Bool, Vec::new()));
 
-        assert!(llm_tx(&callback).is_none());
-        notify_or_call(&callback, dynamic::map!("text"=> "done"))?;
+        let callback = llm_callback(&callback, "llm::deep")?;
+        callback.call1(dynamic::map!("text"=> "done"))?;
 
         let result = CALLBACK_RESULT.lock().clone().expect("callback should receive result");
         assert_eq!(result.get_dynamic("text").map(|value| value.as_str().to_string()), Some("done".to_string()));

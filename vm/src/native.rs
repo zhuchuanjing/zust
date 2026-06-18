@@ -950,6 +950,24 @@ extern "C" fn get_idx(addr: *const Dynamic, idx: i64) -> *const Dynamic {
     if addr.is_null() { any_null() } else { alloc_dynamic(unsafe { (*addr).get_idx(idx as usize).unwrap_or(Dynamic::Null) }) }
 }
 
+fn list_get_idx_value(addr: *const Dynamic, idx: i64) -> Option<Dynamic> {
+    if addr.is_null() {
+        return None;
+    }
+    let Ok(idx) = usize::try_from(idx) else {
+        return None;
+    };
+    unsafe { (&*addr).get_idx(idx) }
+}
+
+fn dynamic_as_int(value: Dynamic) -> Option<i64> {
+    value.as_int().or_else(|| value.as_uint().and_then(|value| i64::try_from(value).ok()))
+}
+
+fn dynamic_as_uint(value: Dynamic) -> Option<u64> {
+    value.as_uint().or_else(|| value.as_int().and_then(|value| u64::try_from(value).ok()))
+}
+
 macro_rules! myvec_list_native {
     ($push:ident, $get_idx:ident, $set_idx:ident, $vec:ident, $dynamic:ident, $ty:ty, $fallback:expr) => {
         extern "C" fn $push(addr: *mut Dynamic, value: $ty) {
@@ -1050,15 +1068,63 @@ macro_rules! stdvec_list_native {
     };
 }
 
-myvec_list_native!(list_i8_push, list_i8_get_idx, list_i8_set_idx, VecI8, I8, i8, |value: Dynamic| value.as_int().map(|value| value as i8));
-myvec_list_native!(list_u16_push, list_u16_get_idx, list_u16_set_idx, VecU16, U16, u16, |value: Dynamic| value.as_uint().map(|value| value as u16));
-myvec_list_native!(list_i16_push, list_i16_get_idx, list_i16_set_idx, VecI16, I16, i16, |value: Dynamic| value.as_int().map(|value| value as i16));
-myvec_list_native!(list_u32_push, list_u32_get_idx, list_u32_set_idx, VecU32, U32, u32, |value: Dynamic| value.as_uint().map(|value| value as u32));
-myvec_list_native!(list_i32_push, list_i32_get_idx, list_i32_set_idx, VecI32, I32, i32, |value: Dynamic| value.as_int().map(|value| value as i32));
+myvec_list_native!(list_i8_push, list_i8_get_idx, list_i8_set_idx, VecI8, I8, i8, |value: Dynamic| dynamic_as_int(value).map(|value| value as i8));
+myvec_list_native!(list_u16_push, list_u16_get_idx, list_u16_set_idx, VecU16, U16, u16, |value: Dynamic| dynamic_as_uint(value).map(|value| value as u16));
+myvec_list_native!(list_i16_push, list_i16_get_idx, list_i16_set_idx, VecI16, I16, i16, |value: Dynamic| dynamic_as_int(value).map(|value| value as i16));
+myvec_list_native!(list_u32_push, list_u32_get_idx, list_u32_set_idx, VecU32, U32, u32, |value: Dynamic| dynamic_as_uint(value).map(|value| value as u32));
+myvec_list_native!(list_i32_push, list_i32_get_idx, list_i32_set_idx, VecI32, I32, i32, |value: Dynamic| dynamic_as_int(value).map(|value| value as i32));
 myvec_list_native!(list_f32_push, list_f32_get_idx, list_f32_set_idx, VecF32, F32, f32, |value: Dynamic| value.as_float().map(|value| value as f32));
-stdvec_list_native!(list_u64_push, list_u64_get_idx, list_u64_set_idx, VecU64, U64, u64, |value: Dynamic| value.as_uint());
-stdvec_list_native!(list_i64_push, list_i64_get_idx, list_i64_set_idx, VecI64, I64, i64, |value: Dynamic| value.as_int());
+stdvec_list_native!(list_u64_push, list_u64_get_idx, list_u64_set_idx, VecU64, U64, u64, dynamic_as_uint);
+stdvec_list_native!(list_i64_push, list_i64_get_idx, list_i64_set_idx, VecI64, I64, i64, dynamic_as_int);
 stdvec_list_native!(list_f64_push, list_f64_get_idx, list_f64_set_idx, VecF64, F64, f64, |value: Dynamic| value.as_float());
+
+extern "C" fn list_u64_data_ptr(addr: *const Dynamic) -> *const u64 {
+    if addr.is_null() {
+        return std::ptr::null();
+    }
+    unsafe {
+        match &*addr {
+            Dynamic::VecU64(values) => values.as_ptr(),
+            _ => std::ptr::null(),
+        }
+    }
+}
+
+extern "C" fn list_i64_data_ptr(addr: *const Dynamic) -> *const i64 {
+    if addr.is_null() {
+        return std::ptr::null();
+    }
+    unsafe {
+        match &*addr {
+            Dynamic::VecI64(values) => values.as_ptr(),
+            _ => std::ptr::null(),
+        }
+    }
+}
+
+extern "C" fn list_f64_data_ptr(addr: *const Dynamic) -> *const f64 {
+    if addr.is_null() {
+        return std::ptr::null();
+    }
+    unsafe {
+        match &*addr {
+            Dynamic::VecF64(values) => values.as_ptr(),
+            _ => std::ptr::null(),
+        }
+    }
+}
+
+extern "C" fn list_i8_get_idx_i64(addr: *const Dynamic, idx: i64) -> i64 {
+    list_get_idx_value(addr, idx).and_then(dynamic_as_int).map(|value| value as i8 as i64).unwrap_or_default()
+}
+
+extern "C" fn list_u16_get_idx_i64(addr: *const Dynamic, idx: i64) -> i64 {
+    list_get_idx_value(addr, idx).and_then(dynamic_as_uint).map(|value| value as u16 as i64).unwrap_or_default()
+}
+
+extern "C" fn list_i16_get_idx_i64(addr: *const Dynamic, idx: i64) -> i64 {
+    list_get_idx_value(addr, idx).and_then(dynamic_as_int).map(|value| value as i16 as i64).unwrap_or_default()
+}
 
 extern "C" fn list_bool_push(addr: *mut Dynamic, value: bool) {
     if !addr.is_null() {
@@ -1075,7 +1141,11 @@ extern "C" fn list_bool_get_idx(addr: *const Dynamic, idx: i64) -> bool {
     let Ok(idx) = usize::try_from(idx) else {
         return false;
     };
-    unsafe { (&*addr).get_idx(idx).and_then(|value| value.as_bool()).unwrap_or(false) }
+    unsafe { (&*addr).get_idx(idx).is_some_and(|value| value.is_true() || value.as_int().is_some_and(|value| value != 0) || value.as_uint().is_some_and(|value| value != 0)) }
+}
+
+extern "C" fn list_bool_get_idx_i64(addr: *const Dynamic, idx: i64) -> i64 {
+    list_get_idx_value(addr, idx).map(|value| i64::from(value.is_true() || value.as_int().is_some_and(|value| value != 0) || value.as_uint().is_some_and(|value| value != 0))).unwrap_or_default()
 }
 
 extern "C" fn list_bool_set_idx(addr: *mut Dynamic, idx: i64, value: bool) {
@@ -1105,7 +1175,11 @@ extern "C" fn list_u8_get_idx(addr: *const Dynamic, idx: i64) -> u8 {
     let Ok(idx) = usize::try_from(idx) else {
         return 0;
     };
-    unsafe { (&*addr).get_idx(idx).and_then(|value| value.as_uint()).map(|value| value as u8).unwrap_or(0) }
+    unsafe { (&*addr).get_idx(idx).and_then(dynamic_as_uint).map(|value| value as u8).unwrap_or(0) }
+}
+
+extern "C" fn list_u8_get_idx_i64(addr: *const Dynamic, idx: i64) -> i64 {
+    list_get_idx_value(addr, idx).and_then(dynamic_as_uint).map(|value| value as u8 as i64).unwrap_or_default()
 }
 
 extern "C" fn list_u8_set_idx(addr: *mut Dynamic, idx: i64, value: u8) {
@@ -1318,7 +1392,7 @@ pub const STD: [(&str, &[Type], Type, *const u8); 5] = [
     ("rand", &[Type::Any, Type::Any], Type::Any, random as *const u8),
 ];
 
-pub const ANY: [(&str, &[Type], Type, *const u8); 69] = [
+pub const ANY: [(&str, &[Type], Type, *const u8); 78] = [
     ("Any::null", &[], Type::Any, any_null as *const u8),
     ("Any::is_map", &[Type::Any], Type::Bool, any_is_map as *const u8),
     ("Any::is_list", &[Type::Any], Type::Bool, any_is_list as *const u8),
@@ -1333,18 +1407,23 @@ pub const ANY: [(&str, &[Type], Type, *const u8); 69] = [
     ("Any::get_idx", &[Type::Any, Type::I64], Type::Any, get_idx as *const u8),
     ("Any::push_bool", &[Type::Any, Type::Bool], Type::Void, list_bool_push as *const u8),
     ("Any::get_idx_bool", &[Type::Any, Type::I64], Type::Bool, list_bool_get_idx as *const u8),
+    ("Any::get_idx_bool_i64", &[Type::Any, Type::I64], Type::I64, list_bool_get_idx_i64 as *const u8),
     ("Any::set_idx_bool", &[Type::Any, Type::I64, Type::Bool], Type::Void, list_bool_set_idx as *const u8),
     ("Any::push_u8", &[Type::Any, Type::U8], Type::Void, list_u8_push as *const u8),
     ("Any::get_idx_u8", &[Type::Any, Type::I64], Type::U8, list_u8_get_idx as *const u8),
+    ("Any::get_idx_u8_i64", &[Type::Any, Type::I64], Type::I64, list_u8_get_idx_i64 as *const u8),
     ("Any::set_idx_u8", &[Type::Any, Type::I64, Type::U8], Type::Void, list_u8_set_idx as *const u8),
     ("Any::push_i8", &[Type::Any, Type::I8], Type::Void, list_i8_push as *const u8),
     ("Any::get_idx_i8", &[Type::Any, Type::I64], Type::I8, list_i8_get_idx as *const u8),
+    ("Any::get_idx_i8_i64", &[Type::Any, Type::I64], Type::I64, list_i8_get_idx_i64 as *const u8),
     ("Any::set_idx_i8", &[Type::Any, Type::I64, Type::I8], Type::Void, list_i8_set_idx as *const u8),
     ("Any::push_u16", &[Type::Any, Type::U16], Type::Void, list_u16_push as *const u8),
     ("Any::get_idx_u16", &[Type::Any, Type::I64], Type::U16, list_u16_get_idx as *const u8),
+    ("Any::get_idx_u16_i64", &[Type::Any, Type::I64], Type::I64, list_u16_get_idx_i64 as *const u8),
     ("Any::set_idx_u16", &[Type::Any, Type::I64, Type::U16], Type::Void, list_u16_set_idx as *const u8),
     ("Any::push_i16", &[Type::Any, Type::I16], Type::Void, list_i16_push as *const u8),
     ("Any::get_idx_i16", &[Type::Any, Type::I64], Type::I16, list_i16_get_idx as *const u8),
+    ("Any::get_idx_i16_i64", &[Type::Any, Type::I64], Type::I64, list_i16_get_idx_i64 as *const u8),
     ("Any::set_idx_i16", &[Type::Any, Type::I64, Type::I16], Type::Void, list_i16_set_idx as *const u8),
     ("Any::push_u32", &[Type::Any, Type::U32], Type::Void, list_u32_push as *const u8),
     ("Any::get_idx_u32", &[Type::Any, Type::I64], Type::U32, list_u32_get_idx as *const u8),
@@ -1356,12 +1435,15 @@ pub const ANY: [(&str, &[Type], Type, *const u8); 69] = [
     ("Any::get_idx_f32", &[Type::Any, Type::I64], Type::F32, list_f32_get_idx as *const u8),
     ("Any::set_idx_f32", &[Type::Any, Type::I64, Type::F32], Type::Void, list_f32_set_idx as *const u8),
     ("Any::push_u64", &[Type::Any, Type::U64], Type::Void, list_u64_push as *const u8),
+    ("Any::data_ptr_u64", &[Type::Any], Type::Any, list_u64_data_ptr as *const u8),
     ("Any::get_idx_u64", &[Type::Any, Type::I64], Type::U64, list_u64_get_idx as *const u8),
     ("Any::set_idx_u64", &[Type::Any, Type::I64, Type::U64], Type::Void, list_u64_set_idx as *const u8),
     ("Any::push_i64", &[Type::Any, Type::I64], Type::Void, list_i64_push as *const u8),
+    ("Any::data_ptr_i64", &[Type::Any], Type::Any, list_i64_data_ptr as *const u8),
     ("Any::get_idx_i64", &[Type::Any, Type::I64], Type::I64, list_i64_get_idx as *const u8),
     ("Any::set_idx_i64", &[Type::Any, Type::I64, Type::I64], Type::Void, list_i64_set_idx as *const u8),
     ("Any::push_f64", &[Type::Any, Type::F64], Type::Void, list_f64_push as *const u8),
+    ("Any::data_ptr_f64", &[Type::Any], Type::Any, list_f64_data_ptr as *const u8),
     ("Any::get_idx_f64", &[Type::Any, Type::I64], Type::F64, list_f64_get_idx as *const u8),
     ("Any::set_idx_f64", &[Type::Any, Type::I64, Type::F64], Type::Void, list_f64_set_idx as *const u8),
     ("Any::push_str", &[Type::Any, Type::Str], Type::Void, list_str_push as *const u8),
@@ -1375,6 +1457,7 @@ pub const ANY: [(&str, &[Type], Type, *const u8); 69] = [
     ("Any::del_key", &[Type::Any, Type::Any], Type::Any, del_key as *const u8),
     ("Any::set_idx", &[Type::Any, Type::I64, Type::Any], Type::Void, set_idx as *const u8),
     ("Any::set_key", &[Type::Any, Type::Any, Type::Any], Type::Void, set_key as *const u8),
+    ("Any::set", &[Type::Any, Type::Any, Type::Any], Type::Void, set_key as *const u8),
     ("Any::from_i64", &[Type::I64], Type::Any, any_from_i64 as *const u8),
     ("Any::from_u64", &[Type::U64], Type::Any, any_from_u64 as *const u8),
     ("Any::from_bool", &[Type::Bool], Type::Any, any_from_bool as *const u8),

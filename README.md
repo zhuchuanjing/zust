@@ -527,10 +527,10 @@ pub fn ws_message(req) {
 `llm` wraps model, image, audio, and TTS requests. The first argument is model configuration, usually with `url`, `model`, `key`, and optional request defaults. If `url` is missing, GLM, Doubao, DeepSeek, and Qwen-compatible URLs are inferred from `model`.
 
 - `llm::complete(model, value)`: input can be text, text plus image URLs, or text plus video URLs. Output is `Dynamic`.
-- `llm::image(model, value, notifier)`: input is text plus optional image URLs. The call returns a local task id; the completed result is `{url: "..."}` with a downloadable image URL, and is also sent through the notifier when provided.
+- `llm::image(model, value, callback)`: input is text plus optional image URLs. The call returns a local task id; the completed result is `{url: "..."}` with a downloadable image URL, and is passed to the callback closure.
 - `llm::audio(model, value)`: input audio is passed by URL or bytes. Output is text.
 - `llm::tts(model, value)`: input is text or `{text/input: ...}`. Output is audio bytes or an audio URL.
-- `llm::deep(model, value, notifier)`: start an async completion task and notify progress through `root`.
+- `llm::deep(model, value, callback)`: start an async completion task and pass the completed result to the callback closure.
 
 Examples:
 
@@ -547,7 +547,9 @@ let vision = llm::complete(model, {
     image: "https://example.com/image.png",
 });
 
-let task_id = llm::deep(model, {prompt: "Write a longer report"}, "local/llm/progress");
+let task_id = llm::deep(model, {prompt: "Write a longer report"}, |result| {
+    root::add("local/llm/report", result);
+});
 ```
 
 Kling official API credentials are Access Key and Secret Key. Pass them as `access_key` and `secret_key`; `zust-llm` generates the required HS256 JWT Bearer token for create and poll requests.
@@ -563,7 +565,9 @@ let kling = {
 let image = llm::image(kling, {
     prompt: "A quiet mountain village at sunrise",
     model_name: "kling-v2-1",
-}, "");
+}, |result| {
+    root::add("local/llm/image", result);
+});
 ```
 
 Large binary inputs should be uploaded to object storage first and passed to model APIs by URL when the provider supports URLs. This keeps large payloads out of LLM request bodies.

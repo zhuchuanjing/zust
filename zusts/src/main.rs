@@ -40,6 +40,21 @@ const SYNTAX_EDGE_BOOL_TESTS: &[&str] = &[
     "syntax_edge::test_void_null_in_bool_context",
 ];
 
+const SYNTAX_MATCH_BOOL_TESTS: &[&str] = &[
+    "syntax_match::test_match_literal_int",
+    "syntax_match::test_match_or_pattern",
+    "syntax_match::test_match_wildcard_default",
+    "syntax_match::test_match_tuple_destructure",
+    "syntax_match::test_match_list_with_rest",
+    "syntax_match::test_match_list_exact",
+    "syntax_match::test_match_struct_field_capture",
+    "syntax_match::test_match_struct_literal_in_field",
+    "syntax_match::test_match_guard",
+    "syntax_match::test_match_string_literal",
+    "syntax_match::test_match_bool",
+    "syntax_match::test_match_as_statement_expression",
+];
+
 fn main() -> Result<()> {
     let vm = vm::Vm::with_all()?;
 
@@ -52,8 +67,10 @@ fn main() -> Result<()> {
     vm_import_file(&vm, "qsort", "qsort.zs")?;
     vm_import_file(&vm, "syntax_suite", "syntax_suite.zs")?;
     vm_import_file(&vm, "syntax_edge", "syntax_edge.zs")?;
+    vm_import_file(&vm, "syntax_match", "syntax_match.zs")?;
     vm_import_file(&vm, "test_recursive_bug", "bug_tests/test_recursive_bug.zs")?;
     vm_import_file(&vm, "test_is_list_minimal", "bug_tests/test_is_list_minimal.zs")?;
+    vm_import_file(&vm, "syntax_match", "syntax_match.zs")?;
 
     println!("示例模块加载完成\n");
 
@@ -62,6 +79,9 @@ fn main() -> Result<()> {
         run_bool_test(&vm, name)?;
     }
     for name in SYNTAX_EDGE_BOOL_TESTS {
+        run_bool_test(&vm, name)?;
+    }
+    for name in SYNTAX_MATCH_BOOL_TESTS {
         run_bool_test(&vm, name)?;
     }
     run_test(&vm, "test_recursive_bug::run_all_tests", &[])?;

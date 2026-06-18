@@ -707,6 +707,12 @@ impl Parser {
         self.expr_with_min_weight(None, None, 0, false).map(|(e, _)| e)
     }
 
+    /// 类似 `get_expr_without_struct_literal`,但额外排除赋值类运算符
+    /// (`=`, `+=`, `-=` …)以便在 `match` arm body / guard 中 `=>` 不被吞成 `Assign`。
+    pub fn get_expr_no_assign(&mut self) -> Result<Expr> {
+        self.expr_with_min_weight(None, None, 1, false).map(|(e, _)| e)
+    }
+
     pub fn expr(&mut self, left: Option<(Expr, bool)>, left_op: Option<BinaryOp>) -> Result<(Expr, bool)> {
         self.expr_with_min_weight(left, left_op, 0, true)
     }
@@ -806,6 +812,9 @@ impl Parser {
             Ok((self.postfix_expr(start, dict)?, false))
         } else if (left.is_none() || left_op.is_some()) && self.keyword("if").is_ok() {
             let stmt = self.if_block()?;
+            Ok((Expr::new(ExprKind::Stmt(Box::new(stmt)), Span::new(start, self.current_pos())), true))
+        } else if (left.is_none() || left_op.is_some()) && self.keyword("match").is_ok() {
+            let stmt = self.match_block(start)?;
             Ok((Expr::new(ExprKind::Stmt(Box::new(stmt)), Span::new(start, self.current_pos())), true))
         } else if ch == b'|' && left.is_none() {
             let start = self.current_pos();

@@ -5,6 +5,65 @@ use super::{Expr, Parser, Pattern, Span, expr::ExprKind, pattern::PatternKind};
 use anyhow::{Result, anyhow};
 use smol_str::SmolStr;
 
+/// 把 pattern 引入的所有变量绑定生成出来,追加到 `out`。
+/// `access` 是该 pattern 整体对应的访问表达式(如 `__m_scrut` 或 `__m_scrut.field`)。
+fn collect_bindings(pat: &Pattern, access: &Expr, out: &mut Vec<Stmt>, span: Span) {
+    use crate::expr::BinaryOp;
+    let mk_let_ident = |name: SmolStr, value: Expr, span: Span| {
+        let p = Pattern::new(PatternKind::Ident { name, ty: Type::Any }, span);
+        let value_stmt = Stmt::new(StmtKind::Expr(value, true), span);
+        Stmt::new(StmtKind::Let { pat: p, value: Box::new(value_stmt) }, span)
+    };
+    let mk_bin = |left: Expr, op: BinaryOp, right: Expr, span: Span| Expr::new(ExprKind::Binary { left: Box::new(left), op, right: Box::new(right) }, span);
+    let mk_idx_int = |obj: Expr, i: i32, span: Span| mk_bin(obj, BinaryOp::Idx, Expr::new(ExprKind::Value(Dynamic::I32(i)), span), span);
+    let mk_field = |obj: Expr, name: SmolStr, span: Span| mk_bin(obj, BinaryOp::Idx, Expr::new(ExprKind::Value(Dynamic::String(name)), span), span);
+
+    match &pat.kind {
+        PatternKind::Ident { name, .. } => {
+            out.push(mk_let_ident(name.clone(), access.clone(), span));
+        }
+        PatternKind::Tuple(items) => {
+            for (i, p) in items.iter().enumerate() {
+                let elem = mk_idx_int(access.clone(), i as i32, span);
+                collect_bindings(p, &elem, out, span);
+            }
+        }
+        PatternKind::List { elems, has_rest } => {
+            let prefix = if *has_rest { elems.len() - 1 } else { elems.len() };
+            for (i, p) in elems.iter().take(prefix).enumerate() {
+                let elem = mk_idx_int(access.clone(), i as i32, span);
+                collect_bindings(p, &elem, out, span);
+            }
+            if *has_rest {
+                if let PatternKind::Ident { name, .. } = &elems.last().unwrap().kind {
+                    // 切片: access[prefix..];用 `ExprKind::Range` 而不是 `Binary{RangeOpen}`,
+                    // 与 parser 产物一致,这样下游 type infer / 优化都走同一条路径。
+                    let from = Expr::new(ExprKind::Value((prefix as u32).into()), span);
+                    let range = Expr::new(ExprKind::Range { start: Box::new(from), stop: Box::new(Expr::new(ExprKind::Value(Dynamic::Null), span)), inclusive: false }, span);
+                    let slice = Expr::new(ExprKind::Binary { left: Box::new(access.clone()), op: BinaryOp::Idx, right: Box::new(range) }, span);
+                    out.push(mk_let_ident(name.clone(), slice, span));
+                }
+            }
+        }
+        PatternKind::Struct { fields, .. } => {
+            for (fname, sub) in fields {
+                let field_access = mk_field(access.clone(), fname.clone(), span);
+                match sub {
+                    None => {
+                        // 简写 `field` —— 绑定同名变量
+                        out.push(mk_let_ident(fname.clone(), field_access, span));
+                    }
+                    Some(sub_pat) => {
+                        collect_bindings(sub_pat, &field_access, out, span);
+                    }
+                }
+            }
+        }
+        // 其它(Wildcard / Literal / Var / Member / Idx)在 match 上下文中不产生绑定
+        _ => {}
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Stmt {
     pub kind: StmtKind,
@@ -128,17 +187,9 @@ impl Stmt {
                             _ => return Err(anyhow!("..rest 后的模式必须是标识符")),
                         };
                         let from = Expr::new(ExprKind::Value((prefix_count as u32).into()), rest_pat.span);
-                        let slice_idx = Expr::new(
-                            ExprKind::Binary {
-                                left: Box::new(expr.clone()),
-                                op: crate::BinaryOp::Idx,
-                                right: Box::new(Expr::new(
-                                    ExprKind::Binary { left: Box::new(from), op: crate::BinaryOp::RangeOpen, right: Box::new(Expr::new(ExprKind::Value(Dynamic::Null), rest_pat.span)) },
-                                    rest_pat.span,
-                                )),
-                            },
-                            rest_pat.span,
-                        );
+                        // 用 `ExprKind::Range` 与 parser 产物对齐,确保下游 type infer 走切片分支。
+                        let range = Expr::new(ExprKind::Range { start: Box::new(from), stop: Box::new(Expr::new(ExprKind::Value(Dynamic::Null), rest_pat.span)), inclusive: false }, rest_pat.span);
+                        let slice_idx = Expr::new(ExprKind::Binary { left: Box::new(expr.clone()), op: crate::BinaryOp::Idx, right: Box::new(range) }, rest_pat.span);
                         stmts.push(Self::get_assign_expr(rest_expr, slice_idx));
                     }
                     Self::new(StmtKind::Block(stmts), self.span)
@@ -255,6 +306,149 @@ impl Parser {
             None
         };
         Ok(Stmt::new(StmtKind::If { cond, then_body, else_body }, Span::new(start, self.current_pos())))
+    }
+
+    /// 解析 `match scrut { pat ("|" pat)* ("if" guard)? => body ","? ... }`,
+    /// desugar 成 `Block + Let + If 链 + 临时变量`,返回顶层 `Block`(再由
+    /// 调用方用 `ExprKind::Stmt` 包成表达式)。
+    pub fn match_block(&mut self, start: usize) -> Result<Stmt> {
+        use crate::expr::{BinaryOp, ExprKind, UnaryOp};
+        use crate::pattern::{Pattern, PatternKind};
+
+        // ---- 一、解析阶段 ----
+        let scrut = self.get_expr_without_struct_literal()?;
+        self.whitespace()?;
+        self.take(b'{').map_err(|_| anyhow!("match 缺少 `{{`"))?;
+
+        // 每个 arm 是 (pats: Vec<Pattern>, guard: Option<Expr>, body: Expr)
+        let mut arms: Vec<(Vec<Pattern>, Option<Expr>, Expr)> = Vec::new();
+        loop {
+            self.whitespace()?;
+            if self.take(b'}').is_ok() {
+                break;
+            }
+            self.push_decl_scope();
+            let arm_res: Result<(Vec<Pattern>, Option<Expr>, Expr)> = (|| {
+                // 一组 pattern(用 `|` 分隔,or-pattern)
+                let mut pats = vec![self.pattern()?];
+                self.whitespace()?;
+                while matches!(self.get(), Ok(b'|')) && !matches!(self.ahead(), Ok(b'|')) {
+                    self.pos += 1;
+                    self.whitespace()?;
+                    pats.push(self.pattern()?);
+                    self.whitespace()?;
+                }
+                // 声明 pattern 引入的变量(对每个 alt 都声明,允许重名 → 由
+                // declare_symbol_in_current_scope 容错;这里我们只用第一个 alt 的 binding)
+                for pat in &pats[..1] {
+                    self.declare_pattern_symbols(pat)?;
+                }
+                // 校验 or-pattern:第二及之后必须是 Literal(MVP 限制)
+                if pats.len() > 1 {
+                    for p in &pats[1..] {
+                        if !matches!(p.kind, PatternKind::Literal(_) | PatternKind::Wildcard) {
+                            return Err(anyhow!("or-pattern 中除第一个外只支持字面量 / 通配模式 (MVP 限制)"));
+                        }
+                    }
+                }
+                // 可选 guard
+                self.whitespace()?;
+                let guard = if self.keyword("if").is_ok() {
+                    self.whitespace()?;
+                    Some(self.get_expr_no_assign()?)
+                } else {
+                    None
+                };
+                // `=>`
+                self.whitespace()?;
+                self.just("=>").map_err(|_| anyhow!("match arm 缺少 `=>`"))?;
+                self.whitespace()?;
+                // 体
+                let body_start = self.current_pos();
+                let body = if self.get()? == b'{' {
+                    let block_stmt = self.block()?;
+                    Expr::new(ExprKind::Stmt(Box::new(block_stmt)), Span::new(body_start, self.current_pos()))
+                } else {
+                    // body 也用 no_assign 防止 `=> body, ...` 中 `,` 后或下一 arm
+                    // 的 `=>` 被错误吞入(同时仍允许 +-*/ 等正常二元)。
+                    self.get_expr_no_assign()?
+                };
+                // 容忍尾随逗号
+                self.whitespace()?;
+                let _ = self.take(b',');
+                Ok((pats, guard, body))
+            })();
+            self.pop_decl_scope();
+            arms.push(arm_res?);
+        }
+        let span = Span::new(start, self.current_pos());
+
+        // ---- 二、声明 match 顶层临时变量 ----
+        // 为避免嵌套 match 重名,加 counter 后缀(简单递增,parser 本地状态)
+        let suffix = self.match_counter;
+        self.match_counter += 1;
+        let scrut_name: SmolStr = format!("__m_scrut_{}", suffix).into();
+        let done_name: SmolStr = format!("__m_done_{}", suffix).into();
+        let out_name: SmolStr = format!("__m_out_{}", suffix).into();
+        self.declare_symbol_in_current_scope(&scrut_name)?;
+        self.declare_symbol_in_current_scope(&done_name)?;
+        self.declare_symbol_in_current_scope(&out_name)?;
+
+        // ---- 三、构建顶层 Block ----
+        let mk_ident = |name: &SmolStr, span: Span| Expr::new(ExprKind::Ident(name.clone()), span);
+        let mk_value = |v: Dynamic, span: Span| Expr::new(ExprKind::Value(v), span);
+        let mk_binary = |left: Expr, op: BinaryOp, right: Expr, span: Span| Expr::new(ExprKind::Binary { left: Box::new(left), op, right: Box::new(right) }, span);
+        let mk_let = |name: SmolStr, value: Expr, span: Span| {
+            let pat = Pattern::new(PatternKind::Ident { name, ty: Type::Any }, span);
+            let value_stmt = Stmt::new(StmtKind::Expr(value, true), span);
+            Stmt::new(StmtKind::Let { pat, value: Box::new(value_stmt) }, span)
+        };
+        let mk_assign_stmt = |name: &SmolStr, value: Expr, span: Span| {
+            let assign = mk_binary(mk_ident(name, span), BinaryOp::Assign, value, span);
+            Stmt::new(StmtKind::Expr(assign, true), span)
+        };
+
+        let mut stmts = Vec::new();
+        // let __m_scrut = SCRUT;
+        stmts.push(mk_let(scrut_name.clone(), scrut, span));
+        // let __m_done = false;
+        stmts.push(mk_let(done_name.clone(), mk_value(Dynamic::Bool(false), span), span));
+        // let __m_out = null;
+        stmts.push(mk_let(out_name.clone(), mk_value(Dynamic::Null, span), span));
+
+        // 每个 arm 一个 if(顺序构造)
+        for (pats, guard, body) in arms {
+            let arm_span = body.span;
+            let scrut_ident = mk_ident(&scrut_name, arm_span);
+            // test = pat[0].test || pat[1].test || ...
+            let mut test_chain = pats[0].match_test(&scrut_ident);
+            for p in &pats[1..] {
+                let t = p.match_test(&scrut_ident);
+                test_chain = mk_binary(test_chain, BinaryOp::Or, t, arm_span);
+            }
+            // !__m_done && (test_chain)
+            let not_done = Expr::new(ExprKind::Unary { op: UnaryOp::Not, value: Box::new(mk_ident(&done_name, arm_span)) }, arm_span);
+            let outer_cond = mk_binary(not_done, BinaryOp::And, test_chain, arm_span);
+
+            // arm body block:bind + guard + assign + done
+            let mut body_stmts = Vec::new();
+            collect_bindings(&pats[0], &mk_ident(&scrut_name, arm_span), &mut body_stmts, arm_span);
+            // 内层 body:__m_out = BODY; __m_done = true;
+            let inner_stmts = vec![mk_assign_stmt(&out_name, body, arm_span), mk_assign_stmt(&done_name, mk_value(Dynamic::Bool(true), arm_span), arm_span)];
+            let inner_block = Stmt::new(StmtKind::Block(inner_stmts), arm_span);
+            // 如果有 guard,再裹一层 if;否则直接展开
+            if let Some(g) = guard {
+                body_stmts.push(Stmt::new(StmtKind::If { cond: g, then_body: Box::new(inner_block), else_body: None }, arm_span));
+            } else {
+                body_stmts.push(inner_block);
+            }
+            let then_body = Stmt::new(StmtKind::Block(body_stmts), arm_span);
+            stmts.push(Stmt::new(StmtKind::If { cond: outer_cond, then_body: Box::new(then_body), else_body: None }, arm_span));
+        }
+        // 末尾求值:__m_out
+        stmts.push(Stmt::new(StmtKind::Expr(mk_ident(&out_name, span), false), span));
+
+        Ok(Stmt::new(StmtKind::Block(stmts), span))
     }
 
     pub fn stmt(&mut self, is_pub: bool) -> Result<Stmt> {

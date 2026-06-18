@@ -507,6 +507,43 @@ pub fn get_key(name: &str, key: &str) -> Result<Dynamic> {
     m.get_key(name, key, |obj| obj.value())
 }
 
+/// 原子并发更新一个节点的值。返回更新后的值。
+/// 节点必须已存在,否则返回 Err。
+pub fn update<F>(name: &str, mut f: F) -> Result<Dynamic>
+where
+    F: FnMut(Dynamic) -> Dynamic + Send + 'static,
+{
+    let (m, name) = get_mount(name)?;
+    m.get_mut(name, move |obj| match obj {
+        Object::Value(v) => {
+            let current = std::mem::take(v);
+            let next = f(current);
+            let result = next.deep_clone();
+            *v = next;
+            result
+        }
+        _ => Dynamic::Null,
+    })
+}
+
+/// 原子并发更新一个 map 节点内某个 key 的值。返回更新后的值。
+pub fn update_key<F>(name: &str, key: &str, mut f: F) -> Result<Dynamic>
+where
+    F: FnMut(Dynamic) -> Dynamic + Send + 'static,
+{
+    let (m, name) = get_mount(name)?;
+    m.get_key_mut(name, key, move |obj| match obj {
+        Object::Value(v) => {
+            let current = std::mem::take(v);
+            let next = f(current);
+            let result = next.deep_clone();
+            *v = next;
+            result
+        }
+        _ => Dynamic::Null,
+    })
+}
+
 use redis::Commands;
 pub fn get_list(name: &str) -> Result<Vec<Dynamic>> {
     let (m, name) = get_mount(name)?;
@@ -680,6 +717,76 @@ mod tests {
 
         assert_eq!(take_dynamic_expire(&mut value), None);
         assert!(!value.contains("@expire"));
+    }
+
+    #[test]
+    fn update_increments_value_atomically() {
+        let path = format!("local/test/update_inc/{}", uuid::Uuid::new_v4());
+        add_value(&path, 0_i64).unwrap();
+
+        let next = update(&path, |v| v + Dynamic::I64(1)).unwrap();
+        assert_eq!(next.as_int(), Some(1));
+        assert_eq!(get(&path).unwrap().as_int(), Some(1));
+
+        let next = update(&path, |v| v + Dynamic::I64(41)).unwrap();
+        assert_eq!(next.as_int(), Some(42));
+        assert_eq!(get(&path).unwrap().as_int(), Some(42));
+    }
+
+    #[test]
+    fn update_concurrent_threads_no_lost_update() {
+        let path = format!("local/test/update_concurrent/{}", uuid::Uuid::new_v4());
+        add_value(&path, 0_i64).unwrap();
+
+        const THREADS: i64 = 8;
+        const ITERS: i64 = 1000;
+
+        let mut handles = Vec::new();
+        for _ in 0..THREADS {
+            let p = path.clone();
+            handles.push(std::thread::spawn(move || {
+                for _ in 0..ITERS {
+                    update(&p, |v| v + Dynamic::I64(1)).unwrap();
+                }
+            }));
+        }
+        for h in handles {
+            h.join().unwrap();
+        }
+
+        assert_eq!(get(&path).unwrap().as_int(), Some(THREADS * ITERS));
+    }
+
+    #[test]
+    fn update_key_increments_map_value() {
+        let path = format!("local/test/update_key/{}", uuid::Uuid::new_v4());
+        add_map(&path).unwrap();
+        insert(&path, "n", 0_i64.into()).unwrap();
+
+        const THREADS: i64 = 8;
+        const ITERS: i64 = 500;
+
+        let mut handles = Vec::new();
+        for _ in 0..THREADS {
+            let p = path.clone();
+            handles.push(std::thread::spawn(move || {
+                for _ in 0..ITERS {
+                    update_key(&p, "n", |v| v + Dynamic::I64(1)).unwrap();
+                }
+            }));
+        }
+        for h in handles {
+            h.join().unwrap();
+        }
+
+        assert_eq!(get_key(&path, "n").unwrap().as_int(), Some(THREADS * ITERS));
+    }
+
+    #[test]
+    fn update_returns_err_when_missing() {
+        let path = format!("local/test/update_missing/{}", uuid::Uuid::new_v4());
+        let result = update(&path, |v| v + Dynamic::I64(1));
+        assert!(result.is_err());
     }
 
     #[test]

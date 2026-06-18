@@ -46,6 +46,9 @@ pub struct Parser {
     /// impl 体嵌套深度。>0 表示当前 stmt 处于 `impl { ... }` 内,
     /// 拒绝嵌套 `struct / impl / const / static`(fn 仍允许,即方法)。
     impl_body_depth: usize,
+    /// `match` 块顶层临时变量(__m_scrut_N / __m_done_N / __m_out_N)的后缀计数器,
+    /// 用于避免嵌套 match 重名。
+    pub(crate) match_counter: usize,
     depth: usize, //当前表达式/语句递归深度,防止恶意深嵌套输入打爆调用栈
     fatal: bool,  //递归过深等不可恢复错误;置位后所有解析入口立即失败,避免回溯重试导致死循环
 }
@@ -75,7 +78,7 @@ const TYPES: &[(&str, Type)] = &[
     ("f32", Type::F32),
     ("f64", Type::F64),
 ];
-const KEYWORDS: &[&str] = &["true", "false", "null", "let", "if", "else", "for", "in", "while", "pub", "fn", "struct", "impl", "const", "static", "continue", "return", "break"];
+const KEYWORDS: &[&str] = &["true", "false", "null", "let", "if", "else", "for", "in", "while", "pub", "fn", "struct", "impl", "const", "static", "continue", "return", "break", "match"];
 
 #[macro_export]
 macro_rules! parse_list {
@@ -165,7 +168,7 @@ impl SpannedParseError {
 
 impl Parser {
     pub fn new(buf: Vec<u8>) -> Self {
-        Self { pos: 0, buf, spans: Vec::new(), decl_scopes: vec![BTreeSet::new()], impl_depth: 0, fn_body_depth: 0, impl_body_depth: 0, depth: 0, fatal: false }
+        Self { pos: 0, buf, spans: Vec::new(), decl_scopes: vec![BTreeSet::new()], impl_depth: 0, fn_body_depth: 0, impl_body_depth: 0, match_counter: 0, depth: 0, fatal: false }
     }
 
     /// 进入一层递归:自增深度并校验上限。配合 [`Parser::exit_depth`] 使用。
@@ -193,11 +196,11 @@ impl Parser {
         if self.fatal { Err(ParserErr::at("表达式嵌套过深", self.current_pos()).into()) } else { Ok(()) }
     }
 
-    fn push_decl_scope(&mut self) {
+    pub(crate) fn push_decl_scope(&mut self) {
         self.decl_scopes.push(BTreeSet::new());
     }
 
-    fn pop_decl_scope(&mut self) {
+    pub(crate) fn pop_decl_scope(&mut self) {
         if self.decl_scopes.len() > 1 {
             self.decl_scopes.pop();
         }
@@ -214,7 +217,7 @@ impl Parser {
         Ok(())
     }
 
-    fn declare_symbol_in_current_scope(&mut self, name: &SmolStr) -> Result<()> {
+    pub(crate) fn declare_symbol_in_current_scope(&mut self, name: &SmolStr) -> Result<()> {
         if name.is_empty() {
             return Ok(());
         }
@@ -237,7 +240,7 @@ impl Parser {
         Ok(())
     }
 
-    fn declare_pattern_symbols(&mut self, pat: &Pattern) -> Result<()> {
+    pub(crate) fn declare_pattern_symbols(&mut self, pat: &Pattern) -> Result<()> {
         match &pat.kind {
             PatternKind::Ident { name, .. } => self.declare_symbol_in_current_scope(name),
             PatternKind::Tuple(items) => {
@@ -249,6 +252,16 @@ impl Parser {
             PatternKind::List { elems, .. } => {
                 for item in elems {
                     self.declare_pattern_symbols(item)?;
+                }
+                Ok(())
+            }
+            PatternKind::Struct { fields, .. } => {
+                for (name, sub) in fields {
+                    if let Some(sub) = sub {
+                        self.declare_pattern_symbols(sub)?;
+                    } else {
+                        self.declare_symbol_in_current_scope(name)?;
+                    }
                 }
                 Ok(())
             }

@@ -1392,7 +1392,7 @@ pub const STD: [(&str, &[Type], Type, *const u8); 5] = [
     ("rand", &[Type::Any, Type::Any], Type::Any, random as *const u8),
 ];
 
-pub const ANY: [(&str, &[Type], Type, *const u8); 77] = [
+pub const ANY: [(&str, &[Type], Type, *const u8); 78] = [
     ("Any::null", &[], Type::Any, any_null as *const u8),
     ("Any::is_map", &[Type::Any], Type::Bool, any_is_map as *const u8),
     ("Any::is_list", &[Type::Any], Type::Bool, any_is_list as *const u8),
@@ -1457,6 +1457,7 @@ pub const ANY: [(&str, &[Type], Type, *const u8); 77] = [
     ("Any::del_key", &[Type::Any, Type::Any], Type::Any, del_key as *const u8),
     ("Any::set_idx", &[Type::Any, Type::I64, Type::Any], Type::Void, set_idx as *const u8),
     ("Any::set_key", &[Type::Any, Type::Any, Type::Any], Type::Void, set_key as *const u8),
+    ("Any::set", &[Type::Any, Type::Any, Type::Any], Type::Void, set_key as *const u8),
     ("Any::from_i64", &[Type::I64], Type::Any, any_from_i64 as *const u8),
     ("Any::from_u64", &[Type::U64], Type::Any, any_from_u64 as *const u8),
     ("Any::from_bool", &[Type::Bool], Type::Any, any_from_bool as *const u8),

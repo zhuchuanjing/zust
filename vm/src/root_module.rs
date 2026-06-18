@@ -3,6 +3,7 @@ use dynamic::{Dynamic, Type};
 
 use crate::JITRunTime;
 use crate::RwLock;
+use crate::ZustCallback;
 use crate::memory::alloc_dynamic;
 use root::{Object, get_mount};
 use std::sync::Weak;
@@ -112,7 +113,30 @@ extern "C" fn root_remove_key(name: *const Dynamic, key: *const Dynamic) -> *con
     unsafe { alloc_dynamic(if let Ok((m, name)) = get_mount(&(*name).as_str()) { m.remove_key(name, &(*key).as_str()).map(|obj| obj.value()).unwrap_or(Dynamic::Null) } else { Dynamic::Null }) }
 }
 
-pub const ROOT_NATIVE: [(&str, &[Type], Type, *const u8); 18] = [
+extern "C" fn root_update(name: *const Dynamic, callback: *const Dynamic) -> *const Dynamic {
+    let name = unsafe { (*name).as_str().to_string() };
+    let Some(callback) = (unsafe { (&*callback).as_custom::<ZustCallback>() }) else {
+        log::error!("root::update {}: 第二个参数不是闭包", name);
+        return alloc_dynamic(Dynamic::Null);
+    };
+    let callback = callback.clone();
+    let result = root::update(&name, move |current| callback.call1(current).unwrap_or(Dynamic::Null)).unwrap_or(Dynamic::Null);
+    alloc_dynamic(result)
+}
+
+extern "C" fn root_update_key(name: *const Dynamic, key: *const Dynamic, callback: *const Dynamic) -> *const Dynamic {
+    let name = unsafe { (*name).as_str().to_string() };
+    let key = unsafe { (*key).as_str().to_string() };
+    let Some(callback) = (unsafe { (&*callback).as_custom::<ZustCallback>() }) else {
+        log::error!("root::update_key {}/{}: 第三个参数不是闭包", name, key);
+        return alloc_dynamic(Dynamic::Null);
+    };
+    let callback = callback.clone();
+    let result = root::update_key(&name, &key, move |current| callback.call1(current).unwrap_or(Dynamic::Null)).unwrap_or(Dynamic::Null);
+    alloc_dynamic(result)
+}
+
+pub const ROOT_NATIVE: [(&str, &[Type], Type, *const u8); 20] = [
     ("mount", &[Type::Any, Type::Any], Type::Void, root_mount as *const u8),
     ("mount_fjall", &[Type::Any], Type::Void, root_mount_fjall as *const u8),
     ("add_list", &[Type::Any], Type::Bool, root_add_list as *const u8),
@@ -131,4 +155,6 @@ pub const ROOT_NATIVE: [(&str, &[Type], Type, *const u8); 18] = [
     ("insert", &[Type::Any, Type::Any, Type::Any], Type::Void, root_insert as *const u8),
     ("get_key", &[Type::Any, Type::Any], Type::Any, root_get_key as *const u8),
     ("remove_key", &[Type::Any, Type::Any], Type::Any, root_remove_key as *const u8),
+    ("update", &[Type::Any, Type::Any], Type::Any, root_update as *const u8),
+    ("update_key", &[Type::Any, Type::Any, Type::Any], Type::Any, root_update_key as *const u8),
 ];

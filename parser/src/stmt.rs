@@ -407,6 +407,7 @@ impl Parser {
             let assign = mk_binary(mk_ident(name, span), BinaryOp::Assign, value, span);
             Stmt::new(StmtKind::Expr(assign, true), span)
         };
+        let mk_any = |value: Expr, span: Span| Expr::new(ExprKind::Typed { value: Box::new(value), ty: Type::Any }, span);
 
         let mut stmts = Vec::new();
         // let __m_scrut = SCRUT;
@@ -434,7 +435,7 @@ impl Parser {
             let mut body_stmts = Vec::new();
             collect_bindings(&pats[0], &mk_ident(&scrut_name, arm_span), &mut body_stmts, arm_span);
             // 内层 body:__m_out = BODY; __m_done = true;
-            let inner_stmts = vec![mk_assign_stmt(&out_name, body, arm_span), mk_assign_stmt(&done_name, mk_value(Dynamic::Bool(true), arm_span), arm_span)];
+            let inner_stmts = vec![mk_assign_stmt(&out_name, mk_any(body, arm_span), arm_span), mk_assign_stmt(&done_name, mk_value(Dynamic::Bool(true), arm_span), arm_span)];
             let inner_block = Stmt::new(StmtKind::Block(inner_stmts), arm_span);
             // 如果有 guard,再裹一层 if;否则直接展开
             if let Some(g) = guard {
@@ -446,7 +447,7 @@ impl Parser {
             stmts.push(Stmt::new(StmtKind::If { cond: outer_cond, then_body: Box::new(then_body), else_body: None }, arm_span));
         }
         // 末尾求值:__m_out
-        stmts.push(Stmt::new(StmtKind::Expr(mk_ident(&out_name, span), false), span));
+        stmts.push(Stmt::new(StmtKind::Expr(mk_any(mk_ident(&out_name, span), span), false), span));
 
         Ok(Stmt::new(StmtKind::Block(stmts), span))
     }

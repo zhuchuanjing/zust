@@ -392,6 +392,42 @@ mod tests {
         }
     }
 
+    fn call_i64_0(compiled: &TestFn) -> i64 {
+        match compiled.ret_ty() {
+            Type::I64 => {
+                let f: extern "C" fn() -> i64 = unsafe { std::mem::transmute(compiled.ptr()) };
+                f()
+            }
+            Type::I32 => {
+                let f: extern "C" fn() -> i32 = unsafe { std::mem::transmute(compiled.ptr()) };
+                f() as i64
+            }
+            Type::Any => {
+                let f: extern "C" fn() -> *const Dynamic = unsafe { std::mem::transmute(compiled.ptr()) };
+                unsafe { &*f() }.as_int().expect("integer Dynamic return")
+            }
+            other => panic!("expected integer-like return, got {other:?}"),
+        }
+    }
+
+    fn call_i64_1(compiled: &TestFn, arg: i64) -> i64 {
+        match compiled.ret_ty() {
+            Type::I64 => {
+                let f: extern "C" fn(i64) -> i64 = unsafe { std::mem::transmute(compiled.ptr()) };
+                f(arg)
+            }
+            Type::I32 => {
+                let f: extern "C" fn(i64) -> i32 = unsafe { std::mem::transmute(compiled.ptr()) };
+                f(arg) as i64
+            }
+            Type::Any => {
+                let f: extern "C" fn(i64) -> *const Dynamic = unsafe { std::mem::transmute(compiled.ptr()) };
+                unsafe { &*f(arg) }.as_int().expect("integer Dynamic return")
+            }
+            other => panic!("expected integer-like return, got {other:?}"),
+        }
+    }
+
     /// Test-only convenience wrapping `vm.jit.write()` calls.
     trait VmTestExt {
         fn import_code(&self, name: &str, code: Vec<u8>) -> anyhow::Result<()>;
@@ -2898,6 +2934,172 @@ mod tests {
         let steps = result.get_dynamic("steps").expect("steps");
         assert_eq!(steps.len(), 2);
         assert_eq!(steps.get_idx(1).and_then(|value| value.get_dynamic("note")).map(|value| value.as_str().to_string()), Some("second".to_string()));
+        Ok(())
+    }
+
+    #[test]
+    fn match_literals_or_guard_order_and_block_body() -> anyhow::Result<()> {
+        let vm = Vm::with_all()?;
+        vm.import_code(
+            "vm_match_scalar",
+            r#"
+            pub fn classify(value: i64) {
+                match value {
+                    0i64 => 10i64,
+                    1i64 | 2i64 => 20i64,
+                    x if x > 10i64 => x + 100i64,
+                    _ => -1i64,
+                }
+            }
+
+            pub fn first_arm_wins() {
+                match 1i64 {
+                    _ => 7i64,
+                    1i64 => 9i64,
+                }
+            }
+
+            pub fn block_body(value: i64) {
+                match value {
+                    3i64 => {
+                        let base = 4i64;
+                        base + 5i64
+                    },
+                    _ => 1i64,
+                }
+            }
+            "#
+            .as_bytes()
+            .to_vec(),
+        )?;
+
+        let classify = vm.get_fn("vm_match_scalar::classify", &[Type::I64])?;
+        assert_eq!(call_i64_1(&classify, 0), 10);
+        assert_eq!(call_i64_1(&classify, 1), 20);
+        assert_eq!(call_i64_1(&classify, 2), 20);
+        assert_eq!(call_i64_1(&classify, 12), 112);
+        assert_eq!(call_i64_1(&classify, 5), -1);
+
+        let first_arm_wins = vm.get_fn("vm_match_scalar::first_arm_wins", &[])?;
+        assert_eq!(call_i64_0(&first_arm_wins), 7);
+
+        let block_body = vm.get_fn("vm_match_scalar::block_body", &[Type::I64])?;
+        assert_eq!(call_i64_1(&block_body, 3), 9);
+        assert_eq!(call_i64_1(&block_body, 4), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn match_binds_tuple_list_rest_and_struct_fields() -> anyhow::Result<()> {
+        let vm = Vm::with_all()?;
+        vm.import_code(
+            "vm_match_bindings",
+            r#"
+            pub fn tuple_sum() {
+                match (3i64, 4i64) {
+                    (a, b) => a + b,
+                    _ => 0i64,
+                }
+            }
+
+            pub fn list_rest_score() {
+                let items = [1i64, 2i64, 3i64, 4i64];
+                match items {
+                    [head, second, ..tail] if tail.len() == 2 => head * 100i64 + second * 10i64 + tail[1],
+                    _ => -1i64,
+                }
+            }
+
+            pub fn struct_field_score() {
+                let data = {
+                    id: 7i64,
+                    tags: ["a", "b", "c"],
+                    nested: { value: 5i64 }
+                };
+                match data {
+                    Data { id, tags: ["a", second, ..rest], nested: Data { value } } => {
+                        id * 100i64 + value * 10i64 + rest.len()
+                    },
+                    _ => -1i64,
+                }
+            }
+            "#
+            .as_bytes()
+            .to_vec(),
+        )?;
+
+        let tuple_sum = vm.get_fn("vm_match_bindings::tuple_sum", &[])?;
+        assert_eq!(call_i64_0(&tuple_sum), 7);
+
+        let list_rest_score = vm.get_fn("vm_match_bindings::list_rest_score", &[])?;
+        assert_eq!(call_i64_0(&list_rest_score), 124);
+
+        let struct_field_score = vm.get_fn("vm_match_bindings::struct_field_score", &[])?;
+        assert_eq!(call_i64_0(&struct_field_score), 751);
+        Ok(())
+    }
+
+    #[test]
+    fn match_supports_nested_expressions_and_null_miss() -> anyhow::Result<()> {
+        let vm = Vm::with_all()?;
+        vm.import_code(
+            "vm_match_nested",
+            r#"
+            pub fn nested(value: i64) {
+                match value {
+                    1i64 => match "a" {
+                        "a" => 11i64,
+                        _ => 12i64,
+                    },
+                    2i64 => match [1i64, 2i64] {
+                        [_, tail] => tail + 20i64,
+                        _ => 0i64,
+                    },
+                    _ => 0i64,
+                }
+            }
+
+            pub fn no_arm(value: i64) {
+                match value {
+                    1i64 => 10i64,
+                }
+            }
+            "#
+            .as_bytes()
+            .to_vec(),
+        )?;
+
+        let nested = vm.get_fn("vm_match_nested::nested", &[Type::I64])?;
+        assert_eq!(call_i64_1(&nested, 1), 11);
+        assert_eq!(call_i64_1(&nested, 2), 22);
+        assert_eq!(call_i64_1(&nested, 3), 0);
+
+        let no_arm = vm.get_fn("vm_match_nested::no_arm", &[Type::I64])?;
+        assert_eq!(no_arm.ret_ty(), &Type::Any);
+        let no_arm: extern "C" fn(i64) -> *const Dynamic = unsafe { std::mem::transmute(no_arm.ptr()) };
+        assert_eq!(unsafe { &*no_arm(1) }.as_int(), Some(10));
+        assert!(unsafe { &*no_arm(2) }.is_null());
+        Ok(())
+    }
+
+    #[test]
+    fn match_rejects_binding_after_first_or_pattern() -> anyhow::Result<()> {
+        let vm = Vm::with_all()?;
+        let err = vm
+            .import_code(
+                "vm_match_bad_or",
+                r#"
+                pub fn bad(value: i64) {
+                    match value {
+                        a | b => 1i64,
+                    }
+                }
+                "#
+                .as_bytes()
+                .to_vec(),
+            )
+            .expect_err("non-first or-pattern alternatives cannot bind");
+        assert!(err.to_string().contains("or-pattern"));
         Ok(())
     }
 

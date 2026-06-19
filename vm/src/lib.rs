@@ -26,6 +26,7 @@ mod llm_module;
 #[cfg(feature = "llm")]
 mod oss_module;
 mod root_module;
+mod time_module;
 pub use gpu_layout::{GpuFieldLayout, GpuStructLayout};
 pub use parking_lot::RwLock;
 
@@ -279,6 +280,13 @@ impl JITRunTime {
         Ok(())
     }
 
+    pub fn add_time(&mut self) -> Result<()> {
+        if self.compiler.symbols.get_id("time::now").is_ok() {
+            return Ok(());
+        }
+        add_native_module_fns(self, "time", &time_module::TIME_NATIVE)
+    }
+
     #[cfg(feature = "http")]
     pub fn add_http(&mut self) -> Result<()> {
         if self.compiler.symbols.get_id("http::request").is_ok() {
@@ -309,6 +317,7 @@ impl JITRunTime {
         self.add_any()?;
         self.add_vec()?;
         self.add_root()?;
+        self.add_time()?;
         #[cfg(feature = "llm")]
         self.add_llm()?;
         #[cfg(feature = "http")]
@@ -581,6 +590,67 @@ mod tests {
         assert_eq!(compiled.ret_ty(), &Type::F64);
         let run: extern "C" fn() -> f64 = unsafe { std::mem::transmute(compiled.ptr()) };
         assert_eq!(run(), 3.0);
+        Ok(())
+    }
+
+    #[test]
+    fn time_now_returns_current_unix_millis() -> anyhow::Result<()> {
+        let vm = Vm::with_all()?;
+        vm.import_code(
+            "vm_time_now",
+            br#"
+            pub fn run() {
+                time::now()
+            }
+            "#
+            .to_vec(),
+        )?;
+
+        let compiled = vm.get_fn("vm_time_now::run", &[])?;
+        assert_eq!(compiled.ret_ty(), &Type::I64);
+        let run: extern "C" fn() -> i64 = unsafe { std::mem::transmute(compiled.ptr()) };
+        let before = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_millis() as i64;
+        let now = run();
+        let after = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_millis() as i64;
+        assert!(now >= before && now <= after, "time::now() = {now} not in [{before}, {after}]");
+        Ok(())
+    }
+
+    #[test]
+    fn time_format_and_parse_round_trip() -> anyhow::Result<()> {
+        let vm = Vm::with_all()?;
+        vm.import_code(
+            "vm_time_format",
+            br#"
+            // strftime-style format spec
+            pub fn fmt(tick: i64) {
+                time::format("%Y-%m-%d %H:%M:%S", tick)
+            }
+
+            pub fn parse(text) {
+                time::parse("%Y-%m-%d %H:%M:%S", text)
+            }
+            "#
+            .to_vec(),
+        )?;
+
+        // 2020-01-02 03:04:05 UTC = 1577934245 秒 = 1577934245000 毫秒
+        let known_tick: i64 = 1_577_934_245_000;
+        let fmt = vm.get_fn("vm_time_format::fmt", &[Type::I64])?;
+        let f: extern "C" fn(i64) -> *const Dynamic = unsafe { std::mem::transmute(fmt.ptr()) };
+        let formatted = unsafe { (*f(known_tick)).clone() };
+        assert_eq!(formatted.as_str().to_string(), "2020-01-02 03:04:05");
+
+        // 反向 parse 回来应当得到相同毫秒
+        let parse = vm.get_fn("vm_time_format::parse", &[Type::Any])?;
+        let p: extern "C" fn(*const Dynamic) -> i64 = unsafe { std::mem::transmute(parse.ptr()) };
+        let text = Dynamic::from("2020-01-02 03:04:05");
+        let parsed = p(&text as *const _);
+        assert_eq!(parsed, known_tick);
+
+        // 非法输入返回 -1,而不是抛
+        let bad = Dynamic::from("not a date");
+        assert_eq!(p(&bad as *const _), -1);
         Ok(())
     }
 

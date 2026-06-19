@@ -1,6 +1,6 @@
 [package]
 name = "zust-vm"
-version = "0.9.80"
+version = "0.9.81"
 edition = "2024"
 rust-version = "1.85"
 description = "Cranelift JIT runtime for executing Zust modules."
@@ -27,11 +27,11 @@ metal = ["gpu", "vm-metal/runtime"]
 [dependencies]
 log = "0.4.29"
 dynamic = { package = "zust-dynamic", version = "0.9.18", path = "../dynamic" }
-parser = { package = "zust-parser", version = "0.9.17", path = "../parser" }
-compiler = { package = "zust-compiler", version = "0.9.37", path = "../compiler" }
+parser = { package = "zust-parser", version = "0.9.18", path = "../parser" }
+compiler = { package = "zust-compiler", version = "0.9.38", path = "../compiler" }
 root = { package = "zust-root", version = "0.9.7", path = "../root" }
 llm = { package = "zust-llm", version = "0.9.16", path = "../llm", optional = true }
-vm-spirv = { package = "zust-vm-spirv", version = "0.9.8", path = "../vm-spirv", optional = true }
+vm-spirv = { package = "zust-vm-spirv", version = "0.9.9", path = "../vm-spirv", optional = true }
 vulkan = { package = "zust-vulkan", version = "0.9.4", path = "../vulkan", optional = true }
 
 anyhow = "1.0.102"
@@ -46,6 +46,7 @@ cranelift-jit = "0.131.1"
 
 tokio = {version = "1.52.3", features = ["full"], optional = true}
 uuid = { version = "1.23.1", features = ["v4"]}
+chrono = { version = "0.4.42", default-features = false, features = ["clock", "std"] }
 rand = "0.10.1"
 reqwest = { version = "0.13.3", optional = true }
 axum = { version = "0.8.9", features = ["ws"], optional = true }
@@ -57,7 +58,7 @@ sqlx-postgres = { version = "0.8.6", default-features = false, features = ["any"
 parking_lot = "0.12.3"
 
 [target.'cfg(target_os = "macos")'.dependencies]
-vm-metal = { package = "zust-vm-metal", version = "0.9.10", path = "../vm-metal", default-features = false, optional = true }
+vm-metal = { package = "zust-vm-metal", version = "0.9.11", path = "../vm-metal", default-features = false, optional = true }
 
 [dev-dependencies]
 num-bigint = "0.4.6"

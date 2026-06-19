@@ -39,6 +39,10 @@ impl SpirvCompiler {
                 self.gen_while(cond, body)?;
                 Ok(None)
             }
+            StmtKind::Loop(body) => {
+                self.gen_loop(body)?;
+                Ok(None)
+            }
             StmtKind::For { pat, range, body } => self.gen_for(pat, range, body),
             StmtKind::Break => {
                 let (break_id, _) = self.loop_stack.last().copied().ok_or_else(|| anyhow!("break outside loop"))?;
@@ -53,7 +57,7 @@ impl SpirvCompiler {
                 Ok(None)
             }
             StmtKind::Static { .. } => Ok(None),
-            StmtKind::Fn { .. } | StmtKind::Struct { .. } | StmtKind::Impl { .. } | StmtKind::Const { .. } | StmtKind::Loop(_) => bail!("statement is not supported by vm-spirv yet: {stmt:?}"),
+            StmtKind::Fn { .. } | StmtKind::Struct { .. } | StmtKind::Impl { .. } | StmtKind::Const { .. } => bail!("statement is not supported by vm-spirv yet: {stmt:?}"),
         }
     }
 
@@ -152,6 +156,54 @@ impl SpirvCompiler {
         let cond = self.bool_value(cond_value)?;
         self.builder.loop_merge(merge_label, continue_label, spirv::LoopControl::NONE, [])?;
         self.builder.branch_conditional(cond.id, body_label, merge_label, None)?;
+
+        self.current_block = Some(self.builder.begin_block(Some(body_label))?);
+        self.loop_stack.push((merge_label, continue_label));
+        self.gen_stmt(body)?;
+        self.loop_stack.pop();
+        if self.current_block.is_some() {
+            self.builder.branch(continue_label)?;
+        }
+
+        self.current_block = Some(self.builder.begin_block(Some(continue_label))?);
+        for phi in &mut phis {
+            if let Some(value) = self.vars.get(phi.idx).and_then(Clone::clone) {
+                let value = self.convert(value, phi.ty.clone())?;
+                phi.incoming.push((value.id, continue_label));
+                self.set_var(phi.idx, Value { id: phi.result_id, ty: phi.ty.clone() });
+            }
+        }
+        self.patch_phi_incoming(&phis);
+        self.builder.branch(header)?;
+
+        self.current_block = Some(self.builder.begin_block(Some(merge_label))?);
+        Ok(())
+    }
+
+    /// 无条件 `loop { ... }`:结构上和 `gen_while` 一样,只是 header 直接无条件
+    /// 跳到 body,退出靠 body 内部的 `break` / `return` 触发。
+    pub(crate) fn gen_loop(&mut self, body: &Stmt) -> Result<()> {
+        let pre_header = self.current_block.ok_or_else(|| anyhow!("loop without active block"))?;
+        let header = self.builder.id();
+        let body_label = self.builder.id();
+        let continue_label = self.builder.id();
+        let merge_label = self.builder.id();
+        let assigned_vars = Self::assigned_var_indices(body);
+        self.materialize_assigned_aggregate_vars(&assigned_vars)?;
+        let before = self.vars.clone();
+        self.builder.branch(header)?;
+
+        self.current_block = Some(self.builder.begin_block(Some(header))?);
+        let mut phis = self.loop_phi_placeholders(&before, pre_header);
+        phis.retain(|phi| assigned_vars.contains(&phi.idx));
+        for phi in &phis {
+            let ty_id = self.get_type(SpirvTy::Value(phi.ty.clone()));
+            let id = self.builder.phi(ty_id, Some(phi.result_id), phi.incoming.clone())?;
+            self.set_var(phi.idx, Value { id, ty: phi.ty.clone() });
+        }
+        // 无条件循环:LoopMerge 仍然要发,但分支直接走到 body,跳过 cond。
+        self.builder.loop_merge(merge_label, continue_label, spirv::LoopControl::NONE, [])?;
+        self.builder.branch(body_label)?;
 
         self.current_block = Some(self.builder.begin_block(Some(body_label))?);
         self.loop_stack.push((merge_label, continue_label));
@@ -377,11 +429,14 @@ impl SpirvCompiler {
                 Self::collect_assigned_vars_expr(cond, out);
                 Self::collect_assigned_vars_stmt(body, out);
             }
+            StmtKind::Loop(body) => {
+                Self::collect_assigned_vars_stmt(body, out);
+            }
             StmtKind::For { range, body, .. } => {
                 Self::collect_assigned_vars_expr(range, out);
                 Self::collect_assigned_vars_stmt(body, out);
             }
-            StmtKind::Break | StmtKind::Continue | StmtKind::Fn { .. } | StmtKind::Struct { .. } | StmtKind::Impl { .. } | StmtKind::Static { .. } | StmtKind::Const { .. } | StmtKind::Loop(_) => {}
+            StmtKind::Break | StmtKind::Continue | StmtKind::Fn { .. } | StmtKind::Struct { .. } | StmtKind::Impl { .. } | StmtKind::Static { .. } | StmtKind::Const { .. } => {}
         }
     }
 

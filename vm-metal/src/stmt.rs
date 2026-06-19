@@ -78,6 +78,16 @@ impl MetalCompiler {
                 self.line("}");
                 Ok(None)
             }
+            StmtKind::Loop(body) => {
+                // 无条件 `loop { ... }` → MSL `while (true) { ... }`,退出靠 body
+                // 内部的 `break` / `return`。
+                self.line("while (true) {");
+                self.indent += 1;
+                self.gen_stmt(body)?;
+                self.indent -= 1;
+                self.line("}");
+                Ok(None)
+            }
             StmtKind::For { pat, range, body } => self.gen_for(pat, range, body),
             StmtKind::Break => {
                 self.line("break;");
@@ -88,7 +98,7 @@ impl MetalCompiler {
                 Ok(None)
             }
             StmtKind::Static { .. } => Ok(None),
-            StmtKind::Fn { .. } | StmtKind::Struct { .. } | StmtKind::Impl { .. } | StmtKind::Const { .. } | StmtKind::Loop(_) => bail!("statement is not supported by vm-metal yet: {stmt:?}"),
+            StmtKind::Fn { .. } | StmtKind::Struct { .. } | StmtKind::Impl { .. } | StmtKind::Const { .. } => bail!("statement is not supported by vm-metal yet: {stmt:?}"),
         }
     }
 

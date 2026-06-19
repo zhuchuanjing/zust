@@ -17,7 +17,15 @@ impl SpirvCompiler {
         }
         match &expr.kind {
             ExprKind::Value(value) => self.const_dynamic(value.clone()),
-            ExprKind::Const(idx) => bail!("compiler constant index {idx} is not available in this SPIR-V context"),
+            ExprKind::Const(idx) => {
+                let value = self
+                    .compiler
+                    .consts
+                    .get_index(*idx)
+                    .map(|(_, v)| v.clone())
+                    .ok_or_else(|| anyhow!("compiler constant index {idx} is not available in this SPIR-V context"))?;
+                self.const_dynamic(value)
+            }
             ExprKind::Typed { value, ty } => {
                 let ty = self.resolve_type(ty);
                 if ty.is_native()
@@ -64,6 +72,34 @@ impl SpirvCompiler {
                     let ty_id = self.get_type(SpirvTy::Value(ty.clone()));
                     let id = self.builder.composite_construct(ty_id, None, values.iter().map(|v| v.id))?;
                     return Ok(Value { id, ty });
+                }
+                // 当 inner value 已经被 parser 折成单个 `Dynamic::List`(无后缀字面量
+                // 数组、或顶层 `const ARR: [f64; N] = [...]` 经过 Const(idx) 取回时),
+                // 按目标元素类型 force 每个元素后再 composite_construct。否则会落到
+                // 通用 const_dynamic 分支报 `unsupported SPIR-V constant: List(...)`。
+                if let Type::Array(elem_ty, len) | Type::Vec(elem_ty, len) = &ty {
+                    let raw_items = match &value.kind {
+                        ExprKind::Value(Dynamic::List(items)) => Some(items.read().clone()),
+                        ExprKind::Const(idx) => self.compiler.consts.get_index(*idx).and_then(|(_, v)| match v {
+                            Dynamic::List(items) => Some(items.read().clone()),
+                            _ => None,
+                        }),
+                        _ => None,
+                    };
+                    if let Some(items) = raw_items {
+                        if items.len() != *len as usize {
+                            bail!("SPIR-V array literal length {} does not match {len}", items.len());
+                        }
+                        let mut values = Vec::with_capacity(items.len());
+                        for v in items {
+                            let coerced = elem_ty.force(v.clone()).unwrap_or(v);
+                            let value = self.const_dynamic(coerced)?;
+                            values.push(self.convert(value, elem_ty.as_ref().clone())?);
+                        }
+                        let ty_id = self.get_type(SpirvTy::Value(ty.clone()));
+                        let id = self.builder.composite_construct(ty_id, None, values.iter().map(|v| v.id))?;
+                        return Ok(Value { id, ty });
+                    }
                 }
                 let value = self.gen_expr(value)?;
                 self.convert(value, ty)

@@ -78,7 +78,7 @@ const TYPES: &[(&str, Type)] = &[
     ("f32", Type::F32),
     ("f64", Type::F64),
 ];
-const KEYWORDS: &[&str] = &["true", "false", "null", "let", "if", "else", "for", "in", "while", "pub", "fn", "struct", "impl", "const", "static", "continue", "return", "break", "match"];
+const KEYWORDS: &[&str] = &["true", "false", "null", "let", "if", "else", "for", "in", "while", "loop", "pub", "fn", "struct", "impl", "const", "static", "continue", "return", "break", "match"];
 
 #[macro_export]
 macro_rules! parse_list {

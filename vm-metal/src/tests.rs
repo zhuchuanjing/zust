@@ -101,3 +101,58 @@ fn compiles_atomic_add_receiver_and_global_fallback_to_metal_source() {
     assert!(source.matches("atomic_fetch_add_explicit(&zust_static_").count() >= 2);
     assert!(source.contains("threadgroup_barrier"));
 }
+
+#[test]
+fn compiles_unconditional_loop_to_while_true() {
+    // 无条件 `loop { ... break; }` 在 Metal 后端应当 lower 成 MSL 的
+    // `while (true) { ... break; }`,break/continue 直接复用 C 控制流。
+    let source = br#"
+        pub fn first_negative(data: Vec<i32>, n: u32) {
+            let i = 0u32;
+            let result = -1i32;
+            loop {
+                if i >= n {
+                    break;
+                }
+                if data[i] < 0i32 {
+                    result = data[i];
+                    break;
+                }
+                i += 1u32;
+            }
+            return result;
+        }
+    "#;
+    let kernel = compile_source(source.to_vec(), "loop_test", "first_negative").unwrap();
+    let msl = kernel.metal.source();
+    assert!(msl.contains("while (true)"), "loop must lower to `while (true)`:\n{msl}");
+    assert!(msl.contains("break;"));
+}
+
+#[test]
+fn compiles_array_literal_with_default_float_suffix_into_f64_target() {
+    // 历史回归:`[1.0, 2.0, ...]` 默认 F32 → 目标 `[f64; N]`。修复前 Metal 后端
+    // 拿到 raw `Dynamic::List` 直接 bail。
+    let source = br#"
+        pub fn fn_under_test() {
+            let arr: [f64; 4] = [1.0, 2.0, 3.0, 4.0];
+            arr[0]
+        }
+    "#;
+    let kernel = compile_source(source.to_vec(), "default_float", "fn_under_test").unwrap();
+    let msl = kernel.metal.source();
+    assert!(msl.contains("double"), "expected double in MSL:\n{msl}");
+}
+
+#[test]
+fn compiles_top_level_const_array_used_in_kernel() {
+    let source = br#"
+        const COEFS: [f64; 3] = [1.0, 0.5, 0.25];
+        pub fn fn_under_test(x: f64) {
+            x * COEFS[0] + COEFS[1] - COEFS[2]
+        }
+    "#;
+    let kernel = compile_source(source.to_vec(), "const_array", "fn_under_test").unwrap();
+    assert_eq!(kernel.arg_tys, vec![Type::F64]);
+    assert_eq!(kernel.ret_ty, Type::F64);
+}

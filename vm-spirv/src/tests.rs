@@ -550,3 +550,91 @@ fn compiles_point_in_poly_with_for_loop() {
     assert!(asm.contains("OpLoopMerge"));
     assert!(asm.contains("OpPhi"));
 }
+
+#[test]
+fn compiles_unconditional_loop_with_break() {
+    // 无条件 `loop { ... break; }` 在 SPIR-V 后端应当编译成
+    // 带 OpLoopMerge 的循环结构 —— header 直接无条件跳到 body,
+    // break 跳到 merge label。
+    let kernel = compile_source(
+        br#"
+            pub fn first_negative(data: Vec<i32>, n: u32) {
+                let i = 0u32;
+                let result = -1i32;
+                loop {
+                    if i >= n {
+                        break;
+                    }
+                    if data[i] < 0i32 {
+                        result = data[i];
+                        break;
+                    }
+                    i += 1u32;
+                }
+                return result;
+            }
+            "#,
+        "loop_test",
+        "first_negative",
+    )
+    .unwrap();
+
+    let asm = kernel.spirv.disassemble();
+    assert_eq!(kernel.arg_tys.len(), 2);
+    assert_eq!(kernel.ret_ty, Type::I32);
+    assert!(asm.contains("OpLoopMerge"), "loop must emit OpLoopMerge:\n{asm}");
+}
+
+#[test]
+fn compiles_array_literal_with_default_float_suffix_into_f64_target() {
+    // 历史回归:无后缀浮点字面量默认是 f32,但目标 `[f64; N]` 期望 f64。
+    // 修复前 parser 把 `[1.0, 2.0, ...]` 折成单个 `Dynamic::List(F32...)`,
+    // SPIR-V 后端不识别 `Dynamic::List` 这个 const 形态,直接 bail。
+    let kernel = compile_source(
+        br#"
+            pub fn fn_under_test() {
+                let arr: [f64; 4] = [1.0, 2.0, 3.0, 4.0];
+                arr[0]
+            }
+        "#,
+        "default_float",
+        "fn_under_test",
+    )
+    .unwrap();
+    assert_eq!(kernel.ret_ty, Type::F64);
+}
+
+#[test]
+fn compiles_top_level_const_array_used_in_kernel() {
+    // 顶层 `const ARR: [f64; N] = [...]` 经 Const(idx) 取回时,内层是 raw
+    // `Dynamic::List`。后端要按目标元素类型 force 后再 composite_construct。
+    let kernel = compile_source(
+        br#"
+            const COEFS: [f64; 3] = [1.0, 0.5, 0.25];
+            pub fn fn_under_test(x: f64) {
+                x * COEFS[0] + COEFS[1] - COEFS[2]
+            }
+        "#,
+        "const_array",
+        "fn_under_test",
+    )
+    .unwrap();
+    assert_eq!(kernel.arg_tys, vec![Type::F64]);
+    assert_eq!(kernel.ret_ty, Type::F64);
+}
+
+#[test]
+fn compiles_unsuffixed_const_used_as_f64() {
+    // `const K = 2.0;` 是 F32(默认浮点),但被乘到 f64 上下文应当能编译过。
+    // 修复前 SPIR-V 直接 bail `compiler constant index not available`。
+    let kernel = compile_source(
+        br#"
+            const K = 2.0;
+            pub fn fn_under_test(x: f64) { x * K }
+        "#,
+        "unsuffixed_const",
+        "fn_under_test",
+    )
+    .unwrap();
+    assert_eq!(kernel.ret_ty, Type::F64);
+}

@@ -1666,11 +1666,40 @@ impl Compiler {
                 {
                     let items = list.iter().map(|item| self.eval(item, stmts, cap)).collect::<Result<Vec<_>>>()?;
                     Ok(Expr::new(ExprKind::Typed { value: Box::new(Expr::new(ExprKind::List(items), expr.span)), ty }, expr.span))
-                } else if let Type::Array(_, _) = &ty
+                } else if let Type::Array(elem_ty, _) = &ty
                     && let ExprKind::List(list) = &value.kind
                 {
                     let items = list.iter().map(|item| self.eval(item, stmts, cap)).collect::<Result<Vec<_>>>()?;
-                    Ok(Expr::new(ExprKind::Typed { value: Box::new(Expr::new(ExprKind::List(items), expr.span)), ty }, expr.span))
+                    Ok(Expr::new(ExprKind::Typed { value: Box::new(Expr::new(ExprKind::List(items), expr.span)), ty: Type::Array(elem_ty.clone(), list.len() as u32) }, expr.span))
+                } else if let Type::Vec(elem_ty, _) = &ty
+                    && let ExprKind::List(list) = &value.kind
+                {
+                    let items = list.iter().map(|item| self.eval(item, stmts, cap)).collect::<Result<Vec<_>>>()?;
+                    Ok(Expr::new(ExprKind::Typed { value: Box::new(Expr::new(ExprKind::List(items), expr.span)), ty: Type::Vec(elem_ty.clone(), list.len() as u32) }, expr.span))
+                } else if let Type::Array(elem_ty, _) | Type::Vec(elem_ty, _) = &ty
+                    && let ExprKind::Value(Dynamic::List(items)) = &value.kind
+                {
+                    // Parser 把字面量 `[1.0, 2.0, ...]` 折成单个 `Dynamic::List`,丢失了
+                    // 内层 ExprKind::Value 包装。这里按目标元素类型 (`force`) 把每个内层
+                    // Dynamic 强转回去,并展回 `ExprKind::List` —— GPU 后端只识别后者,
+                    // CPU JIT 也走相同路径所以语义不变。这条路径覆盖了 `[f32; N]` /
+                    // `[f64; N]` / `Vec<fXX>` 等所有把无后缀字面量推断成默认 f32 但目标
+                    // 元素是别的类型的场景。
+                    let items = items.read();
+                    let exprs = items
+                        .iter()
+                        .map(|v| {
+                            let coerced = elem_ty.force(v.clone()).unwrap_or_else(|_| v.clone());
+                            Expr::new(ExprKind::Value(coerced), expr.span)
+                        })
+                        .collect::<Vec<_>>();
+                    let len = exprs.len() as u32;
+                    let new_ty = match &ty {
+                        Type::Array(_, _) => Type::Array(elem_ty.clone(), len),
+                        Type::Vec(_, _) => Type::Vec(elem_ty.clone(), len),
+                        _ => unreachable!(),
+                    };
+                    Ok(Expr::new(ExprKind::Typed { value: Box::new(Expr::new(ExprKind::List(exprs), expr.span)), ty: new_ty }, expr.span))
                 } else if value.is_value() {
                     let value = value.clone().value()?;
                     // 字符串字面量被类型注解为 string 时,当前 VM 没有原生 String 通路,

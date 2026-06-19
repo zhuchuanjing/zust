@@ -1,6 +1,6 @@
 use anyhow::{Result, anyhow, bail};
 use compiler::{Capture, substitute_stmt, substitute_type};
-use dynamic::Type;
+use dynamic::{Dynamic, Type};
 use parser::{BinaryOp, Expr, ExprKind, Span, Stmt, StmtKind, UnaryOp};
 use std::rc::Rc;
 
@@ -40,6 +40,31 @@ impl MetalCompiler {
                     }
                     let values = items.iter().map(|item| self.gen_expr(item).and_then(|v| self.convert_code(v, elem.as_ref().clone()))).collect::<Result<Vec<_>>>()?;
                     return Ok(Value { code: format!("{}{{{}}}", self.msl_type(&ty), values.into_iter().map(|v| v.code).collect::<Vec<_>>().join(", ")), ty });
+                }
+                // Inner value 是 parser 折成的 `Dynamic::List`(无后缀字面量数组、或顶层
+                // const 经 Const(idx) 取回)。按目标元素类型 force 后再 brace-init。
+                if let Type::Array(elem, len) | Type::Vec(elem, len) = &ty {
+                    let raw_items = match &value.kind {
+                        ExprKind::Value(Dynamic::List(items)) => Some(items.read().clone()),
+                        ExprKind::Const(idx) => self.compiler.consts.get_index(*idx).and_then(|(_, v)| match v {
+                            Dynamic::List(items) => Some(items.read().clone()),
+                            _ => None,
+                        }),
+                        _ => None,
+                    };
+                    if let Some(items) = raw_items {
+                        if items.len() != *len as usize {
+                            bail!("Metal array literal length {} does not match {len}", items.len());
+                        }
+                        let values = items
+                            .into_iter()
+                            .map(|v| {
+                                let coerced = elem.force(v.clone()).unwrap_or(v);
+                                self.const_dynamic(coerced).and_then(|val| self.convert_code(val, elem.as_ref().clone()))
+                            })
+                            .collect::<Result<Vec<_>>>()?;
+                        return Ok(Value { code: format!("{}{{{}}}", self.msl_type(&ty), values.into_iter().map(|v| v.code).collect::<Vec<_>>().join(", ")), ty });
+                    }
                 }
                 let value = self.gen_expr(value)?;
                 self.convert_code(value, ty)

@@ -149,6 +149,14 @@ impl Stmt {
         Self::new(StmtKind::Expr(Expr::new(ExprKind::Binary { left: Box::new(pat), op: crate::BinaryOp::Assign, right: Box::new(expr) }, span), true), span)
     }
 
+    fn get_pop_assign(pat: Expr, expr: Expr) -> Self {
+        let span = pat.span.merge(expr.span);
+        let pop_name = Expr::new(ExprKind::Value(Dynamic::from("pop")), span);
+        let pop_method = Expr::new(ExprKind::Binary { left: Box::new(expr), op: crate::BinaryOp::Idx, right: Box::new(pop_name) }, span);
+        let pop_call = Expr::new(ExprKind::Call { obj: Box::new(pop_method), params: Vec::new() }, span);
+        Self::get_assign_expr(pat, pop_call)
+    }
+
     pub fn bind_pattern(&mut self, pat: Pattern) -> Result<()> {
         if let Some(expr) = self.expr() {
             let stmt = match pat.kind {
@@ -161,9 +169,9 @@ impl Stmt {
                 }
                 PatternKind::Tuple(list) => {
                     let mut stmts = Vec::new();
-                    for (idx, p) in list.into_iter().enumerate() {
+                    for p in list.into_iter().rev() {
                         match p.expr() {
-                            Ok(p) => stmts.push(Self::get_idx_assign(p, idx, expr.clone())),
+                            Ok(p) => stmts.push(Self::get_pop_assign(p, expr.clone())),
                             Err(e) => return Err(e),
                         }
                     }
@@ -172,10 +180,19 @@ impl Stmt {
                 PatternKind::List { elems, has_rest } => {
                     let mut stmts = Vec::new();
                     let prefix_count = if has_rest { elems.len() - 1 } else { elems.len() };
-                    for (idx, p) in elems.iter().take(prefix_count).enumerate() {
-                        match p.expr() {
-                            Ok(p) => stmts.push(Self::get_idx_assign(p, idx, expr.clone())),
-                            Err(e) => return Err(e),
+                    if has_rest {
+                        for (idx, p) in elems.iter().take(prefix_count).enumerate() {
+                            match p.expr() {
+                                Ok(p) => stmts.push(Self::get_idx_assign(p, idx, expr.clone())),
+                                Err(e) => return Err(e),
+                            }
+                        }
+                    } else {
+                        for p in elems.iter().rev() {
+                            match p.expr() {
+                                Ok(p) => stmts.push(Self::get_pop_assign(p, expr.clone())),
+                                Err(e) => return Err(e),
+                            }
                         }
                     }
                     if has_rest {

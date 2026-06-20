@@ -1,6 +1,6 @@
 [package]
 name = "zust-vm"
-version = "0.9.81"
+version = "0.9.82"
 edition = "2024"
 rust-version = "1.85"
 description = "Cranelift JIT runtime for executing Zust modules."
@@ -28,8 +28,8 @@ iroh = ["root/iroh"]
 [dependencies]
 log = "0.4.29"
 dynamic = { package = "zust-dynamic", version = "0.9.18", path = "../dynamic" }
-parser = { package = "zust-parser", version = "0.9.18", path = "../parser" }
-compiler = { package = "zust-compiler", version = "0.9.38", path = "../compiler" }
+parser = { package = "zust-parser", version = "0.9.19", path = "../parser" }
+compiler = { package = "zust-compiler", version = "0.9.39", path = "../compiler" }
 root = { package = "zust-root", version = "0.9.8", path = "../root" }
 llm = { package = "zust-llm", version = "0.9.16", path = "../llm", optional = true }
 vm-spirv = { package = "zust-vm-spirv", version = "0.9.9", path = "../vm-spirv", optional = true }

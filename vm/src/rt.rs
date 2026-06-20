@@ -149,7 +149,11 @@ impl JITRunTime {
     }
 
     pub fn get_dynamic(&self, expr: &Expr) -> Option<Dynamic> {
-        if let ExprKind::Const(idx) = &expr.kind { self.compiler.consts.get_index(*idx).map(|(_, v)| v.clone()) } else { None }
+        match &expr.kind {
+            ExprKind::Value(value) => Some(value.clone()),
+            ExprKind::Const(idx) => self.compiler.consts.get_index(*idx).map(|(_, v)| v.clone()),
+            _ => None,
+        }
     }
 
     fn compile_error(&self, ctx: &BuildContext, span: Span, message: impl AsRef<str>) -> anyhow::Error {
@@ -1747,7 +1751,18 @@ impl JITRunTime {
                     Ok(vt.into())
                 }
             }
-            ExprKind::List(_) => anyhow::bail!("未实现: {:?}", expr),
+            ExprKind::Tuple(items) | ExprKind::List(items) => {
+                // Tuple / List 字面量求值成一个 Dynamic::List(元素按 Any 装入)。
+                // 这样 `let (a, b) = fn()` 的解构(被 desugar 成 a = fn()[0])就能
+                // 通过 Any::get_idx 取到元素。空 tuple/list 取 null。
+                if items.is_empty() {
+                    let idx = self.compiler.get_const(Dynamic::Null);
+                    self.get_const_value(ctx, idx).map(|v| v.into())
+                } else {
+                    let values = items.iter().map(|item| self.eval(ctx, item)?.get(ctx).ok_or_else(|| anyhow!("tuple/list item has no value: {:?}", item))).collect::<Result<Vec<_>>>()?;
+                    self.dynamic_list_from_values(ctx, values).map(|r| r.into())
+                }
+            }
             ExprKind::Repeat { value, len } => {
                 let value = self.eval(ctx, value)?.get(ctx).ok_or(anyhow!("repeat value has no value"))?;
                 let Type::ConstInt(len) = len else {

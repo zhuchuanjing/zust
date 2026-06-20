@@ -1445,7 +1445,7 @@ impl Compiler {
         for (idx, item) in items {
             let item_span = idx.span.merge(item.span);
             let left = Expr::new(ExprKind::Binary { left: Box::new(Expr::new(ExprKind::Var(temp), item_span)), op: BinaryOp::Idx, right: Box::new(idx) }, item_span);
-            stmts.push(Stmt::new(StmtKind::Expr(Expr::new(ExprKind::Binary { left: Box::new(left), op: BinaryOp::Assign, right: Box::new(item) }, item_span), false), item_span));
+            stmts.push(Stmt::new(StmtKind::Expr(Expr::new(ExprKind::Binary { left: Box::new(left), op: BinaryOp::Assign, right: Box::new(item) }, item_span), true), item_span));
         }
         Expr::new(ExprKind::Var(temp), span)
     }
@@ -1901,7 +1901,16 @@ impl Compiler {
                     Type::Any
                 };
                 let pat = self.pat_to_var(pat, expr_ty.clone())?;
-                compiled.last_mut().ok_or_else(|| Self::semantic_error(stmt_span, "没有生成可绑定模式的编译语句")).and_then(|stmt| stmt.bind_pattern(pat))?;
+                if matches!(pat.kind, PatternKind::Tuple(_) | PatternKind::List { .. }) {
+                    let temp = self.add_ty(expr_ty.clone());
+                    let temp_pat = Pattern { kind: PatternKind::Var { idx: temp, ty: expr_ty }, span: stmt_span };
+                    compiled.last_mut().ok_or_else(|| Self::semantic_error(stmt_span, "没有生成可绑定模式的编译语句")).and_then(|stmt| stmt.bind_pattern(temp_pat))?;
+                    let temp_expr = Expr::new(ExprKind::Var(temp), stmt_span);
+                    compiled.push(Stmt::new(StmtKind::Expr(temp_expr, false), stmt_span));
+                    compiled.last_mut().ok_or_else(|| Self::semantic_error(stmt_span, "临时变量 stmt 缺失")).and_then(|stmt| stmt.bind_pattern(pat))?;
+                } else {
+                    compiled.last_mut().ok_or_else(|| Self::semantic_error(stmt_span, "没有生成可绑定模式的编译语句")).and_then(|stmt| stmt.bind_pattern(pat))?;
+                }
             }
             StmtKind::Expr(expr, close) => {
                 if let ExprKind::Binary { left, op: BinaryOp::Assign, right } = &expr.kind

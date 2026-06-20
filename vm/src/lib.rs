@@ -869,6 +869,84 @@ mod tests {
     }
 
     #[test]
+    fn inlined_function_returning_dynamic_list_keeps_list_value() -> anyhow::Result<()> {
+        let vm = Vm::with_all()?;
+        vm.import_code(
+            "vm_inline_return_list",
+            br#"
+            fn make(value) {
+                [value]
+            }
+
+            pub fn run() {
+                let tup = make("node");
+                tup[0i64]
+            }
+            "#
+            .to_vec(),
+        )?;
+
+        let compiled = vm.get_fn("vm_inline_return_list::run", &[])?;
+        assert_eq!(compiled.ret_ty(), &Type::Any);
+        let run: extern "C" fn() -> *const Dynamic = unsafe { std::mem::transmute(compiled.ptr()) };
+        let result = unsafe { &*run() };
+        assert_eq!(result.as_str(), "node");
+        Ok(())
+    }
+
+    #[test]
+    fn tuple_destructure_evaluates_rhs_once() -> anyhow::Result<()> {
+        let vm = Vm::with_all()?;
+        vm.import_code(
+            "vm_tuple_destructure_once",
+            br#"
+            fn make_pair() {
+                let n = root::get("local/vm_tuple_destructure_once/calls") + 1i64;
+                root::add("local/vm_tuple_destructure_once/calls", n);
+                (n, n + 10i64)
+            }
+
+            pub fn run() {
+                root::add("local/vm_tuple_destructure_once/calls", 0i64);
+                let (a, b) = make_pair();
+                a * 100i64 + b * 10i64 + root::get("local/vm_tuple_destructure_once/calls")
+            }
+            "#
+            .to_vec(),
+        )?;
+
+        let compiled = vm.get_fn("vm_tuple_destructure_once::run", &[])?;
+        assert_eq!(compiled.ret_ty(), &Type::Any);
+        let run: extern "C" fn() -> *const Dynamic = unsafe { std::mem::transmute(compiled.ptr()) };
+        let result = unsafe { &*run() };
+        assert_eq!(result.as_int(), Some(211));
+        Ok(())
+    }
+
+    #[test]
+    fn tuple_destructure_pops_temporary_rhs() -> anyhow::Result<()> {
+        let vm = Vm::with_all()?;
+        vm.import_code(
+            "vm_tuple_destructure_pop",
+            br#"
+            pub fn run() {
+                let values = [1i64, 2i64];
+                let (x, y) = values;
+                x * 100i64 + y * 10i64 + values.len()
+            }
+            "#
+            .to_vec(),
+        )?;
+
+        let compiled = vm.get_fn("vm_tuple_destructure_pop::run", &[])?;
+        assert_eq!(compiled.ret_ty(), &Type::Any);
+        let run: extern "C" fn() -> *const Dynamic = unsafe { std::mem::transmute(compiled.ptr()) };
+        let result = unsafe { &*run() };
+        assert_eq!(result.as_int(), Some(120));
+        Ok(())
+    }
+
+    #[test]
     fn negate_narrow_integers() -> anyhow::Result<()> {
         let vm = Vm::with_all()?;
         vm.import_code(

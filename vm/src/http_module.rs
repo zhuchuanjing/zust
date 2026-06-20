@@ -604,10 +604,15 @@ async fn api_payload(req: Request<Body>, body_limit: usize) -> Result<Dynamic> {
     let body = to_bytes(body, body_limit).await?;
     if !body.is_empty() {
         match Dynamic::from_json(&body) {
-            Ok((json, _)) => payload.append(json),
+            Ok((json, _)) => {
+                payload.append(json);
+                payload.insert("@raw_body", body_to_dynamic(body));
+            }
             Err(err) => {
                 payload.insert("@body_error", err.to_string());
-                payload.insert("@body", body_to_dynamic(body));
+                let raw_body = body_to_dynamic(body);
+                payload.insert("@body", raw_body.clone());
+                payload.insert("@raw_body", raw_body);
             }
         }
     }

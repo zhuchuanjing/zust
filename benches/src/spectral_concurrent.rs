@@ -25,18 +25,10 @@ fn main() -> Result<()> {
 
     let path = benches_dir.join("zs").join("spectral_norm.zs");
     let t0 = Instant::now();
-    vm.jit
-        .write()
-        .compiler
-        .import_file("spectral_norm", path.to_str().context("invalid path")?)
-        .context("import spectral_norm.zs")?;
+    vm.jit.write().compiler.import_file("spectral_norm", path.to_str().context("invalid path")?).context("import spectral_norm.zs")?;
     println!("compiled spectral_norm.zs ({:.0}ms)", t0.elapsed().as_secs_f64() * 1000.0);
 
-    let (ptr, _ret) = vm
-        .jit
-        .write()
-        .get_fn_ptr("spectral_norm::bench", &[Type::I64])
-        .context("get_fn_ptr spectral_norm")?;
+    let (ptr, _ret) = vm.jit.write().get_fn_ptr("spectral_norm::bench", &[Type::I64]).context("get_fn_ptr spectral_norm")?;
     let fn_ptr_usize = ptr as usize;
 
     // warmup: single-threaded baseline
@@ -50,12 +42,7 @@ fn main() -> Result<()> {
     }
     let min_single_ms = single_runs.iter().map(|(t, _)| *t).fold(f64::INFINITY, f64::min);
     let single_result = single_runs[0].1;
-    println!(
-        "single-threaded warmup: min={:.2}ms result={} (3 runs: {})",
-        min_single_ms,
-        single_result,
-        single_runs.iter().map(|(t, _)| format!("{t:.1}ms")).collect::<Vec<_>>().join(", ")
-    );
+    println!("single-threaded warmup: min={:.2}ms result={} (3 runs: {})", min_single_ms, single_result, single_runs.iter().map(|(t, _)| format!("{t:.1}ms")).collect::<Vec<_>>().join(", "));
 
     println!("\n>>> concurrent: {threads} threads × {iters} iter(s) = {} total calls", threads * iters);
 

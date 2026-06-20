@@ -23,6 +23,7 @@ llm = ["dep:llm", "dep:tokio"]
 gpu = ["dep:vm-spirv", "dep:vm-metal"]
 vulkan = ["gpu", "dep:vulkan", "dep:vulkano"]
 metal = ["gpu", "vm-metal/runtime"]
+iroh = ["root/iroh"]
 
 [dependencies]
 log = "0.4.29"

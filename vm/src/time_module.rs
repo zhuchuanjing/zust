@@ -47,8 +47,5 @@ extern "C" fn time_parse(fmt: *const Dynamic, text: *const Dynamic) -> i64 {
     -1
 }
 
-pub const TIME_NATIVE: [(&str, &[Type], Type, *const u8); 3] = [
-    ("now", &[], Type::I64, time_now as *const u8),
-    ("format", &[Type::Any, Type::I64], Type::Any, time_format as *const u8),
-    ("parse", &[Type::Any, Type::Any], Type::I64, time_parse as *const u8),
-];
+pub const TIME_NATIVE: [(&str, &[Type], Type, *const u8); 3] =
+    [("now", &[], Type::I64, time_now as *const u8), ("format", &[Type::Any, Type::I64], Type::Any, time_format as *const u8), ("parse", &[Type::Any, Type::Any], Type::I64, time_parse as *const u8)];

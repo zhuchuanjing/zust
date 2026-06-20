@@ -7,6 +7,8 @@ use anyhow::{Result, anyhow};
 
 use super::sync_await;
 use crate::directory;
+#[cfg(feature = "iroh")]
+use crate::iroh::IrohClient;
 use crate::node::Node;
 use fjall::{KeyspaceCreateOptions, OptimisticTxDatabase, OptimisticTxKeyspace};
 use redis::AsyncCommands;
@@ -17,8 +19,19 @@ use rslock::LockManager;
 
 pub enum Mount<T> {
     Memory(Arc<HashMap<SmolStr, Node<T>>>),
-    Redis { client: redis::Client, rl: LockManager },
-    Fjall { values: OptimisticTxKeyspace, write_lock: Arc<std::sync::Mutex<()>> },
+    Redis {
+        client: redis::Client,
+        rl: LockManager,
+    },
+    Fjall {
+        values: OptimisticTxKeyspace,
+        write_lock: Arc<std::sync::Mutex<()>>,
+    },
+    #[cfg(feature = "iroh")]
+    Iroh {
+        client: IrohClient,
+        write_lock: Arc<std::sync::Mutex<()>>,
+    },
 }
 
 impl<T: std::fmt::Debug + MsgPack + MsgUnpack + Default + Send> Mount<T> {
@@ -38,6 +51,12 @@ impl<T: std::fmt::Debug + MsgPack + MsgUnpack + Default + Send> Mount<T> {
         let db = OptimisticTxDatabase::builder(data_dir).open()?;
         let values = db.keyspace("root", KeyspaceCreateOptions::default)?;
         Ok(Self::Fjall { values, write_lock: Arc::new(std::sync::Mutex::new(())) })
+    }
+
+    #[cfg(feature = "iroh")]
+    pub fn iroh(node_id: &str) -> Result<Self> {
+        let remote = node_id.parse()?;
+        Ok(Self::Iroh { client: IrohClient::new(remote)?, write_lock: Arc::new(std::sync::Mutex::new(())) })
     }
 
     pub fn add(&self, name: &str, value: T) -> bool {
@@ -62,6 +81,15 @@ impl<T: std::fmt::Debug + MsgPack + MsgUnpack + Default + Send> Mount<T> {
                 };
                 fjall_clear_node(values, name).is_ok() && values.insert(fjall_object_key(name), buf).is_ok()
             }
+            #[cfg(feature = "iroh")]
+            Self::Iroh { client, write_lock } => {
+                let mut buf = Vec::new();
+                value.encode(&mut buf);
+                let Ok(_guard) = write_lock.lock() else {
+                    return false;
+                };
+                client.put_bytes(name, bytes::Bytes::from(buf)).is_ok()
+            }
         }
     }
 
@@ -70,6 +98,8 @@ impl<T: std::fmt::Debug + MsgPack + MsgUnpack + Default + Send> Mount<T> {
             Self::Memory(m) => m.contains_sync(name),
             Self::Redis { client, rl: _ } => client.get_connection().and_then(|mut conn| conn.exists::<&str, bool>(name)).unwrap_or(false),
             Self::Fjall { values, .. } => values.contains_key(fjall_object_key(name)).unwrap_or(false) || values.contains_key(fjall_type_key(name)).unwrap_or(false),
+            #[cfg(feature = "iroh")]
+            Self::Iroh { client, .. } => client.contains(name),
         }
     }
 
@@ -113,6 +143,17 @@ impl<T: std::fmt::Debug + MsgPack + MsgUnpack + Default + Send> Mount<T> {
                 fjall_insert_object(values, name, &v)?;
                 Ok(r)
             }
+            #[cfg(feature = "iroh")]
+            Self::Iroh { client, write_lock } => {
+                let _guard = write_lock.lock().map_err(|e| anyhow!("无法获取 iroh 写锁: {}", e))?;
+                let bytes = client.get_bytes(name)?;
+                let (mut v, _) = T::decode(bytes.as_ref())?;
+                let r = f(&mut v);
+                let mut buf = Vec::new();
+                v.encode(&mut buf);
+                client.put_bytes(name, bytes::Bytes::from(buf))?;
+                Ok(r)
+            }
         }
     }
 
@@ -132,6 +173,12 @@ impl<T: std::fmt::Debug + MsgPack + MsgUnpack + Default + Send> Mount<T> {
                 Ok(f(&v))
             }
             Self::Fjall { values, .. } => fjall_get_object(values, name).map(|v| f(&v)),
+            #[cfg(feature = "iroh")]
+            Self::Iroh { client, .. } => {
+                let bytes = client.get_bytes(name)?;
+                let (v, _) = T::decode(bytes.as_ref())?;
+                Ok(f(&v))
+            }
         }
     }
 
@@ -177,6 +224,8 @@ impl<T: std::fmt::Debug + MsgPack + MsgUnpack + Default + Send> Mount<T> {
                 fjall_insert_map_item(values, name, key, &v)?;
                 Ok(r)
             }
+            #[cfg(feature = "iroh")]
+            Self::Iroh { .. } => Err(anyhow!("iroh mount 暂不支持 map key 更新")),
         }
     }
 
@@ -230,6 +279,10 @@ impl<T: std::fmt::Debug + MsgPack + MsgUnpack + Default + Send> Mount<T> {
             Self::Fjall { values, .. } => {
                 names.append(&mut fjall_paths_with_prefix(values, name)?);
             }
+            #[cfg(feature = "iroh")]
+            Self::Iroh { client, .. } => {
+                names.append(&mut client.dir_raw(name)?);
+            }
         }
         Ok(names)
     }
@@ -252,6 +305,14 @@ impl<T: std::fmt::Debug + MsgPack + MsgUnpack + Default + Send> Mount<T> {
                 None if values.contains_key(fjall_object_key(name))? => Ok(1),
                 None => Err(anyhow!("{} 不存在", name)),
             },
+            #[cfg(feature = "iroh")]
+            Self::Iroh { client, .. } => {
+                if client.contains(name) {
+                    Ok(1)
+                } else {
+                    Err(anyhow!("{} 不存在", name))
+                }
+            }
         }
     }
 
@@ -273,6 +334,13 @@ impl<T: std::fmt::Debug + MsgPack + MsgUnpack + Default + Send> Mount<T> {
                 values.remove(fjall_object_key(name))?;
                 Ok(v)
             }
+            #[cfg(feature = "iroh")]
+            Self::Iroh { client, .. } => {
+                let bytes = client.get_bytes(name)?;
+                let (v, _) = T::decode(bytes.as_ref())?;
+                client.delete(name)?;
+                Ok(v)
+            }
         }
     }
 
@@ -287,6 +355,8 @@ impl<T: std::fmt::Debug + MsgPack + MsgUnpack + Default + Send> Mount<T> {
                     let _ = fjall_clear_node(values, name).and_then(|_| fjall_set_node_type(values, name, FjallNodeType::List));
                 }
             }
+            #[cfg(feature = "iroh")]
+            Self::Iroh { .. } => {}
         }
     }
 
@@ -301,6 +371,8 @@ impl<T: std::fmt::Debug + MsgPack + MsgUnpack + Default + Send> Mount<T> {
                     let _ = fjall_clear_node(values, name).and_then(|_| fjall_set_node_type(values, name, FjallNodeType::Map));
                 }
             }
+            #[cfg(feature = "iroh")]
+            Self::Iroh { .. } => {}
         }
     }
 
@@ -326,6 +398,8 @@ impl<T: std::fmt::Debug + MsgPack + MsgUnpack + Default + Send> Mount<T> {
                 fjall_insert_list_item(values, name, idx, &value)?;
                 Ok(idx)
             }
+            #[cfg(feature = "iroh")]
+            Self::Iroh { .. } => Err(anyhow!("iroh mount 暂不支持 list push")),
         }
     }
 
@@ -339,6 +413,8 @@ impl<T: std::fmt::Debug + MsgPack + MsgUnpack + Default + Send> Mount<T> {
                 Ok(f(&v))
             }
             Self::Fjall { values, .. } => fjall_get_list_item(values, name, idx).map(|v| f(&v)),
+            #[cfg(feature = "iroh")]
+            Self::Iroh { .. } => Err(anyhow!("iroh mount 暂不支持 list get_idx")),
         }
     }
 
@@ -358,6 +434,8 @@ impl<T: std::fmt::Debug + MsgPack + MsgUnpack + Default + Send> Mount<T> {
                 fjall_insert_list_item(values, name, idx, &v)?;
                 Ok(r)
             }
+            #[cfg(feature = "iroh")]
+            Self::Iroh { .. } => Err(anyhow!("iroh mount 暂不支持 list get_idx_mut")),
         }
     }
 
@@ -378,6 +456,8 @@ impl<T: std::fmt::Debug + MsgPack + MsgUnpack + Default + Send> Mount<T> {
                 values.remove(key)?;
                 Ok(v)
             }
+            #[cfg(feature = "iroh")]
+            Self::Iroh { .. } => Err(anyhow!("iroh mount 暂不支持 list remove_idx")),
         }
     }
 
@@ -405,6 +485,8 @@ impl<T: std::fmt::Debug + MsgPack + MsgUnpack + Default + Send> Mount<T> {
                 fjall_insert_map_item(values, name, key, &value).ok()?;
                 old
             }
+            #[cfg(feature = "iroh")]
+            Self::Iroh { .. } => None,
         }
     }
 
@@ -418,6 +500,8 @@ impl<T: std::fmt::Debug + MsgPack + MsgUnpack + Default + Send> Mount<T> {
                 Ok(f(&v))
             }
             Self::Fjall { values, .. } => fjall_get_map_item(values, name, key).map(|v| f(&v)),
+            #[cfg(feature = "iroh")]
+            Self::Iroh { .. } => Err(anyhow!("iroh mount 暂不支持 map get_key")),
         }
     }
 
@@ -430,6 +514,8 @@ impl<T: std::fmt::Debug + MsgPack + MsgUnpack + Default + Send> Mount<T> {
                 Ok(keys.into_iter().map(|k| k.into()).collect())
             }
             Self::Fjall { values, .. } => fjall_map_keys(values, name),
+            #[cfg(feature = "iroh")]
+            Self::Iroh { .. } => Err(anyhow!("iroh mount 暂不支持 map keys")),
         }
     }
 
@@ -453,6 +539,8 @@ impl<T: std::fmt::Debug + MsgPack + MsgUnpack + Default + Send> Mount<T> {
                 values.remove(item_key)?;
                 Ok(v)
             }
+            #[cfg(feature = "iroh")]
+            Self::Iroh { .. } => Err(anyhow!("iroh mount 暂不支持 map remove_key")),
         }
     }
 }
@@ -660,6 +748,8 @@ impl<T: std::fmt::Debug> std::fmt::Debug for Mount<T> {
             Self::Memory(_) => write!(f, "Mount::Memory"),
             Self::Redis { client: _, rl: _ } => write!(f, "Mount::Redis"),
             Self::Fjall { .. } => write!(f, "Mount::Fjall"),
+            #[cfg(feature = "iroh")]
+            Self::Iroh { .. } => write!(f, "Mount::Iroh"),
         }
     }
 }
@@ -670,6 +760,8 @@ impl<T> Clone for Mount<T> {
             Self::Memory(m) => Self::Memory(m.clone()),
             Self::Redis { client, rl } => Self::Redis { client: client.clone(), rl: rl.clone() },
             Self::Fjall { values, write_lock } => Self::Fjall { values: values.clone(), write_lock: write_lock.clone() },
+            #[cfg(feature = "iroh")]
+            Self::Iroh { client, write_lock } => Self::Iroh { client: client.clone(), write_lock: write_lock.clone() },
         }
     }
 }
@@ -715,6 +807,21 @@ impl<T: std::fmt::Debug + MsgPack + MsgUnpack + Default + Send> Root<T> {
                     return Ok(false);
                 }
                 mounts.push((name.into(), Mount::<T>::fjall(data_dir)?));
+                Ok(true)
+            }
+            Err(e) => Err(anyhow!("无法获取写锁: {}", e)),
+        }
+    }
+
+    #[cfg(feature = "iroh")]
+    pub fn mount_iroh(&self, name: &str, node_id: &str) -> Result<bool> {
+        let mounts = self.mounts.write();
+        match mounts {
+            Ok(mut mounts) => {
+                if mounts.iter().any(|(n, _)| n == name) {
+                    return Ok(false);
+                }
+                mounts.push((name.into(), Mount::<T>::iroh(node_id)?));
                 Ok(true)
             }
             Err(e) => Err(anyhow!("无法获取写锁: {}", e)),

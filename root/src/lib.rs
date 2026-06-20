@@ -1,5 +1,7 @@
 mod arrow;
 mod directory;
+#[cfg(feature = "iroh")]
+pub mod iroh;
 mod mount;
 mod node;
 pub use arrow::query::{Query, SearchDescriptionResult};
@@ -396,6 +398,11 @@ pub fn mount_fjall(data_dir: &str) -> Result<bool> {
     ROOT.mount_fjall("fjall", data_dir)
 }
 
+#[cfg(feature = "iroh")]
+pub fn mount_iroh(node_id: &str) -> Result<bool> {
+    ROOT.mount_iroh("iroh", node_id)
+}
+
 pub fn get_mount<'a>(name: &'a str) -> Result<(Mount<Object>, &'a str)> {
     ROOT.get_mount(name)
 }
@@ -561,6 +568,17 @@ pub fn get_list(name: &str) -> Result<Vec<Dynamic>> {
             Ok(items)
         }
         Mount::Fjall { .. } => {
+            let len = m.len(name)?;
+            let mut items = Vec::new();
+            for idx in 0..len {
+                if let Ok(value) = m.get_idx(name, idx, |obj| obj.value()) {
+                    items.push(value);
+                }
+            }
+            Ok(items)
+        }
+        #[cfg(feature = "iroh")]
+        Mount::Iroh { .. } => {
             let len = m.len(name)?;
             let mut items = Vec::new();
             for idx in 0..len {

@@ -69,7 +69,9 @@ use std::sync::Arc;
 unsafe impl Send for JITRunTime {}
 unsafe impl Sync for JITRunTime {}
 
-pub(crate) fn with_vm_context<T>(context: *const Weak<RwLock<JITRunTime>>, f: impl FnOnce(&Vm) -> Result<T>) -> Result<T> {
+pub type NativeContext = *const Weak<RwLock<JITRunTime>>;
+
+pub fn with_native_context<T>(context: NativeContext, f: impl FnOnce(&Vm) -> Result<T>) -> Result<T> {
     if context.is_null() {
         return Err(anyhow!("VM context is null"));
     }
@@ -188,7 +190,7 @@ impl JITRunTime {
         result
     }
 
-    pub(crate) fn add_native_module_context_ptr(&mut self, module: &str, name: &str, arg_tys: &[Type], ret_ty: Type, fn_ptr: *const u8) -> Result<u32> {
+    pub fn add_native_module_context_ptr(&mut self, module: &str, name: &str, arg_tys: &[Type], ret_ty: Type, fn_ptr: *const u8) -> Result<u32> {
         self.add_module(module);
         let full_name = format!("{}::{}", module, name);
         let result = self.add_context_native_ptr(&full_name, name, arg_tys, ret_ty, fn_ptr);
@@ -372,6 +374,10 @@ impl Vm {
             Ok(())
         }
     }
+
+    pub fn add_native_module_context_ptr(&self, module: &str, name: &str, arg_tys: &[Type], ret_ty: Type, fn_ptr: *const u8) -> Result<u32> {
+        self.jit.write().add_native_module_context_ptr(module, name, arg_tys, ret_ty, fn_ptr)
+    }
 }
 
 impl Default for Vm {
@@ -382,7 +388,7 @@ impl Default for Vm {
 
 #[cfg(test)]
 mod tests {
-    use super::{GpuStructLayout, Vm, ZustCallback};
+    use super::{GpuStructLayout, NativeContext, Vm, ZustCallback, with_native_context};
     use dynamic::{CustomProperty, Dynamic, ToJson, Type};
     use std::collections::BTreeMap;
 
@@ -503,6 +509,14 @@ mod tests {
         value * 2
     }
 
+    extern "C" fn context_has_symbol(context: NativeContext, name: *const Dynamic) -> bool {
+        if name.is_null() {
+            return false;
+        }
+        let name = unsafe { (&*name).as_str().to_string() };
+        with_native_context(context, |vm| Ok(vm.jit.write().get_id(&name).is_ok())).unwrap_or(false)
+    }
+
     #[test]
     fn build_context_set_var_fills_sparse_none_slots() -> anyhow::Result<()> {
         use crate::context::{BuildContext, LocalVar};
@@ -541,6 +555,28 @@ mod tests {
         assert_eq!(compiled.ret_ty(), &Type::I64);
         let run: extern "C" fn(i64) -> i64 = unsafe { std::mem::transmute(compiled.ptr()) };
         assert_eq!(run(21), 42);
+        Ok(())
+    }
+
+    #[test]
+    fn vm_can_add_context_native_after_jit_creation() -> anyhow::Result<()> {
+        let vm = Vm::with_all()?;
+        vm.add_native_module_context_ptr("ctx", "has_symbol", &[Type::Any], Type::Bool, context_has_symbol as *const u8)?;
+        vm.import_code(
+            "vm_dynamic_context_native",
+            br#"
+            pub struct Marker { value: i32 }
+            pub fn run() {
+                ctx::has_symbol("vm_dynamic_context_native::Marker")
+            }
+            "#
+            .to_vec(),
+        )?;
+
+        let compiled = vm.get_fn("vm_dynamic_context_native::run", &[])?;
+        assert_eq!(compiled.ret_ty(), &Type::Bool);
+        let run: extern "C" fn() -> bool = unsafe { std::mem::transmute(compiled.ptr()) };
+        assert!(run());
         Ok(())
     }
 

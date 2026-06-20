@@ -60,6 +60,13 @@ extern "C" fn root_mount_fjall(data_dir: *const Dynamic) {
     }
 }
 
+#[cfg(feature = "iroh")]
+extern "C" fn root_mount_iroh(node_id: *const Dynamic) {
+    unsafe {
+        let _ = root::mount_iroh(&(*node_id).as_str());
+    }
+}
+
 extern "C" fn root_get(name: *const Dynamic) -> *const Dynamic {
     unsafe { alloc_dynamic(if let Ok((m, name)) = get_mount(&(*name).as_str()) { m.get(name, |v| v.value()).unwrap_or(Dynamic::Null) } else { Dynamic::Null }) }
 }
@@ -95,7 +102,7 @@ extern "C" fn root_get_key(name: *const Dynamic, key: *const Dynamic) -> *const 
 pub(crate) extern "C" fn root_add_fn_with_vm(context: *const Weak<RwLock<JITRunTime>>, name: *const Dynamic, fn_name: *const Dynamic) -> bool {
     let name = unsafe { (*name).clone() };
     let fn_name = unsafe { (*fn_name).clone() };
-    match crate::with_vm_context(context, |vm| vm.jit.write().get_fn_ptr(fn_name.as_str(), &[Type::Any])) {
+    match crate::with_native_context(context, |vm| vm.jit.write().get_fn_ptr(fn_name.as_str(), &[Type::Any])) {
         Ok((fn_ptr, ty)) => {
             if let Ok((m, name)) = get_mount(name.as_str()) {
                 return m.add(name, Object::Func(fn_ptr as i64, ty.clone()));
@@ -136,9 +143,11 @@ extern "C" fn root_update_key(name: *const Dynamic, key: *const Dynamic, callbac
     alloc_dynamic(result)
 }
 
-pub const ROOT_NATIVE: [(&str, &[Type], Type, *const u8); 20] = [
+pub const ROOT_NATIVE: &[(&str, &[Type], Type, *const u8)] = &[
     ("mount", &[Type::Any, Type::Any], Type::Void, root_mount as *const u8),
     ("mount_fjall", &[Type::Any], Type::Void, root_mount_fjall as *const u8),
+    #[cfg(feature = "iroh")]
+    ("mount_iroh", &[Type::Any], Type::Void, root_mount_iroh as *const u8),
     ("add_list", &[Type::Any], Type::Bool, root_add_list as *const u8),
     ("add_map", &[Type::Any], Type::Bool, root_add_map as *const u8),
     ("add", &[Type::Any, Type::Any], Type::Bool, root_add as *const u8),

@@ -318,7 +318,7 @@ pub(crate) extern "C" fn import_with_vm(context: *const Weak<RwLock<JITRunTime>>
     if addr.is_null() || path.is_null() {
         return false;
     }
-    super::with_vm_context(context, |jit| {
+    super::with_native_context(context, |jit| {
         let name = unsafe { &*addr }.as_str();
         let path = unsafe { &*path }.as_str();
         jit.import(name, path)
@@ -361,7 +361,7 @@ fn spawn_run(context: Weak<RwLock<JITRunTime>>, fn_name: &str, args: Dynamic) ->
         anyhow::bail!("spawn supports at most 16 args, got {}", args.len());
     }
     let arg_tys = vec![Type::Any; args.len()];
-    let (ptr, ret_ty) = super::with_vm_context(&context as *const Weak<RwLock<JITRunTime>>, |vm| vm.jit.write().get_fn_ptr(fn_name, &arg_tys))?;
+    let (ptr, ret_ty) = super::with_native_context(&context as *const Weak<RwLock<JITRunTime>>, |vm| vm.jit.write().get_fn_ptr(fn_name, &arg_tys))?;
     let args: Vec<Box<Dynamic>> = args.into_iter().map(Box::new).collect();
     let ptrs: Vec<*const Dynamic> = args.iter().map(|arg| arg.as_ref() as *const Dynamic).collect();
     call_jit_isolated(|| unsafe { call_spawned(ptr, &ret_ty, &ptrs) })

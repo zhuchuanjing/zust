@@ -18,12 +18,7 @@ impl SpirvCompiler {
         match &expr.kind {
             ExprKind::Value(value) => self.const_dynamic(value.clone()),
             ExprKind::Const(idx) => {
-                let value = self
-                    .compiler
-                    .consts
-                    .get_index(*idx)
-                    .map(|(_, v)| v.clone())
-                    .ok_or_else(|| anyhow!("compiler constant index {idx} is not available in this SPIR-V context"))?;
+                let value = self.compiler.consts.get_index(*idx).map(|(_, v)| v.clone()).ok_or_else(|| anyhow!("compiler constant index {idx} is not available in this SPIR-V context"))?;
                 self.const_dynamic(value)
             }
             ExprKind::Typed { value, ty } => {

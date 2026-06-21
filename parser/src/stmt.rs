@@ -144,6 +144,17 @@ impl Stmt {
         Self::new(StmtKind::Expr(Expr::new(ExprKind::Binary { left: Box::new(pat), op: crate::BinaryOp::Assign, right: Box::new(right) }, span), true), span)
     }
 
+    /// 与 `get_idx_assign` 类似,但把右侧索引读取包成 `Typed { value, ty }`。
+    /// 解构生成的 `arr[i]` / `arr.pop()` 默认返回 `Any`(指向 Dynamic 的指针),
+    /// 不加类型标注的话元素槽会被声明成 Any,后续读取拿到的是裸指针而不是值。
+    /// 这里按模式里推导出的元素类型 `ty` 包一层 `Typed`,让 JIT 走 Any→ty 的转换。
+    fn get_idx_assign_typed(pat: Expr, idx: usize, expr: Expr, ty: Type) -> Self {
+        let span = pat.span.merge(expr.span);
+        let idx_expr = Expr::new(ExprKind::Binary { left: Box::new(expr), op: crate::BinaryOp::Idx, right: Box::new(Expr::new(ExprKind::Value((idx as u32).into()), span)) }, span);
+        let right = Expr::new(ExprKind::Typed { value: Box::new(idx_expr), ty }, span);
+        Self::new(StmtKind::Expr(Expr::new(ExprKind::Binary { left: Box::new(pat), op: crate::BinaryOp::Assign, right: Box::new(right) }, span), true), span)
+    }
+
     fn get_assign_expr(pat: Expr, expr: Expr) -> Self {
         let span = pat.span.merge(expr.span);
         Self::new(StmtKind::Expr(Expr::new(ExprKind::Binary { left: Box::new(pat), op: crate::BinaryOp::Assign, right: Box::new(expr) }, span), true), span)
@@ -155,6 +166,21 @@ impl Stmt {
         let pop_method = Expr::new(ExprKind::Binary { left: Box::new(expr), op: crate::BinaryOp::Idx, right: Box::new(pop_name) }, span);
         let pop_call = Expr::new(ExprKind::Call { obj: Box::new(pop_method), params: Vec::new() }, span);
         Self::get_assign_expr(pat, pop_call)
+    }
+
+    /// 与 `get_pop_assign` 类似,但把 `expr.pop()` 的结果包成 `Typed { value, ty }`,
+    /// 避免解构元素槽被声明成 Any(裸指针)。见 `get_idx_assign_typed` 的说明。
+    fn get_pop_assign_typed(pat: Expr, expr: Expr, ty: Type) -> Self {
+        let span = pat.span.merge(expr.span);
+        let pop_name = Expr::new(ExprKind::Value(Dynamic::from("pop")), span);
+        let pop_method = Expr::new(ExprKind::Binary { left: Box::new(expr), op: crate::BinaryOp::Idx, right: Box::new(pop_name) }, span);
+        let pop_call = Expr::new(ExprKind::Call { obj: Box::new(pop_method), params: Vec::new() }, span);
+        let right = Expr::new(ExprKind::Typed { value: Box::new(pop_call), ty }, span);
+        Self::get_assign_expr(pat, right)
+    }
+
+    fn var_expr_with_ty(pat: &Pattern) -> Option<(Expr, Type)> {
+        if let PatternKind::Var { idx, ty } = &pat.kind { Some((Expr::new(ExprKind::Var(*idx), pat.span), ty.clone())) } else { None }
     }
 
     pub fn bind_pattern(&mut self, pat: Pattern) -> Result<()> {
@@ -170,9 +196,12 @@ impl Stmt {
                 PatternKind::Tuple(list) => {
                     let mut stmts = Vec::new();
                     for p in list.into_iter().rev() {
-                        match p.expr() {
-                            Ok(p) => stmts.push(Self::get_pop_assign(p, expr.clone())),
-                            Err(e) => return Err(e),
+                        match Self::var_expr_with_ty(&p) {
+                            Some((p, ty)) => stmts.push(Self::get_pop_assign_typed(p, expr.clone(), ty)),
+                            None => match p.expr() {
+                                Ok(p) => stmts.push(Self::get_pop_assign(p, expr.clone())),
+                                Err(e) => return Err(e),
+                            },
                         }
                     }
                     Self::new(StmtKind::Block(stmts), self.span)
@@ -182,16 +211,22 @@ impl Stmt {
                     let prefix_count = if has_rest { elems.len() - 1 } else { elems.len() };
                     if has_rest {
                         for (idx, p) in elems.iter().take(prefix_count).enumerate() {
-                            match p.expr() {
-                                Ok(p) => stmts.push(Self::get_idx_assign(p, idx, expr.clone())),
-                                Err(e) => return Err(e),
+                            match Self::var_expr_with_ty(p) {
+                                Some((p, ty)) => stmts.push(Self::get_idx_assign_typed(p, idx, expr.clone(), ty)),
+                                None => match p.expr() {
+                                    Ok(p) => stmts.push(Self::get_idx_assign(p, idx, expr.clone())),
+                                    Err(e) => return Err(e),
+                                },
                             }
                         }
                     } else {
                         for p in elems.iter().rev() {
-                            match p.expr() {
-                                Ok(p) => stmts.push(Self::get_pop_assign(p, expr.clone())),
-                                Err(e) => return Err(e),
+                            match Self::var_expr_with_ty(p) {
+                                Some((p, ty)) => stmts.push(Self::get_pop_assign_typed(p, expr.clone(), ty)),
+                                None => match p.expr() {
+                                    Ok(p) => stmts.push(Self::get_pop_assign(p, expr.clone())),
+                                    Err(e) => return Err(e),
+                                },
                             }
                         }
                     }

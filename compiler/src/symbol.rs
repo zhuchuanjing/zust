@@ -187,7 +187,7 @@ impl SymbolTable {
             }
             Type::List(_) | Type::Array(_, _) => {
                 let any_method = match name {
-                    "len" | "push" | "pop" | "get_idx" | "set_idx" | "slice" | "is_list" | "is_null" => format!("Any::{}", name),
+                    "len" | "push" | "pop" | "get_idx" | "set_idx" | "slice" | "contains" | "is_list" | "is_null" => format!("Any::{}", name),
                     _ => return Err(anyhow!("未发现 symbol {:?} {}", ty, name)),
                 };
                 return Ok((usize::MAX, Type::Symbol { id: self.get_id(&any_method)?, params: Vec::new() }));

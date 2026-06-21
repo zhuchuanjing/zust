@@ -290,7 +290,7 @@ impl Compiler {
                 Ok(Some(Type::Void))
             }
             "len" => Ok(Some(Type::I32)),
-            "is_list" | "is_null" => Ok(Some(Type::Bool)),
+            "contains" | "is_list" | "is_null" => Ok(Some(Type::Bool)),
             _ => Ok(None),
         }
     }

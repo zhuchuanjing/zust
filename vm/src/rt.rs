@@ -98,6 +98,10 @@ impl JITRunTime {
         Ok(())
     }
 
+    pub fn import_source(&mut self, name: &str, source: &str) -> Result<()> {
+        self.import_code(name, source.as_bytes().to_vec())
+    }
+
     #[cfg(feature = "ir-disassembly")]
     pub fn disassemble_ir(&mut self, name: &str) -> Result<String> {
         if let Some(ir) = self.ir_disassembly.get(name) {

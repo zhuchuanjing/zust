@@ -1,4 +1,5 @@
 **/target/** 
+/.iroh/
 *.lock
 *.png
 *.spv

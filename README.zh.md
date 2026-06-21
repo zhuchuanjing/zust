@@ -401,6 +401,16 @@ root::add_map("local/users");
 root::insert("local/users", "alice", {age: 20});
 ```
 
+`root` 节点里的 List / Map 是对象树节点,成员修改必须通过 `root` API 原地写到节点上。`root::get(path)` 返回的是当前值的副本/快照;对这个返回值调用 `push`、`pop`、`set_key` 等只会修改副本,不会写回 ROOT。
+
+```zust
+root::add_list("local/events");
+root::push("local/events", {kind: "login"});     // 正确: 修改 ROOT 节点
+
+let events = root::get("local/events");
+events.push({kind: "logout"});                   // 错误: 只改 events 副本
+```
+
 函数：
 
 - `root::mount(name, url)`：挂载 Redis-backed root path。

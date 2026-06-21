@@ -247,19 +247,34 @@ impl IrohClient {
     pub fn dir_raw(&self, name: &str) -> Result<Vec<SmolStr>> {
         let remote = self.remote;
         let prefix = name.to_string();
-        block_on(async move {
+        let mut names = summaries_with_prefix(&prefix, self.cache.list().unwrap_or_default());
+        let remote_names = block_on(async move {
             let (endpoint, conn) = connect(remote).await?;
             let response = request(&conn, Request::List).await?.into_result()?;
             close(endpoint, conn).await;
             let Response::List { values } = response else {
                 bail!("unexpected iroh list response");
             };
-            let mut names = values.into_iter().filter_map(|value| if prefix.is_empty() || value.id.starts_with(&prefix) { Some(value.id.into()) } else { None }).collect::<Vec<SmolStr>>();
-            names.sort();
-            names.dedup();
-            Ok(names)
-        })
+            Ok(summaries_with_prefix(&prefix, values))
+        });
+        match remote_names {
+            Ok(mut remote_names) => {
+                names.append(&mut remote_names);
+                names.sort();
+                names.dedup();
+                Ok(names)
+            }
+            Err(err) if names.is_empty() => Err(err),
+            Err(_) => Ok(names),
+        }
     }
+}
+
+fn summaries_with_prefix(prefix: &str, values: Vec<IrohSummary>) -> Vec<SmolStr> {
+    let mut names = values.into_iter().filter_map(|value| if prefix.is_empty() || value.id.starts_with(prefix) { Some(value.id.into()) } else { None }).collect::<Vec<SmolStr>>();
+    names.sort();
+    names.dedup();
+    names
 }
 
 pub async fn run_daemon(root: impl AsRef<Path>, secret_key: SecretKey) -> Result<()> {
@@ -538,6 +553,16 @@ mod tests {
     fn dir_entries_match_root_immediate_child_semantics() {
         let raw = vec!["assets/a.png".into(), "assets/nested/b.png".into(), "assets/nested/c.png".into(), "other/d.png".into()];
         assert_eq!(dir_entries_from_raw("assets/", raw), vec![SmolStr::new("assets/a.png"), SmolStr::new("assets/nested")]);
+    }
+
+    #[test]
+    fn summaries_with_prefix_returns_cached_ids_for_dir_raw() {
+        let values = vec![
+            IrohSummary { id: "map/demo/bg/0_0.png".into(), name: "0_0.png".into(), hash: "hash-a".into(), size: 1, modified_ms: 10 },
+            IrohSummary { id: "map/demo/bg/0_0.png".into(), name: "0_0.png".into(), hash: "hash-a".into(), size: 1, modified_ms: 10 },
+            IrohSummary { id: "map/demo/meta.json".into(), name: "meta.json".into(), hash: "hash-b".into(), size: 2, modified_ms: 11 },
+        ];
+        assert_eq!(summaries_with_prefix("map/demo/bg/", values), vec![SmolStr::new("map/demo/bg/0_0.png")]);
     }
 
     #[test]

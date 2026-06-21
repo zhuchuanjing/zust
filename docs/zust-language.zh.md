@@ -493,6 +493,26 @@ root::send(path, msg) -> any
 root::send_idx(path, i, msg) -> any
 ```
 
+`root` 的 List / Map 成员是**节点原地修改**语义。也就是说,要修改 ROOT 里的列表或 map,必须直接调用 `root::push` / `root::remove_idx` / `root::insert` / `root::remove_key` / `root::update_key` 等节点 API。`root::get(path)` 取出的是当前节点值的副本/快照;对这个副本调用 `push`、`pop`、`set_key` 等只会修改本地变量,不会写回 ROOT。
+
+```rust
+root::add_list("local/events");
+root::push("local/events", {kind: "login"});     // 正确: 原地修改 ROOT list 节点
+
+let events = root::get("local/events");
+events.push({kind: "logout"});                   // 错误: 只修改 events 副本
+```
+
+Map 同理:
+
+```rust
+root::add_map("local/users");
+root::insert("local/users", "alice", {age: 20}); // 正确: 原地修改 ROOT map 节点
+
+let users = root::get("local/users");
+users.set_key("bob", {age: 21});                 // 错误: 不会写回 local/users
+```
+
 `root::update` / `root::update_key` 是**原子 read-modify-write**,同 path 的并发调用由 `Mount::get_mut` 内置桶锁(`scc::HashMap::update_sync`)串行化,无丢失更新。Memory mount 16 线程 × 10000 自增实测约 60k ops/sec、~17 μs/op,跟 `Arc<Mutex<i64>>` (~30M ops/sec) 的差距来自路径解析 + 哈希 + Dynamic 类型分发,是结构化目录系统该有的开销。
 
 > 闭包跨 native 边界靠 `Dynamic::Custom(ZustCallback)`(`as_custom::<ZustCallback>().call1(arg)`),实现见 [vm/src/root_module.rs](../vm/src/root_module.rs) 的 `root_update` / `root_update_key`。

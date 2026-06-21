@@ -375,6 +375,10 @@ impl Vm {
         }
     }
 
+    pub fn import_source(&self, name: &str, source: &str) -> Result<()> {
+        self.jit.write().import_source(name, source)
+    }
+
     pub fn add_native_module_context_ptr(&self, module: &str, name: &str, arg_tys: &[Type], ret_ty: Type, fn_ptr: *const u8) -> Result<u32> {
         self.jit.write().add_native_module_context_ptr(module, name, arg_tys, ret_ty, fn_ptr)
     }
@@ -515,6 +519,25 @@ mod tests {
         }
         let name = unsafe { (&*name).as_str().to_string() };
         with_native_context(context, |vm| Ok(vm.jit.write().get_id(&name).is_ok())).unwrap_or(false)
+    }
+
+    #[test]
+    fn vm_import_source_accepts_inline_utf8_zust_code() -> anyhow::Result<()> {
+        let vm = Vm::new();
+        vm.import_source(
+            "vm_utf8_source",
+            r#"
+            pub fn run() {
+                "扩展 Chunk".len()
+            }
+            "#,
+        )?;
+
+        let compiled = vm.get_fn("vm_utf8_source::run", &[])?;
+        assert_eq!(compiled.ret_ty(), &Type::I32);
+        let run: extern "C" fn() -> i32 = unsafe { std::mem::transmute(compiled.ptr()) };
+        assert_eq!(run(), 12);
+        Ok(())
     }
 
     #[test]
@@ -1302,6 +1325,30 @@ mod tests {
         let non_map_keys: extern "C" fn(*const Dynamic) -> bool = unsafe { std::mem::transmute(compiled.ptr()) };
         let value = Dynamic::from("alpha");
         assert!(non_map_keys(&value));
+        Ok(())
+    }
+
+    #[test]
+    fn const_list_contains_uses_any_list_method() -> anyhow::Result<()> {
+        let vm = Vm::with_all()?;
+        vm.import_code(
+            "vm_const_list_contains",
+            br#"
+            const IMAGE_EXTS = ["png", "jpg", "webp"];
+
+            pub fn is_supported(ext: string) {
+                IMAGE_EXTS.contains(ext)
+            }
+            "#
+            .to_vec(),
+        )?;
+
+        let compiled = vm.get_fn("vm_const_list_contains::is_supported", &[Type::Str])?;
+        assert_eq!(compiled.ret_ty(), &Type::Bool);
+        let is_supported: extern "C" fn(*const Dynamic) -> bool = unsafe { std::mem::transmute(compiled.ptr()) };
+        assert!(is_supported(&Dynamic::from("png")));
+        assert!(is_supported(&Dynamic::from("webp")));
+        assert!(!is_supported(&Dynamic::from("gif")));
         Ok(())
     }
 

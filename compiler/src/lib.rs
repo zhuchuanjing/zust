@@ -972,6 +972,21 @@ impl Compiler {
         (self.tys.len() - self.top() - 1) as u32
     }
 
+    /// 分配一个匿名临时变量槽,同时 push `names` 和 `tys` 保持对齐。
+    ///
+    /// `names` 和 `tys` 共享 slot 编号空间(都按 `len - top - 1` 算 idx,VM 侧
+    /// `BuildContext::vars` 也按同一 idx 索引)。`compile_fn` 里每个形参走
+    /// `add_name` + `add_ty` 配对保持两者同步;但临时变量如果只调 `add_ty`
+    /// 就会让 `names` 落后一格,后续 `add_name` 分到的 slot 会撞上之前的临时槽
+    /// —— 表现为 list/tuple 解构的临时数组槽被后续 `let` 复用,JIT verifier
+    /// 报 "invalid pointer width"。临时变量一律走这个入口。
+    fn add_temp(&mut self, ty: Type) -> u32 {
+        self.names.push(SmolStr::new_static(""));
+        self.list_elem_states.push(Self::list_elem_state_for_ty(&ty));
+        self.tys.push(ty);
+        (self.tys.len() - self.top() - 1) as u32
+    }
+
     fn set_ty(&mut self, idx: u32, ty: Type) {
         let pos = idx as usize + self.top();
         if self.list_elem_states.len() <= pos {
@@ -1091,8 +1106,16 @@ impl Compiler {
         }
     }
 
+    pub fn parse_source(source: &str) -> Result<Vec<Stmt>> {
+        Self::parse_code(source.as_bytes().to_vec())
+    }
+
     pub fn import_code(&mut self, name: &str, code: Vec<u8>) -> Result<Vec<u32>> {
         self.import_code_with_source(name, code, None, None)
+    }
+
+    pub fn import_source(&mut self, name: &str, source: &str) -> Result<Vec<u32>> {
+        self.import_code(name, source.as_bytes().to_vec())
     }
 
     pub fn import_code_from_path(&mut self, name: &str, code: Vec<u8>, path: impl AsRef<Path>) -> Result<Vec<u32>> {
@@ -1902,7 +1925,10 @@ impl Compiler {
                 };
                 let pat = self.pat_to_var(pat, expr_ty.clone())?;
                 if matches!(pat.kind, PatternKind::Tuple(_) | PatternKind::List { .. }) {
-                    let temp = self.add_ty(expr_ty.clone());
+                    // list/tuple 解构的 scrutinee 临时槽:必须走 add_temp 同步 push
+                    // names+tys,否则后续 `let` 的 add_name 会撞上这个临时槽的 idx,
+                    // 导致 JIT verifier 报 "invalid pointer width"(临时数组槽被 i32 复用)。
+                    let temp = self.add_temp(expr_ty.clone());
                     let temp_pat = Pattern { kind: PatternKind::Var { idx: temp, ty: expr_ty }, span: stmt_span };
                     compiled.last_mut().ok_or_else(|| Self::semantic_error(stmt_span, "没有生成可绑定模式的编译语句")).and_then(|stmt| stmt.bind_pattern(temp_pat))?;
                     let temp_expr = Expr::new(ExprKind::Var(temp), stmt_span);

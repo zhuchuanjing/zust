@@ -145,7 +145,7 @@ impl Stmt {
     }
 
     /// 与 `get_idx_assign` 类似,但把右侧索引读取包成 `Typed { value, ty }`。
-    /// 解构生成的 `arr[i]` / `arr.pop()` 默认返回 `Any`(指向 Dynamic 的指针),
+    /// 解构生成的 `arr[i]` 默认返回 `Any`(指向 Dynamic 的指针),
     /// 不加类型标注的话元素槽会被声明成 Any,后续读取拿到的是裸指针而不是值。
     /// 这里按模式里推导出的元素类型 `ty` 包一层 `Typed`,让 JIT 走 Any→ty 的转换。
     fn get_idx_assign_typed(pat: Expr, idx: usize, expr: Expr, ty: Type) -> Self {
@@ -158,25 +158,6 @@ impl Stmt {
     fn get_assign_expr(pat: Expr, expr: Expr) -> Self {
         let span = pat.span.merge(expr.span);
         Self::new(StmtKind::Expr(Expr::new(ExprKind::Binary { left: Box::new(pat), op: crate::BinaryOp::Assign, right: Box::new(expr) }, span), true), span)
-    }
-
-    fn get_pop_assign(pat: Expr, expr: Expr) -> Self {
-        let span = pat.span.merge(expr.span);
-        let pop_name = Expr::new(ExprKind::Value(Dynamic::from("pop")), span);
-        let pop_method = Expr::new(ExprKind::Binary { left: Box::new(expr), op: crate::BinaryOp::Idx, right: Box::new(pop_name) }, span);
-        let pop_call = Expr::new(ExprKind::Call { obj: Box::new(pop_method), params: Vec::new() }, span);
-        Self::get_assign_expr(pat, pop_call)
-    }
-
-    /// 与 `get_pop_assign` 类似,但把 `expr.pop()` 的结果包成 `Typed { value, ty }`,
-    /// 避免解构元素槽被声明成 Any(裸指针)。见 `get_idx_assign_typed` 的说明。
-    fn get_pop_assign_typed(pat: Expr, expr: Expr, ty: Type) -> Self {
-        let span = pat.span.merge(expr.span);
-        let pop_name = Expr::new(ExprKind::Value(Dynamic::from("pop")), span);
-        let pop_method = Expr::new(ExprKind::Binary { left: Box::new(expr), op: crate::BinaryOp::Idx, right: Box::new(pop_name) }, span);
-        let pop_call = Expr::new(ExprKind::Call { obj: Box::new(pop_method), params: Vec::new() }, span);
-        let right = Expr::new(ExprKind::Typed { value: Box::new(pop_call), ty }, span);
-        Self::get_assign_expr(pat, right)
     }
 
     fn var_expr_with_ty(pat: &Pattern) -> Option<(Expr, Type)> {
@@ -200,16 +181,12 @@ impl Stmt {
                     }
                 }
                 PatternKind::Tuple(list) => {
-                    // `let (x, y) = expr` 消费 expr:按 rev 顺序逐个 `expr.pop()`,
-                    // pop 后 expr 不可再用。这里只是把 pop 结果按子模式的元素类型
-                    // 包成 `Typed`,避免元素槽退化为 Any(裸指针)—— 这是原 value bug
-                    // 的修复,pop 消费语义不变。
                     let mut stmts = Vec::new();
-                    for p in list.into_iter().rev() {
+                    for (idx, p) in list.into_iter().enumerate() {
                         match Self::var_expr_with_ty(&p) {
-                            Some((p, ty)) => stmts.push(Self::get_pop_assign_typed(p, expr.clone(), ty)),
+                            Some((p, ty)) => stmts.push(Self::get_idx_assign_typed(p, idx, expr.clone(), ty)),
                             None => match p.expr() {
-                                Ok(p) => stmts.push(Self::get_pop_assign(p, expr.clone())),
+                                Ok(p) => stmts.push(Self::get_idx_assign(p, idx, expr.clone())),
                                 Err(e) => return Err(e),
                             },
                         }
@@ -230,12 +207,11 @@ impl Stmt {
                             }
                         }
                     } else {
-                        // 同 Tuple:无 rest 的 `let [x, y] = expr` 也消费 expr,走 pop。
-                        for p in elems.iter().rev() {
+                        for (idx, p) in elems.iter().enumerate() {
                             match Self::var_expr_with_ty(p) {
-                                Some((p, ty)) => stmts.push(Self::get_pop_assign_typed(p, expr.clone(), ty)),
+                                Some((p, ty)) => stmts.push(Self::get_idx_assign_typed(p, idx, expr.clone(), ty)),
                                 None => match p.expr() {
-                                    Ok(p) => stmts.push(Self::get_pop_assign(p, expr.clone())),
+                                    Ok(p) => stmts.push(Self::get_idx_assign(p, idx, expr.clone())),
                                     Err(e) => return Err(e),
                                 },
                             }

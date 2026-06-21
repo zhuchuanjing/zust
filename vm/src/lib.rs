@@ -947,25 +947,72 @@ mod tests {
     }
 
     #[test]
-    fn tuple_destructure_pops_temporary_rhs() -> anyhow::Result<()> {
+    fn list_destructure_does_not_pop_rhs() -> anyhow::Result<()> {
         let vm = Vm::with_all()?;
         vm.import_code(
-            "vm_tuple_destructure_pop",
+            "vm_list_destructure_no_pop",
             br#"
             pub fn run() {
                 let values = [1i64, 2i64];
-                let (x, y) = values;
+                let [x, y] = values;
                 x * 100i64 + y * 10i64 + values.len()
             }
             "#
             .to_vec(),
         )?;
 
-        let compiled = vm.get_fn("vm_tuple_destructure_pop::run", &[])?;
+        let compiled = vm.get_fn("vm_list_destructure_no_pop::run", &[])?;
         assert_eq!(compiled.ret_ty(), &Type::Any);
         let run: extern "C" fn() -> *const Dynamic = unsafe { std::mem::transmute(compiled.ptr()) };
         let result = unsafe { &*run() };
-        assert_eq!(result.as_int(), Some(120));
+        assert_eq!(result.as_int(), Some(122));
+        Ok(())
+    }
+
+    #[test]
+    fn tuple_and_list_patterns_reject_each_other() -> anyhow::Result<()> {
+        let vm = Vm::with_all()?;
+        let tuple_from_list = vm
+            .import_code(
+                "vm_tuple_pattern_rejects_list",
+                br#"
+                pub fn run() {
+                    let (x, y) = [1i64, 2i64];
+                    x + y
+                }
+                "#
+                .to_vec(),
+            )
+            .expect_err("tuple pattern should reject list RHS");
+        assert!(tuple_from_list.to_string().contains("元组模式"));
+
+        let list_from_tuple = vm
+            .import_code(
+                "vm_list_pattern_rejects_tuple",
+                br#"
+                pub fn run() {
+                    let [x, y] = (1i64, 2i64);
+                    x + y
+                }
+                "#
+                .to_vec(),
+            )
+            .expect_err("list pattern should reject tuple RHS");
+        assert!(list_from_tuple.to_string().contains("列表模式"));
+
+        let empty_list_from_unit = vm
+            .import_code(
+                "vm_empty_list_pattern_rejects_unit",
+                br#"
+                pub fn run() {
+                    let [] = ();
+                    1i64
+                }
+                "#
+                .to_vec(),
+            )
+            .expect_err("list pattern should reject unit tuple RHS");
+        assert!(empty_list_from_unit.to_string().contains("列表模式"));
         Ok(())
     }
 
@@ -2852,6 +2899,31 @@ mod tests {
         let result = unsafe { &*read_action(&action_map, &panel_id, &action_id) };
 
         assert_eq!(result.get_dynamic("id").map(|value| value.as_str().to_string()), Some("open".to_string()));
+        Ok(())
+    }
+
+    #[test]
+    fn const_map_bracket_accepts_dynamic_string_key() -> anyhow::Result<()> {
+        let vm = Vm::with_all()?;
+        vm.import_code(
+            "vm_const_map_dynamic_key",
+            r#"
+            const DIRECTION_LABELS = {left: "左", right: "右", up: "上", down: "下"};
+
+            pub fn label(direction) {
+                DIRECTION_LABELS[direction]
+            }
+            "#
+            .as_bytes()
+            .to_vec(),
+        )?;
+
+        let compiled = vm.get_fn("vm_const_map_dynamic_key::label", &[Type::Any])?;
+        assert_eq!(compiled.ret_ty(), &Type::Any);
+        let label: extern "C" fn(*const Dynamic) -> *const Dynamic = unsafe { std::mem::transmute(compiled.ptr()) };
+        let direction: Dynamic = "left".into();
+        let result = unsafe { &*label(&direction) };
+        assert_eq!(result.as_str(), "左");
         Ok(())
     }
 

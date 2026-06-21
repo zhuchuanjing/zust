@@ -151,7 +151,31 @@ impl Parser {
         } else if self.keyword("null").is_ok() {
             Ok(Pattern::new(PatternKind::Literal(Dynamic::Null), self.span_from(start)))
         } else if self.just("(").is_ok() {
-            Ok(Pattern::new(PatternKind::Tuple(crate::parse_list!(self, Vec::new(), b')', b',', self.pattern()?)), self.span_from(start)))
+            self.whitespace()?;
+            if self.take(b')').is_ok() {
+                return Ok(Pattern::new(PatternKind::Tuple(Vec::new()), self.span_from(start)));
+            }
+            let first = self.pattern()?;
+            self.whitespace()?;
+            if self.take(b',').is_ok() {
+                let mut items = vec![first];
+                loop {
+                    self.whitespace()?;
+                    if self.take(b')').is_ok() {
+                        break;
+                    }
+                    items.push(self.pattern()?);
+                    self.whitespace()?;
+                    if self.take(b',').is_err() {
+                        self.take(b')')?;
+                        break;
+                    }
+                }
+                Ok(Pattern::new(PatternKind::Tuple(items), self.span_from(start)))
+            } else {
+                self.take(b')')?;
+                Ok(first)
+            }
         } else if self.just("[").is_ok() {
             // 手写 list 解析,处理 `..rest`。
             let mut elems = Vec::new();

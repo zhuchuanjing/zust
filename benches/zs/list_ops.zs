@@ -4,8 +4,10 @@ pub fn bench(n: i64) {
         l.push(i);
     }
     let sum = 0i64;
-    for j in 0..n {
-        sum = sum + l[j];
+    for repeat in 0i64..5i64 {
+        for j in 0..n {
+            sum = sum + l[j];
+        }
     }
     sum
 }

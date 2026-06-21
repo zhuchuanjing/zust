@@ -1416,15 +1416,11 @@ impl Compiler {
                     }
                     let pats: Vec<Pattern> = pats.into_iter().zip(tys).map(|p| self.pat_to_var(p.0, p.1.clone())).collect::<Result<_>>()?;
                     Ok(Pattern { kind: PatternKind::Tuple(pats), span: pat.span })
-                } else if let Type::List(elem_ty) | Type::Array(elem_ty, _) | Type::Vec(elem_ty, _) = &expr_ty {
-                    // parser 把元组字面量 `(a, b)` 折成单个 `Dynamic::List`,失去 Tuple
-                    // 类型标记,但元素类型仍可由 elem_ty 给出。这里按 elem_ty 给每个
-                    // 子模式定类型,避免元素退化为 Any(裸指针)。
-                    let pats: Vec<Pattern> = pats.into_iter().map(|p| self.pat_to_var(p, elem_ty.as_ref().clone())).collect::<Result<_>>()?;
-                    Ok(Pattern { kind: PatternKind::Tuple(pats), span: pat.span })
-                } else {
+                } else if expr_ty.is_any() {
                     let pats = pats.into_iter().map(|p| self.pat_to_var(p, Type::Any)).collect::<Result<_>>()?;
                     Ok(Pattern { kind: PatternKind::Tuple(pats), span: pat.span })
+                } else {
+                    Err(Self::semantic_error(pat.span, format!("元组模式 {:?} 与类型 {:?} 不匹配", pats, expr_ty)))
                 }
             }
             PatternKind::List { elems, has_rest } => {
@@ -1910,7 +1906,11 @@ impl Compiler {
                 } else {
                     None
                 };
-                let pattern_expr_ty = if matches!(pat.kind, PatternKind::List { .. } | PatternKind::Tuple(_)) { if let StmtKind::Expr(expr, _) = &value.kind { Some(self.infer_expr(expr)?) } else { None } } else { None };
+                let pattern_expr_ty = if matches!(pat.kind, PatternKind::List { .. } | PatternKind::Tuple(_)) {
+                    if let StmtKind::Expr(expr, _) = &value.kind { Some(if matches!(expr.kind, ExprKind::List(_) | ExprKind::Tuple(_)) { expr.get_type() } else { self.infer_expr(expr)? }) } else { None }
+                } else {
+                    None
+                };
                 if let Some(ty) = annotated_ty {
                     if let StmtKind::Expr(expr, close) = value.kind {
                         let span = expr.span;

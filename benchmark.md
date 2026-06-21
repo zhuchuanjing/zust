@@ -8,9 +8,8 @@
 | fibonacci(35) recursive | 131ms | 315ms | 2.4x | 638ms | 4.9x |
 | fibonacci iter 50M | 163ms | 374ms | 2.3x | 3.5s | 21.6x |
 | sieve 100K | 214us | 8ms | 36.9x | 13ms | 62.3x |
-| list push/sum 2M | 38ms | 23ms | 0.6x | 168ms | 4.4x |
+| list push/sum x5 2M | 36ms | 60ms | 1.7x | 584ms | 16.4x |
 | list push only 2M | 32ms | 13ms | 0.4x | 72ms | 2.2x |
-| list sum x5 2M | 36ms | 60ms | 1.7x | 584ms | 16.4x |
 | bintree depth 20 | 5ms | 34ms | 6.3x | 46ms | 8.7x |
 | nested loops(2000) | 11ms | 155ms | 13.6x | 1.3s | 111.7x |
 | float ops 20M | 50ms | 270ms | 5.4x | 1.7s | 34.6x |
@@ -38,7 +37,7 @@
 | random LCG 50M | 62ms | 422ms | 6.8x | 6.6s | 106.6x |
 | array reverse 1K x10K | 9ms | 139ms | 15.7x | 1.2s | 130.8x |
 
-**geometric mean (28 valid): Zust = 1.0x, Lua = 7.7x, Python = 28.7x**
+**geometric mean (27 valid): Zust = 1.0x, Lua = 7.7x, Python = 28.7x**
 
 注：
 
@@ -48,7 +47,7 @@
 
 ## 近期变化（2026-06）
 
-- 新增 `list push only 2M` 与 `list sum x5 2M`，把 list 写入和读取/求和拆开观察。当前 push-only 仍慢于 Lua，sum-repeat 已快于 Lua。
+- list 读写综合基准已合并为 `list push/sum x5 2M`；`list push only 2M` 继续单独观察写入成本。
 - 闭包、bit popcount、spectral norm、bintree 等计算项在本轮结果中提升明显。
 - `Dynamic::Map` 相关两个 map 基准继续稳定快于 Lua 与 Python。
 

@@ -165,7 +165,8 @@ impl JITRunTime {
     }
 
     pub fn get_method(&self, ty: &Type, name: &str) -> Result<FnInfo> {
-        self.compiler.get_field(ty, name).and_then(|(_, ty)| if let Type::Symbol { id, params: _ } = ty { self.get_fn(id, &[]) } else { Err(anyhow!("不是成员函数")) })
+        let method_ty = if matches!(ty, Type::Map | Type::List(_) | Type::Iter) { Type::Any } else { ty.clone() };
+        self.compiler.get_field(&method_ty, name).and_then(|(_, ty)| if let Type::Symbol { id, params: _ } = ty { self.get_fn(id, &[]) } else { Err(anyhow!("不是成员函数")) })
     }
 
     fn is_fn_field_type(&self, ty: &Type) -> bool {

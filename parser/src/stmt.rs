@@ -180,7 +180,13 @@ impl Stmt {
     }
 
     fn var_expr_with_ty(pat: &Pattern) -> Option<(Expr, Type)> {
-        if let PatternKind::Var { idx, ty } = &pat.kind { Some((Expr::new(ExprKind::Var(*idx), pat.span), ty.clone())) } else { None }
+        if let PatternKind::Var { idx, ty } = &pat.kind
+            && !ty.is_any()
+        {
+            Some((Expr::new(ExprKind::Var(*idx), pat.span), ty.clone()))
+        } else {
+            None
+        }
     }
 
     pub fn bind_pattern(&mut self, pat: Pattern) -> Result<()> {
@@ -194,6 +200,10 @@ impl Stmt {
                     }
                 }
                 PatternKind::Tuple(list) => {
+                    // `let (x, y) = expr` 消费 expr:按 rev 顺序逐个 `expr.pop()`,
+                    // pop 后 expr 不可再用。这里只是把 pop 结果按子模式的元素类型
+                    // 包成 `Typed`,避免元素槽退化为 Any(裸指针)—— 这是原 value bug
+                    // 的修复,pop 消费语义不变。
                     let mut stmts = Vec::new();
                     for p in list.into_iter().rev() {
                         match Self::var_expr_with_ty(&p) {
@@ -220,6 +230,7 @@ impl Stmt {
                             }
                         }
                     } else {
+                        // 同 Tuple:无 rest 的 `let [x, y] = expr` 也消费 expr,走 pop。
                         for p in elems.iter().rev() {
                             match Self::var_expr_with_ty(p) {
                                 Some((p, ty)) => stmts.push(Self::get_pop_assign_typed(p, expr.clone(), ty)),

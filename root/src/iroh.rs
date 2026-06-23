@@ -430,21 +430,26 @@ impl ProtocolHandler for IrohRootProtocol {
 }
 
 async fn handle_connection(store: IrohStore, node_id: EndpointId, connection: Connection) -> Result<()> {
-    let (mut send, mut recv) = connection.accept_bi().await?;
-    let request = read_json::<Request>(&mut recv).await?;
-    let result = handle_request(&store, node_id, request, &mut recv).await;
-    match result {
-        Ok((response, body)) => {
-            write_json(&mut send, &response).await?;
-            if let Some(body) = body {
-                send.write_all(&body).await?;
-            }
+    loop {
+        let Ok((mut send, mut recv)) = connection.accept_bi().await else {
+            return Ok(());
+        };
+        let result = async {
+            let request = read_json::<Request>(&mut recv).await?;
+            handle_request(&store, node_id, request, &mut recv).await
         }
-        Err(err) => write_json(&mut send, &Response::Error { message: err.to_string() }).await?,
+        .await;
+        match result {
+            Ok((response, body)) => {
+                write_json(&mut send, &response).await?;
+                if let Some(body) = body {
+                    send.write_all(&body).await?;
+                }
+            }
+            Err(err) => write_json(&mut send, &Response::Error { message: err.to_string() }).await?,
+        }
+        send.finish()?;
     }
-    send.finish()?;
-    connection.closed().await;
-    Ok(())
 }
 
 async fn handle_request(store: &IrohStore, node_id: EndpointId, request: Request, recv: &mut iroh::endpoint::RecvStream) -> Result<(Response, Option<Bytes>)> {

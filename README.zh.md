@@ -319,7 +319,7 @@ pub struct BigFloat<N> {
 
 ## 运行时 Native 模块
 
-`zust-vm` 默认不启用扩展 feature。`Vm::new()` 注册 core 能力：VM 内存运行时、`std`、`Any`、`Vec` 和 `root`。`Vm::with_all()` 会注册当前编译进来的全部能力；启用 `full` 时会包含 `http`、`db`、`llm` 和 `gpu`。`oss` 跟随 `llm` feature 注册；`http::upload` 只有同时启用 `http` 和 `llm` 时可用。`vulkan` 和 `metal` 是 GPU 运行后端 feature，分别建立在 `gpu` 之上。
+`zust-vm` 默认不启用扩展 feature。`Vm::new()` 注册 core 能力：VM 内存运行时、`std`、`Any`、`Vec` 和 `root`。`Vm::with_all()` 会注册当前编译进来的全部能力；启用 `full` 时会包含 `http`、`db`、`llm`、`candle` 和 `gpu`。`oss` 跟随 `llm` feature 注册；`candle` 注册本地 Candle 模型执行入口；`http::upload` 只有同时启用 `http` 和 `llm` 时可用。`vulkan` 和 `metal` 是 GPU 运行后端 feature，分别建立在 `gpu` 之上。
 
 下面这些 native 模块和辅助类型都以 `Dynamic` 作为主要边界，因此 Zust 脚本可以直接传 map、list、字符串、数字和 bytes。
 
@@ -572,6 +572,44 @@ let image = llm::image(kling, {
 - `llm::deep(model, value, callback)`：启动异步补全任务，完成后结果会传给 callback closure。
 
 大体积二进制输入应优先上传到对象存储，再把 URL 传给支持 URL 输入的模型，避免把大 payload 塞进 LLM 请求体。
+
+### candle
+
+`candle` 在 Rust 进程内用 Candle 执行小规模本地模型。它不下载模型文件；调用时显式传入 tokenizer、config 和 safetensors 权重的本地路径。embedding 入口当前支持 BERT-compatible 模型，以及 KaLM-Embedding-V2.5 这类 Qwen2 embedding 模型。
+
+```zust
+let embedder = candle::load_embedder({
+    model: "models/all-MiniLM-L6-v2/model.safetensors",
+    tokenizer: "models/all-MiniLM-L6-v2/tokenizer.json",
+    config: "models/all-MiniLM-L6-v2/config.json",
+    max_len: 256,
+    normalize: true,
+});
+
+let result = candle::embed(embedder, ["hello Zust", "local embeddings"]);
+```
+
+函数：
+
+- `candle::load_embedder(options)`：加载本地 BERT-compatible embedding 模型，返回可复用的 native embedder 对象。
+- `candle::embed(embedder, input)`：执行已加载的 embedder。`input` 是字符串或字符串列表。成功返回 `{ok, model, count, dim, embeddings}`，失败返回 `{ok: false, error}`。
+- `candle::embed(options, input)`：一次性调用形式，在同一次调用中从本地路径加载并执行 embedding。
+
+KaLM-Embedding-V2.5 可以先下载到本地，再直接指向这些文件：
+
+```zust
+let kalm = candle::load_embedder({
+    model: "models/KaLM-embedding-multilingual-mini-instruct-v2.5/model.safetensors",
+    tokenizer: "models/KaLM-embedding-multilingual-mini-instruct-v2.5/tokenizer.json",
+    config: "models/KaLM-embedding-multilingual-mini-instruct-v2.5/config.json",
+    max_len: 512,
+    output_dim: 896,
+    normalize: true,
+});
+
+let query = "Instruct: Given a query, retrieve documents that answer the query\nQuery: What is Zust?";
+let result = candle::embed(kalm, [query, "Zust is a Rust-like scripting language."]);
+```
 
 ### oss
 

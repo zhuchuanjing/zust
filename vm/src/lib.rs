@@ -14,6 +14,8 @@ mod rt;
 use cranelift::prelude::types;
 use dynamic::{Dynamic, Type};
 pub use rt::JITRunTime;
+#[cfg(feature = "candle")]
+mod candle_module;
 #[cfg(feature = "db")]
 mod db_module;
 mod gpu_layout;
@@ -273,6 +275,14 @@ impl JITRunTime {
         add_native_module_fns(self, "oss", &oss_module::OSS_NATIVE)
     }
 
+    #[cfg(feature = "candle")]
+    pub fn add_candle(&mut self) -> Result<()> {
+        if self.compiler.symbols.get_id("candle::embed").is_ok() {
+            return Ok(());
+        }
+        add_native_module_fns(self, "candle", &candle_module::CANDLE_NATIVE)
+    }
+
     pub fn add_root(&mut self) -> Result<()> {
         if self.compiler.symbols.get_id("root::get").is_ok() {
             return Ok(());
@@ -322,6 +332,8 @@ impl JITRunTime {
         self.add_time()?;
         #[cfg(feature = "llm")]
         self.add_llm()?;
+        #[cfg(feature = "candle")]
+        self.add_candle()?;
         #[cfg(feature = "http")]
         self.add_http()?;
         #[cfg(feature = "db")]
@@ -649,6 +661,15 @@ mod tests {
         assert_eq!(compiled.ret_ty(), &Type::F64);
         let run: extern "C" fn() -> f64 = unsafe { std::mem::transmute(compiled.ptr()) };
         assert_eq!(run(), 3.0);
+        Ok(())
+    }
+
+    #[cfg(feature = "candle")]
+    #[test]
+    fn candle_module_registers_embed() -> anyhow::Result<()> {
+        let vm = Vm::with_all()?;
+        assert_eq!(vm.infer("candle::embed", &[Type::Any, Type::Any])?, Type::Any);
+        assert_eq!(vm.infer("candle::load_embedder", &[Type::Any])?, Type::Any);
         Ok(())
     }
 

@@ -2,6 +2,8 @@ use anyhow::{Result, anyhow};
 use dynamic::{Dynamic, FromJson, ToJson};
 use std::io::Write;
 
+#[cfg(feature = "candle")]
+pub mod candle;
 pub mod oss;
 
 fn debug_log_event(options: &Dynamic, event: Dynamic) {
@@ -615,12 +617,13 @@ async fn poll_image_task(options: &Dynamic, task_id: &str) -> Result<Dynamic> {
             return Ok(map!("url"=> url));
         }
 
-        let output = body.get_dynamic("output").unwrap_or(body);
-        if let Some(status) = output.get_dynamic("task_status") {
-            let status = status.as_str();
-            if matches!(status, "FAILED" | "CANCELED" | "UNKNOWN" | "failed") {
-                let message = output.get_dynamic("task_status_msg").or_else(|| output.get_dynamic("message")).map(|v| v.as_str().to_string()).unwrap_or_else(|| status.to_string());
-                return Err(anyhow!("图片任务失败: {}", message));
+        for output in [body.get_dynamic("data"), body.get_dynamic("output"), Some(body)].into_iter().flatten() {
+            if let Some(status) = output.get_dynamic("task_status") {
+                let status = status.as_str();
+                if matches!(status, "FAILED" | "CANCELED" | "UNKNOWN" | "failed" | "canceled" | "unknown") {
+                    let message = output.get_dynamic("task_status_msg").or_else(|| output.get_dynamic("message")).map(|v| v.as_str().to_string()).unwrap_or_else(|| status.to_string());
+                    return Err(anyhow!("图片任务失败: {}", message));
+                }
             }
         }
 
@@ -884,6 +887,7 @@ fn copy_request_options_except(options: &Dynamic, msg: &Dynamic, skipped_keys: &
             && key != "method"
             && key != "kind"
             && key != "provider"
+            && key != "debug_log_file"
             && key != "name"
             && key != "brand"
             && key != "text_model"
@@ -1181,7 +1185,40 @@ fn decode_responses_text(t: &Dynamic) -> Option<Dynamic> {
 }
 
 fn decode_text_content(content: Dynamic, _raw_text: &str) -> Result<Dynamic> {
-    let text = content.as_str();
+    let mut text = content.as_str().to_string();
+    let mut think_text = String::new();
+    loop {
+        let lower = text.to_ascii_lowercase();
+        let Some(start) = lower.find("<think>") else {
+            break;
+        };
+        let body_start = start + "<think>".len();
+        if let Some(end_offset) = lower[body_start..].find("</think>") {
+            let end = body_start + end_offset;
+            let think = text[body_start..end].trim();
+            if !think.is_empty() {
+                if !think_text.is_empty() {
+                    think_text.push('\n');
+                }
+                think_text.push_str(think);
+            }
+            text.replace_range(start..end + "</think>".len(), "");
+        } else {
+            let think = text[body_start..].trim();
+            if !think.is_empty() {
+                if !think_text.is_empty() {
+                    think_text.push('\n');
+                }
+                think_text.push_str(think);
+            }
+            text.truncate(start);
+            break;
+        }
+    }
+    if !think_text.is_empty() {
+        log::info!("LLM think:\n{}", think_text);
+    }
+    let text = text.trim();
     if text.trim_start().starts_with('{') || text.trim_start().starts_with('[') {
         Dynamic::from_json(text.as_bytes()).map(|(v, _)| v)
     } else {
@@ -1190,11 +1227,18 @@ fn decode_text_content(content: Dynamic, _raw_text: &str) -> Result<Dynamic> {
             let lang = cap.get(1).map_or("unknown", |m| m.as_str());
             let code = cap.get(2).unwrap().as_str();
             if lang == "json" || code.trim_start().starts_with('{') || code.trim_start().starts_with('[') { Dynamic::from_json(code.as_bytes()).map(|(v, _)| v) } else { Ok(map!("lang"=> lang, "code"=> code)) }
+        } else if let (Some(start), Some(end)) = (text.find('{'), text.rfind('}')) {
+            if start < end {
+                let (v, _) = Dynamic::from_json(text[start..=end].as_bytes())?;
+                Ok(v)
+            } else {
+                Ok(content)
+            }
         } else if let Some(pos) = text.find("\n{") {
             let (v, _) = Dynamic::from_json(text[pos..].as_bytes())?;
             Ok(v)
         } else {
-            Ok(content)
+            Ok(text.into())
         }
     }
 }
@@ -1398,6 +1442,22 @@ mod test {
 
         assert!(decoded.get_dynamic("ok").unwrap().is_true());
         assert_eq!(decoded.get_dynamic("name").unwrap().as_str(), "pdf");
+        Ok(())
+    }
+
+    #[test]
+    fn decode_text_content_strips_think_before_json() -> anyhow::Result<()> {
+        let decoded = super::decode_text_content("<think>check shape</think>\n{\"ok\":true}".into(), "")?;
+
+        assert!(decoded.get_dynamic("ok").unwrap().is_true());
+        Ok(())
+    }
+
+    #[test]
+    fn decode_text_content_strips_unclosed_think_from_plain_text() -> anyhow::Result<()> {
+        let decoded = super::decode_text_content("answer\n<think>unfinished".into(), "")?;
+
+        assert_eq!(decoded.as_str(), "answer");
         Ok(())
     }
 

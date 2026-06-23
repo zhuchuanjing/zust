@@ -1,5 +1,9 @@
 use std::{
     path::{Path, PathBuf},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -153,6 +157,17 @@ impl IrohStore {
         Ok(())
     }
 
+    fn put_summary(&self, summary: IrohSummary) -> Result<()> {
+        self.put_record(&IrohRecord {
+            id: summary.id,
+            name: summary.name,
+            hash: summary.hash,
+            size: summary.size,
+            modified_ms: summary.modified_ms,
+            created_ms: now_ms(),
+        })
+    }
+
     fn get_record(&self, id: &str) -> Result<Option<IrohRecord>> {
         self.values.get(id.as_bytes())?.map(|value| serde_json::from_slice(value.as_ref()).context("decode iroh root record")).transpose()
     }
@@ -162,18 +177,19 @@ impl IrohStore {
 pub struct IrohClient {
     remote: EndpointId,
     cache: IrohStore,
+    list_refreshing: Arc<AtomicBool>,
 }
 
 impl IrohClient {
     pub fn new(remote: EndpointId) -> Result<Self> {
         let cache = block_on(async { IrohStore::open(default_cache_dir()).await })?;
-        Ok(Self { remote, cache })
+        Ok(Self { remote, cache, list_refreshing: Arc::new(AtomicBool::new(false)) })
     }
 
     pub fn with_cache(remote: EndpointId, cache_dir: impl AsRef<Path>) -> Result<Self> {
         let cache_dir = cache_dir.as_ref().to_path_buf();
         let cache = block_on(async move { IrohStore::open(cache_dir).await })?;
-        Ok(Self { remote, cache })
+        Ok(Self { remote, cache, list_refreshing: Arc::new(AtomicBool::new(false)) })
     }
 
     pub fn put_bytes(&self, id: &str, bytes: Bytes) -> Result<()> {
@@ -247,26 +263,27 @@ impl IrohClient {
     pub fn dir_raw(&self, name: &str) -> Result<Vec<SmolStr>> {
         let remote = self.remote;
         let prefix = name.to_string();
-        let mut names = summaries_with_prefix(&prefix, self.cache.list().unwrap_or_default());
-        let remote_names = block_on(async move {
-            let (endpoint, conn) = connect(remote).await?;
-            let response = request(&conn, Request::List).await?.into_result()?;
-            close(endpoint, conn).await;
-            let Response::List { values } = response else {
-                bail!("unexpected iroh list response");
-            };
-            Ok(summaries_with_prefix(&prefix, values))
-        });
-        match remote_names {
-            Ok(mut remote_names) => {
-                names.append(&mut remote_names);
-                names.sort();
-                names.dedup();
-                Ok(names)
-            }
-            Err(err) if names.is_empty() => Err(err),
-            Err(_) => Ok(names),
+        let names = summaries_with_prefix(&prefix, self.cache.list().unwrap_or_default());
+        if !self.list_refreshing.swap(true, Ordering::AcqRel) {
+            let cache = self.cache.clone();
+            let refreshing = self.list_refreshing.clone();
+            std::thread::spawn(move || {
+                let _ = block_on(async move {
+                    let (endpoint, conn) = connect(remote).await?;
+                    let response = request(&conn, Request::List).await?.into_result()?;
+                    close(endpoint, conn).await;
+                    let Response::List { values } = response else {
+                        bail!("unexpected iroh list response");
+                    };
+                    for value in values {
+                        cache.put_summary(value)?;
+                    }
+                    Ok::<(), anyhow::Error>(())
+                });
+                refreshing.store(false, Ordering::Release);
+            });
         }
+        Ok(names)
     }
 }
 

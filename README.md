@@ -326,7 +326,7 @@ See [zusts/bigfloat.zs](zusts/bigfloat.zs) and the GPU Mandelbrot examples under
 
 ## Runtime Modules
 
-`zust-vm` enables no extension features by default. `Vm::new()` registers core runtime support: VM memory, `std`, `Any`, `Vec`, and `root`. `Vm::with_all()` registers every capability compiled into the crate; enabling `full` includes `http`, `db`, `llm`, and `gpu`. `oss` is registered with the `llm` feature, and `http::upload` is available only when both `http` and `llm` are enabled. `vulkan` and `metal` are GPU runtime backend features built on top of `gpu`.
+`zust-vm` enables no extension features by default. `Vm::new()` registers core runtime support: VM memory, `std`, `Any`, `Vec`, and `root`. `Vm::with_all()` registers every capability compiled into the crate; enabling `full` includes `http`, `db`, `llm`, `candle`, and `gpu`. `oss` is registered with the `llm` feature, `candle` registers local Candle model execution helpers, and `http::upload` is available only when both `http` and `llm` are enabled. `vulkan` and `metal` are GPU runtime backend features built on top of `gpu`.
 
 The runtime modules and helper types below use `Dynamic` at the boundary, so maps, lists, strings, bytes, and numbers can be passed directly from Zust scripts.
 
@@ -571,6 +571,44 @@ let image = llm::image(kling, {
 ```
 
 Large binary inputs should be uploaded to object storage first and passed to model APIs by URL when the provider supports URLs. This keeps large payloads out of LLM request bodies.
+
+### `candle`
+
+`candle` executes small local models inside the Rust process using Candle. It does not download model files; pass explicit local paths for the tokenizer, config, and safetensors weights. The embedding helper currently supports BERT-compatible models and Qwen2 embedding models such as KaLM-Embedding-V2.5.
+
+```zust
+let embedder = candle::load_embedder({
+    model: "models/all-MiniLM-L6-v2/model.safetensors",
+    tokenizer: "models/all-MiniLM-L6-v2/tokenizer.json",
+    config: "models/all-MiniLM-L6-v2/config.json",
+    max_len: 256,
+    normalize: true,
+});
+
+let result = candle::embed(embedder, ["hello Zust", "local embeddings"]);
+```
+
+Functions:
+
+- `candle::load_embedder(options)`: load a local BERT-compatible embedding model and return a reusable native embedder object.
+- `candle::embed(embedder, input)`: run a loaded embedder. `input` is a string or string list. Returns `{ok, model, count, dim, embeddings}` on success, or `{ok: false, error}` on failure.
+- `candle::embed(options, input)`: one-shot form that loads from local paths and embeds in the same call.
+
+For KaLM-Embedding-V2.5, download the Hugging Face files locally and point to them directly:
+
+```zust
+let kalm = candle::load_embedder({
+    model: "models/KaLM-embedding-multilingual-mini-instruct-v2.5/model.safetensors",
+    tokenizer: "models/KaLM-embedding-multilingual-mini-instruct-v2.5/tokenizer.json",
+    config: "models/KaLM-embedding-multilingual-mini-instruct-v2.5/config.json",
+    max_len: 512,
+    output_dim: 896,
+    normalize: true,
+});
+
+let query = "Instruct: Given a query, retrieve documents that answer the query\nQuery: What is Zust?";
+let result = candle::embed(kalm, [query, "Zust is a Rust-like scripting language."]);
+```
 
 ### `oss`
 

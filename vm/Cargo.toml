@@ -15,11 +15,12 @@ name = "vm"
 
 [features]
 default = []
-full = ["http", "db", "llm", "gpu"]
+full = ["http", "db", "llm", "candle", "gpu"]
 ir-disassembly = []
 http = ["dep:axum", "dep:futures-util", "dep:reqwest", "dep:tokio", "dep:tower-http"]
 db = ["dep:sqlx-core", "dep:sqlx-mysql", "dep:sqlx-postgres", "dep:tokio"]
 llm = ["dep:llm", "dep:tokio"]
+candle = ["dep:llm", "llm/candle"]
 gpu = ["dep:vm-spirv", "dep:vm-metal"]
 vulkan = ["gpu", "dep:vulkan", "dep:vulkano"]
 metal = ["gpu", "vm-metal/runtime"]

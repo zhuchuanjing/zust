@@ -13,6 +13,10 @@ categories = ["api-bindings"]
 [lib]
 name = "llm"
 
+[features]
+default = []
+candle = ["dep:candle-core", "dep:candle-nn", "dep:candle-transformers", "dep:tokenizers", "dep:serde_json"]
+
 [dependencies]
 dynamic = { package = "zust-dynamic", version = "0.9.18", path = "../dynamic" }
 root = { package = "zust-root", version = "0.9.6", path = "../root" }
@@ -32,3 +36,8 @@ regex = "1.12.3"
 hmac = "0.12.1"
 sha2 = "0.10.9"
 jiff = "0.2.24"
+candle-core = { version = "0.10.2", optional = true }
+candle-nn = { version = "0.10.2", optional = true }
+candle-transformers = { version = "0.10.2", optional = true }
+tokenizers = { version = "0.22.1", optional = true }
+serde_json = { version = "1.0.145", optional = true }

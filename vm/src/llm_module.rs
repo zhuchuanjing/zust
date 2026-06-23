@@ -7,7 +7,14 @@ use std::future::Future;
 extern "C" fn llm_complete(openai: *const Dynamic, value: *const Dynamic) -> *const Dynamic {
     let openai = unsafe { (&*openai).clone() };
     let value = unsafe { (&*value).clone() };
-    let result = root::sync_await!(llm::complete(openai, value, None)).unwrap_or(Dynamic::Null);
+    let result = match root::sync_await!(llm::complete(openai, value, None)) {
+        Ok(result) => result,
+        Err(err) => dynamic::map!(
+            "ok" => false,
+            "error" => err.to_string(),
+            "errorDebug" => format!("{err:?}")
+        ),
+    };
     alloc_dynamic(result)
 }
 

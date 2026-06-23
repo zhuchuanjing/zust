@@ -92,9 +92,42 @@ extern "C" fn llm_deep(openai: *const Dynamic, value: *const Dynamic, callback: 
         Err(err) => return alloc_dynamic(callback_arg_error(err)),
     };
     let id = start_llm_task(value.clone(), || async move {
-        let r = llm::complete(openai, value, None).await?;
-        callback.call1(r.clone())?;
-        Ok(r)
+        let mut full_text = String::new();
+        let mut full_think = String::new();
+
+        llm::stream(openai, value, |event| {
+            match &event {
+                llm::StreamEvent::Thinking(t) => {
+                    full_think.push_str(t);
+                    let _ = callback.call1(dynamic::map!("kind"=> "think", "value"=> t.as_str()));
+                }
+                llm::StreamEvent::Content(t) => {
+                    full_text.push_str(t);
+                    let _ = callback.call1(dynamic::map!("kind"=> "text", "value"=> t.as_str()));
+                }
+                llm::StreamEvent::Done => {
+                    // 完成时把累积的正文按 llm::complete 的语义解析回 Dynamic
+                    // （JSON 自动转成 map/list，```json 代码块自动剥离，纯文本就是字符串）
+                    let parsed = llm::decode_text_content(full_text.as_str().into(), full_text.as_str())
+                        .unwrap_or_else(|_| full_text.as_str().into());
+                    let chunk = if full_think.is_empty() {
+                        dynamic::map!("kind"=> "done", "result"=> parsed)
+                    } else {
+                        dynamic::map!("kind"=> "done", "think"=> full_think.as_str(), "result"=> parsed)
+                    };
+                    let _ = callback.call1(chunk);
+                }
+                llm::StreamEvent::Error(e) => {
+                    let _ = callback.call1(dynamic::map!("kind"=> "error", "value"=> e.as_str()));
+                }
+            }
+        })
+        .await?;
+
+        // task 的最终结果用解析后的 Dynamic（保持原 deep 语义：JSON 结构化）
+        let parsed = llm::decode_text_content(full_text.as_str().into(), full_text.as_str())
+            .unwrap_or_else(|_| full_text.as_str().into());
+        Ok(parsed)
     });
     alloc_dynamic(id.into())
 }

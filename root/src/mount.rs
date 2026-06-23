@@ -54,9 +54,9 @@ impl<T: std::fmt::Debug + MsgPack + MsgUnpack + Default + Send> Mount<T> {
     }
 
     #[cfg(feature = "iroh")]
-    pub fn iroh(node_id: &str) -> Result<Self> {
+    pub fn iroh(node_id: &str, local_dir: &str) -> Result<Self> {
         let remote = node_id.parse()?;
-        Ok(Self::Iroh { client: IrohClient::new(remote)?, write_lock: Arc::new(std::sync::Mutex::new(())) })
+        Ok(Self::Iroh { client: IrohClient::with_local_dir(remote, local_dir)?, write_lock: Arc::new(std::sync::Mutex::new(())) })
     }
 
     pub fn add(&self, name: &str, value: T) -> bool {
@@ -285,6 +285,17 @@ impl<T: std::fmt::Debug + MsgPack + MsgUnpack + Default + Send> Mount<T> {
             }
         }
         Ok(names)
+    }
+
+    #[cfg(feature = "iroh")]
+    pub fn sync<F>(&self, name: &str, progress: F) -> Result<Vec<crate::iroh::IrohSummary>>
+    where
+        F: FnMut(crate::iroh::IrohSyncProgress) + Send + 'static,
+    {
+        match self {
+            Self::Iroh { client, .. } => client.sync(name, progress),
+            _ => Err(anyhow!("root::sync 只支持 iroh mount")),
+        }
     }
 
     pub fn len(&self, name: &str) -> Result<usize> {
@@ -814,14 +825,14 @@ impl<T: std::fmt::Debug + MsgPack + MsgUnpack + Default + Send> Root<T> {
     }
 
     #[cfg(feature = "iroh")]
-    pub fn mount_iroh(&self, name: &str, node_id: &str) -> Result<bool> {
+    pub fn mount_iroh(&self, name: &str, node_id: &str, local_dir: &str) -> Result<bool> {
         let mounts = self.mounts.write();
         match mounts {
             Ok(mut mounts) => {
                 if mounts.iter().any(|(n, _)| n == name) {
                     return Ok(false);
                 }
-                mounts.push((name.into(), Mount::<T>::iroh(node_id)?));
+                mounts.push((name.into(), Mount::<T>::iroh(node_id, local_dir)?));
                 Ok(true)
             }
             Err(e) => Err(anyhow!("无法获取写锁: {}", e)),

@@ -1,6 +1,6 @@
 [package]
 name = "zust-llm"
-version = "0.9.17"
+version = "0.9.18"
 edition = "2024"
 rust-version = "1.85"
 description = "LLM request helpers for Zust runtime integrations."
@@ -19,7 +19,7 @@ candle = ["dep:candle-core", "dep:candle-nn", "dep:candle-transformers", "dep:to
 
 [dependencies]
 dynamic = { package = "zust-dynamic", version = "0.9.18", path = "../dynamic" }
-root = { package = "zust-root", version = "0.9.6", path = "../root" }
+root = { package = "zust-root", version = "0.9.10", path = "../root" }
 hex = "0.4.3"
 reqwest = { version = "0.13.3", features = ["stream"] }
 anyhow = "1.0.102"

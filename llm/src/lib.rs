@@ -1024,11 +1024,29 @@ pub async fn post(method: &str, openai: Dynamic, msg: Dynamic, tx: Option<Dynami
             if let Some(start) = line.find('{') {
                 if let Ok((v, _)) = Dynamic::from_json(&line.as_bytes()[start..]) {
                     if let Some(choice) = v.remove_dynamic("choices").and_then(|c| c.into_vec::<Dynamic>()).and_then(|choices| choices.into_iter().next()) {
-                        if let Some(content) = choice.remove_dynamic("delta").and_then(|v| v.remove_dynamic("content")) {
-                            tx.as_ref().map(|tx| {
-                                log::info!("{:?}", content);
-                                notify(tx, map!("text"=> content))
-                            });
+                        if let Some(delta) = choice.remove_dynamic("delta") {
+                            // 思考链（OpenAI o1 用 reasoning_content；Claude/DeepSeek 用 thinking 或 reasoning）
+                            for key in ["reasoning_content", "thinking", "reasoning"] {
+                                if let Some(think) = delta.get_dynamic(key) {
+                                    let s = think.as_str();
+                                    if !s.is_empty() {
+                                        tx.as_ref().map(|tx| {
+                                            log::debug!("think delta: {:?}", &s);
+                                            notify(tx, map!("think"=> s))
+                                        });
+                                    }
+                                }
+                            }
+                            // 正文
+                            if let Some(content) = delta.get_dynamic("content") {
+                                let s = content.as_str();
+                                if !s.is_empty() {
+                                    tx.as_ref().map(|tx| {
+                                        log::debug!("text delta: {:?}", &s);
+                                        notify(tx, map!("text"=> s))
+                                    });
+                                }
+                            }
                         }
                     }
                 }
@@ -1060,6 +1078,128 @@ pub async fn post(method: &str, openai: Dynamic, msg: Dynamic, tx: Option<Dynami
     })?;
 
     decode_llm_response(t, text.trim())
+}
+
+/// 流式事件：thinking 链、正文 token、或完成。
+#[derive(Debug, Clone)]
+pub enum StreamEvent {
+    Thinking(String),
+    Content(String),
+    Done,
+    Error(String),
+}
+
+/// Rust 侧的流式接口（不走 root::send，直接回调）。
+/// 自动设置 stream=true，逐块抽 reasoning_content/thinking/reasoning 进 Thinking、content 进 Content。
+pub async fn stream<F>(bigmodel: Dynamic, msg: Dynamic, mut on_event: F) -> Result<()>
+where
+    F: FnMut(StreamEvent) + Send,
+{
+    let bigmodel = with_kind_model(bigmodel, "complete")?;
+    // 强制开 stream
+    bigmodel.insert("stream", true);
+
+    // 走 chat/completions（responses API 暂不支持流式）
+    let body = if msg.is_map() && msg.contains("messages") {
+        msg
+    } else {
+        map!("messages"=> list!(map!("role"=> "user", "content"=> chat_content(msg))))
+    };
+
+    let url = bigmodel.get_dynamic("url").ok_or(anyhow!("没有 url"))?;
+    let token = bearer_token(&bigmodel)?;
+    copy_request_options(&bigmodel, &body);
+    normalize_glm_tools(&body);
+
+    let client = reqwest::Client::new();
+    let mut body_str = String::new();
+    body.to_json(&mut body_str);
+    log::debug!("stream req: {}", body_str);
+
+    let resp = if let Some(token) = token {
+        client
+            .post(&format!("{}/chat/completions", url.as_str()))
+            .header("Content-Type", "application/json")
+            .header("authorization", format!("Bearer {}", token))
+            .body(body_str)
+            .send()
+            .await?
+    } else {
+        client
+            .post(&format!("{}/chat/completions", url.as_str()))
+            .header("Content-Type", "application/json")
+            .body(body_str)
+            .send()
+            .await?
+    };
+    let status = resp.status();
+
+    if !status.is_success() {
+        let text = resp.text().await.unwrap_or_default();
+        let err = format!("LLM HTTP {}: {}", status.as_u16(), text.trim());
+        on_event(StreamEvent::Error(err.clone()));
+        return Err(anyhow!(err));
+    }
+
+    let stream = resp
+        .bytes_stream()
+        .map(|r| r.map_err(|e| tokio::io::Error::new(tokio::io::ErrorKind::Other, e)));
+    use tokio::io::AsyncBufReadExt;
+    let reader = StreamReader::new(stream);
+    let mut buf_reader = BufReader::new(reader);
+    let mut line = String::new();
+
+    loop {
+        line.clear();
+        if buf_reader.read_line(&mut line).await? == 0 {
+            break;
+        }
+        let trimmed = line.trim();
+        if !trimmed.starts_with("data") {
+            continue;
+        }
+        // data: [DONE] 表示结束
+        if trimmed.contains("[DONE]") {
+            break;
+        }
+        let Some(start) = line.find('{') else {
+            continue;
+        };
+        let Ok((v, _)) = Dynamic::from_json(&line.as_bytes()[start..]) else {
+            continue;
+        };
+
+        let Some(choice) = v
+            .remove_dynamic("choices")
+            .and_then(|c| c.into_vec::<Dynamic>())
+            .and_then(|choices| choices.into_iter().next())
+        else {
+            continue;
+        };
+        let Some(delta) = choice.remove_dynamic("delta") else {
+            continue;
+        };
+
+        // thinking 链
+        for key in ["reasoning_content", "thinking", "reasoning"] {
+            if let Some(think) = delta.get_dynamic(key) {
+                let s = think.as_str();
+                if !s.is_empty() {
+                    on_event(StreamEvent::Thinking(s.to_string()));
+                }
+            }
+        }
+        // 正文
+        if let Some(content) = delta.get_dynamic("content") {
+            let s = content.as_str();
+            if !s.is_empty() {
+                on_event(StreamEvent::Content(s.to_string()));
+            }
+        }
+    }
+
+    on_event(StreamEvent::Done);
+    Ok(())
 }
 
 fn decode_llm_response(t: Dynamic, raw_text: &str) -> Result<Dynamic> {
@@ -1184,7 +1324,7 @@ fn decode_responses_text(t: &Dynamic) -> Option<Dynamic> {
     None
 }
 
-fn decode_text_content(content: Dynamic, _raw_text: &str) -> Result<Dynamic> {
+pub fn decode_text_content(content: Dynamic, _raw_text: &str) -> Result<Dynamic> {
     let mut text = content.as_str().to_string();
     let mut think_text = String::new();
     loop {

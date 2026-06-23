@@ -32,6 +32,13 @@ pub struct IrohSummary {
     pub modified_ms: u64,
 }
 
+#[derive(Debug, Clone)]
+pub struct IrohSyncProgress {
+    pub total: usize,
+    pub current: usize,
+    pub value: IrohSummary,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum Request {
@@ -95,7 +102,7 @@ impl IrohStore {
         tokio::fs::create_dir_all(root.join("blobs")).await?;
         let db = Database::builder(root.join("kv")).open().context("open iroh root fjall store")?;
         let values = db.keyspace("values", KeyspaceCreateOptions::default)?;
-        let blobs = FsStore::load(root.join("blobs")).await.context("open iroh root blob cache")?;
+        let blobs = FsStore::load(root.join("blobs")).await.context("open iroh root blob store")?;
         Ok(Self { root, db, values, blobs })
     }
 
@@ -158,14 +165,7 @@ impl IrohStore {
     }
 
     fn put_summary(&self, summary: IrohSummary) -> Result<()> {
-        self.put_record(&IrohRecord {
-            id: summary.id,
-            name: summary.name,
-            hash: summary.hash,
-            size: summary.size,
-            modified_ms: summary.modified_ms,
-            created_ms: now_ms(),
-        })
+        self.put_record(&IrohRecord { id: summary.id, name: summary.name, hash: summary.hash, size: summary.size, modified_ms: summary.modified_ms, created_ms: now_ms() })
     }
 
     fn get_record(&self, id: &str) -> Result<Option<IrohRecord>> {
@@ -176,59 +176,63 @@ impl IrohStore {
 #[derive(Clone)]
 pub struct IrohClient {
     remote: EndpointId,
-    cache: IrohStore,
+    local: IrohStore,
     list_refreshing: Arc<AtomicBool>,
 }
 
 impl IrohClient {
     pub fn new(remote: EndpointId) -> Result<Self> {
-        let cache = block_on(async { IrohStore::open(default_cache_dir()).await })?;
-        Ok(Self { remote, cache, list_refreshing: Arc::new(AtomicBool::new(false)) })
+        Self::with_local_dir(remote, default_local_dir())
     }
 
-    pub fn with_cache(remote: EndpointId, cache_dir: impl AsRef<Path>) -> Result<Self> {
-        let cache_dir = cache_dir.as_ref().to_path_buf();
-        let cache = block_on(async move { IrohStore::open(cache_dir).await })?;
-        Ok(Self { remote, cache, list_refreshing: Arc::new(AtomicBool::new(false)) })
+    pub fn with_local_dir(remote: EndpointId, local_dir: impl AsRef<Path>) -> Result<Self> {
+        let local_dir = local_dir.as_ref().to_path_buf();
+        let local = block_on(async move { IrohStore::open(local_dir).await })?;
+        Ok(Self { remote, local, list_refreshing: Arc::new(AtomicBool::new(false)) })
     }
 
     pub fn put_bytes(&self, id: &str, bytes: Bytes) -> Result<()> {
-        let cache = self.cache.clone();
+        let local = self.local.clone();
         let remote = self.remote;
         let id = id.to_string();
         let name = leaf_name(&id);
-        block_on(async move {
-            let modified_ms = now_ms();
-            cache.put_bytes(id.clone(), name.clone(), bytes.clone(), modified_ms).await?;
-            let (endpoint, conn) = connect(remote).await?;
-            let response = push_bytes(&conn, id, name, bytes, modified_ms).await;
-            close(endpoint, conn).await;
-            response.map(|_| ())
-        })
+        let modified_ms = now_ms();
+        block_on({
+            let local = local.clone();
+            let id = id.clone();
+            let name = name.clone();
+            let bytes = bytes.clone();
+            async move {
+                local.put_bytes(id, name, bytes, modified_ms).await?;
+                Ok(())
+            }
+        })?;
+        spawn_push_bytes(remote, id, name, bytes, modified_ms);
+        Ok(())
     }
 
     pub fn get_bytes(&self, id: &str) -> Result<Bytes> {
         if let Ok((_, bytes)) = block_on({
-            let cache = self.cache.clone();
+            let local = self.local.clone();
             let id = id.to_string();
-            async move { cache.bytes_for(&id).await }
+            async move { local.bytes_for(&id).await }
         }) {
             return Ok(bytes);
         }
-        let cache = self.cache.clone();
+        let local = self.local.clone();
         let remote = self.remote;
         let id = id.to_string();
         block_on(async move {
             let (endpoint, conn) = connect(remote).await?;
             let (summary, bytes) = pull_bytes(&conn, id).await?;
             close(endpoint, conn).await;
-            cache.put_bytes(summary.id, summary.name, bytes.clone(), summary.modified_ms).await?;
+            local.put_bytes(summary.id, summary.name, bytes.clone(), summary.modified_ms).await?;
             Ok(bytes)
         })
     }
 
     pub fn contains(&self, id: &str) -> bool {
-        self.cache.get(id).ok().flatten().is_some()
+        self.local.get(id).ok().flatten().is_some()
             || block_on({
                 let remote = self.remote;
                 let id = id.to_string();
@@ -243,7 +247,7 @@ impl IrohClient {
     }
 
     pub fn delete(&self, id: &str) -> Result<()> {
-        let _ = self.cache.delete(id);
+        let _ = self.local.delete(id);
         let remote = self.remote;
         let id = id.to_string();
         block_on(async move {
@@ -263,9 +267,9 @@ impl IrohClient {
     pub fn dir_raw(&self, name: &str) -> Result<Vec<SmolStr>> {
         let remote = self.remote;
         let prefix = name.to_string();
-        let names = summaries_with_prefix(&prefix, self.cache.list().unwrap_or_default());
+        let names = summaries_with_prefix(&prefix, self.local.list().unwrap_or_default());
         if !self.list_refreshing.swap(true, Ordering::AcqRel) {
-            let cache = self.cache.clone();
+            let local = self.local.clone();
             let refreshing = self.list_refreshing.clone();
             std::thread::spawn(move || {
                 let _ = block_on(async move {
@@ -276,7 +280,7 @@ impl IrohClient {
                         bail!("unexpected iroh list response");
                     };
                     for value in values {
-                        cache.put_summary(value)?;
+                        local.put_summary(value)?;
                     }
                     Ok::<(), anyhow::Error>(())
                 });
@@ -285,6 +289,31 @@ impl IrohClient {
         }
         Ok(names)
     }
+
+    pub fn sync<F>(&self, path: &str, mut progress: F) -> Result<Vec<IrohSummary>>
+    where
+        F: FnMut(IrohSyncProgress) + Send + 'static,
+    {
+        let local = self.local.clone();
+        let remote = self.remote;
+        let values = summaries_for_sync(path, local.list()?);
+        if values.is_empty() {
+            return Ok(Vec::new());
+        }
+        block_on(async move {
+            let (endpoint, conn) = connect(remote).await?;
+            let mut pushed = Vec::new();
+            let total = values.len();
+            for (idx, value) in values.into_iter().enumerate() {
+                let (_, bytes) = local.bytes_for(&value.id).await?;
+                let value = push_bytes(&conn, value.id, value.name, bytes, value.modified_ms).await?;
+                progress(IrohSyncProgress { total, current: idx + 1, value: value.clone() });
+                pushed.push(value);
+            }
+            close(endpoint, conn).await;
+            Ok(pushed)
+        })
+    }
 }
 
 fn summaries_with_prefix(prefix: &str, values: Vec<IrohSummary>) -> Vec<SmolStr> {
@@ -292,6 +321,11 @@ fn summaries_with_prefix(prefix: &str, values: Vec<IrohSummary>) -> Vec<SmolStr>
     names.sort();
     names.dedup();
     names
+}
+
+fn summaries_for_sync(path: &str, values: Vec<IrohSummary>) -> Vec<IrohSummary> {
+    let prefix = if path.is_empty() || path.ends_with('/') { path.to_string() } else { format!("{path}/") };
+    values.into_iter().filter(|value| value.id == path || value.id.starts_with(&prefix)).collect()
 }
 
 pub async fn run_daemon(root: impl AsRef<Path>, secret_key: SecretKey) -> Result<()> {
@@ -304,7 +338,7 @@ pub async fn run_daemon(root: impl AsRef<Path>, secret_key: SecretKey) -> Result
     router.endpoint().online().await;
     println!("zust root iroh node: {}", router.endpoint().id());
     println!("zust root iroh addr json: {}", serde_json::to_string(&router.endpoint().addr())?);
-    println!("zust root iroh cache: {}", store.root().display());
+    println!("zust root iroh local: {}", store.root().display());
 
     tokio::signal::ctrl_c().await?;
     router.shutdown().await?;
@@ -312,8 +346,8 @@ pub async fn run_daemon(root: impl AsRef<Path>, secret_key: SecretKey) -> Result
     Ok(())
 }
 
-pub fn default_cache_dir() -> PathBuf {
-    PathBuf::from(".iroh").join("cache")
+pub fn default_local_dir() -> PathBuf {
+    PathBuf::from(".iroh").join("local")
 }
 
 pub fn default_daemon_dir() -> PathBuf {
@@ -425,6 +459,19 @@ async fn push_bytes(conn: &iroh::endpoint::Connection, id: String, name: String,
         Response::Pushed { value } => Ok(value),
         other => bail!("unexpected iroh push response: {other:?}"),
     }
+}
+
+fn spawn_push_bytes(remote: EndpointId, id: String, name: String, bytes: Bytes, modified_ms: u64) {
+    std::thread::spawn(move || {
+        if let Err(err) = block_on(async move {
+            let (endpoint, conn) = connect(remote).await?;
+            let response = push_bytes(&conn, id, name, bytes, modified_ms).await;
+            close(endpoint, conn).await;
+            response.map(|_| ())
+        }) {
+            log::warn!("iroh root background sync failed: {err}");
+        }
+    });
 }
 
 async fn pull_bytes(conn: &iroh::endpoint::Connection, id: String) -> Result<(IrohSummary, Bytes)> {
@@ -573,13 +620,28 @@ mod tests {
     }
 
     #[test]
-    fn summaries_with_prefix_returns_cached_ids_for_dir_raw() {
+    fn summaries_with_prefix_returns_local_ids_for_dir_raw() {
         let values = vec![
             IrohSummary { id: "map/demo/bg/0_0.png".into(), name: "0_0.png".into(), hash: "hash-a".into(), size: 1, modified_ms: 10 },
             IrohSummary { id: "map/demo/bg/0_0.png".into(), name: "0_0.png".into(), hash: "hash-a".into(), size: 1, modified_ms: 10 },
             IrohSummary { id: "map/demo/meta.json".into(), name: "meta.json".into(), hash: "hash-b".into(), size: 2, modified_ms: 11 },
         ];
         assert_eq!(summaries_with_prefix("map/demo/bg/", values), vec![SmolStr::new("map/demo/bg/0_0.png")]);
+    }
+
+    #[test]
+    fn summaries_for_sync_matches_file_or_recursive_dir() {
+        let values = vec![
+            IrohSummary { id: "map/demo/bg/0_0.png".into(), name: "0_0.png".into(), hash: "hash-a".into(), size: 1, modified_ms: 10 },
+            IrohSummary { id: "map/demo/bg/nested/0_1.png".into(), name: "0_1.png".into(), hash: "hash-b".into(), size: 2, modified_ms: 11 },
+            IrohSummary { id: "map/demo/meta.json".into(), name: "meta.json".into(), hash: "hash-c".into(), size: 3, modified_ms: 12 },
+        ];
+
+        let one = summaries_for_sync("map/demo/meta.json", values.clone());
+        assert_eq!(one.iter().map(|value| value.id.as_str()).collect::<Vec<_>>(), vec!["map/demo/meta.json"]);
+
+        let dir = summaries_for_sync("map/demo/bg", values);
+        assert_eq!(dir.iter().map(|value| value.id.as_str()).collect::<Vec<_>>(), vec!["map/demo/bg/0_0.png", "map/demo/bg/nested/0_1.png"]);
     }
 
     #[test]

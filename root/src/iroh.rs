@@ -1,9 +1,6 @@
 use std::{
+    fs,
     path::{Path, PathBuf},
-    sync::{
-        Arc,
-        atomic::{AtomicBool, Ordering},
-    },
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -164,10 +161,6 @@ impl IrohStore {
         Ok(())
     }
 
-    fn put_summary(&self, summary: IrohSummary) -> Result<()> {
-        self.put_record(&IrohRecord { id: summary.id, name: summary.name, hash: summary.hash, size: summary.size, modified_ms: summary.modified_ms, created_ms: now_ms() })
-    }
-
     fn get_record(&self, id: &str) -> Result<Option<IrohRecord>> {
         self.values.get(id.as_bytes())?.map(|value| serde_json::from_slice(value.as_ref()).context("decode iroh root record")).transpose()
     }
@@ -176,8 +169,13 @@ impl IrohStore {
 #[derive(Clone)]
 pub struct IrohClient {
     remote: EndpointId,
-    local: IrohStore,
-    list_refreshing: Arc<AtomicBool>,
+    local: IrohLocal,
+}
+
+#[derive(Clone)]
+enum IrohLocal {
+    Store(IrohStore),
+    UploadDir(PathBuf),
 }
 
 impl IrohClient {
@@ -186,13 +184,15 @@ impl IrohClient {
     }
 
     pub fn with_local_dir(remote: EndpointId, local_dir: impl AsRef<Path>) -> Result<Self> {
-        let local_dir = local_dir.as_ref().to_path_buf();
-        let local = block_on(async move { IrohStore::open(local_dir).await })?;
-        Ok(Self { remote, local, list_refreshing: Arc::new(AtomicBool::new(false)) })
+        let local = if local_dir.as_ref().as_os_str().is_empty() { IrohLocal::Store(block_on(async { IrohStore::open(default_local_dir()).await })?) } else { IrohLocal::UploadDir(local_dir.as_ref().to_path_buf()) };
+        Ok(Self { remote, local })
     }
 
     pub fn put_bytes(&self, id: &str, bytes: Bytes) -> Result<()> {
-        let local = self.local.clone();
+        let IrohLocal::Store(local) = &self.local else {
+            bail!("iroh upload dir mount does not support root value writes");
+        };
+        let local = local.clone();
         let remote = self.remote;
         let id = id.to_string();
         let name = leaf_name(&id);
@@ -212,42 +212,28 @@ impl IrohClient {
     }
 
     pub fn get_bytes(&self, id: &str) -> Result<Bytes> {
-        if let Ok((_, bytes)) = block_on({
-            let local = self.local.clone();
-            let id = id.to_string();
-            async move { local.bytes_for(&id).await }
-        }) {
-            return Ok(bytes);
+        match &self.local {
+            IrohLocal::Store(local) => block_on({
+                let local = local.clone();
+                let id = id.to_string();
+                async move { local.bytes_for(&id).await.map(|(_, bytes)| bytes) }
+            }),
+            IrohLocal::UploadDir(_) => bail!("iroh upload dir mount does not support root value reads"),
         }
-        let local = self.local.clone();
-        let remote = self.remote;
-        let id = id.to_string();
-        block_on(async move {
-            let (endpoint, conn) = connect(remote).await?;
-            let (summary, bytes) = pull_bytes(&conn, id).await?;
-            close(endpoint, conn).await;
-            local.put_bytes(summary.id, summary.name, bytes.clone(), summary.modified_ms).await?;
-            Ok(bytes)
-        })
     }
 
     pub fn contains(&self, id: &str) -> bool {
-        self.local.get(id).ok().flatten().is_some()
-            || block_on({
-                let remote = self.remote;
-                let id = id.to_string();
-                async move {
-                    let (endpoint, conn) = connect(remote).await?;
-                    let found = matches!(request(&conn, Request::Get { id }).await?.into_result()?, Response::Record { .. });
-                    close(endpoint, conn).await;
-                    Ok(found)
-                }
-            })
-            .unwrap_or(false)
+        match &self.local {
+            IrohLocal::Store(local) => local.get(id).ok().flatten().is_some(),
+            IrohLocal::UploadDir(root) => root.join(id).exists(),
+        }
     }
 
     pub fn delete(&self, id: &str) -> Result<()> {
-        let _ = self.local.delete(id);
+        let IrohLocal::Store(local) = &self.local else {
+            bail!("iroh upload dir mount does not support root value delete");
+        };
+        let _ = local.delete(id);
         let remote = self.remote;
         let id = id.to_string();
         block_on(async move {
@@ -265,55 +251,102 @@ impl IrohClient {
     }
 
     pub fn dir_raw(&self, name: &str) -> Result<Vec<SmolStr>> {
-        let remote = self.remote;
         let prefix = name.to_string();
-        let names = summaries_with_prefix(&prefix, self.local.list().unwrap_or_default());
-        if !self.list_refreshing.swap(true, Ordering::AcqRel) {
-            let local = self.local.clone();
-            let refreshing = self.list_refreshing.clone();
-            std::thread::spawn(move || {
-                let _ = block_on(async move {
-                    let (endpoint, conn) = connect(remote).await?;
-                    let response = request(&conn, Request::List).await?.into_result()?;
-                    close(endpoint, conn).await;
-                    let Response::List { values } = response else {
-                        bail!("unexpected iroh list response");
-                    };
-                    for value in values {
-                        local.put_summary(value)?;
-                    }
-                    Ok::<(), anyhow::Error>(())
-                });
-                refreshing.store(false, Ordering::Release);
-            });
+        match &self.local {
+            IrohLocal::Store(local) => Ok(summaries_with_prefix(&prefix, local.list().unwrap_or_default())),
+            IrohLocal::UploadDir(root) => Ok(upload_files(root, &prefix)?.into_iter().map(|file| file.id.into()).collect()),
         }
-        Ok(names)
     }
 
     pub fn sync<F>(&self, path: &str, mut progress: F) -> Result<Vec<IrohSummary>>
     where
         F: FnMut(IrohSyncProgress) + Send + 'static,
     {
-        let local = self.local.clone();
         let remote = self.remote;
-        let values = summaries_for_sync(path, local.list()?);
-        if values.is_empty() {
-            return Ok(Vec::new());
-        }
-        block_on(async move {
-            let (endpoint, conn) = connect(remote).await?;
-            let mut pushed = Vec::new();
-            let total = values.len();
-            for (idx, value) in values.into_iter().enumerate() {
-                let (_, bytes) = local.bytes_for(&value.id).await?;
-                let value = push_bytes(&conn, value.id, value.name, bytes, value.modified_ms).await?;
-                progress(IrohSyncProgress { total, current: idx + 1, value: value.clone() });
-                pushed.push(value);
+        match &self.local {
+            IrohLocal::Store(local) => {
+                let local = local.clone();
+                let values = summaries_for_sync(path, local.list()?);
+                if values.is_empty() {
+                    return Ok(Vec::new());
+                }
+                block_on(async move {
+                    let (endpoint, conn) = connect(remote).await?;
+                    let mut pushed = Vec::new();
+                    let total = values.len();
+                    for (idx, value) in values.into_iter().enumerate() {
+                        let (_, bytes) = local.bytes_for(&value.id).await?;
+                        let value = push_bytes(&conn, value.id, value.name, bytes, value.modified_ms).await?;
+                        progress(IrohSyncProgress { total, current: idx + 1, value: value.clone() });
+                        pushed.push(value);
+                    }
+                    close(endpoint, conn).await;
+                    Ok(pushed)
+                })
             }
-            close(endpoint, conn).await;
-            Ok(pushed)
-        })
+            IrohLocal::UploadDir(root) => {
+                let files = upload_files(root, path)?;
+                if files.is_empty() {
+                    return Ok(Vec::new());
+                }
+                block_on(async move {
+                    let (endpoint, conn) = connect(remote).await?;
+                    let mut pushed = Vec::new();
+                    let total = files.len();
+                    for (idx, file) in files.into_iter().enumerate() {
+                        let bytes = Bytes::from(fs::read(&file.path)?);
+                        let value = push_bytes(&conn, file.id, file.name, bytes, file.modified_ms).await?;
+                        progress(IrohSyncProgress { total, current: idx + 1, value: value.clone() });
+                        pushed.push(value);
+                    }
+                    close(endpoint, conn).await;
+                    Ok(pushed)
+                })
+            }
+        }
     }
+}
+
+struct UploadFile {
+    id: String,
+    name: String,
+    path: PathBuf,
+    modified_ms: u64,
+}
+
+fn upload_files(root: &Path, path: &str) -> Result<Vec<UploadFile>> {
+    let target = if path.is_empty() { root.to_path_buf() } else { root.join(path) };
+    if !target.exists() {
+        return Ok(Vec::new());
+    }
+    let mut files = Vec::new();
+    collect_upload_files(root, &target, &mut files)?;
+    files.sort_by(|a, b| a.id.cmp(&b.id));
+    Ok(files)
+}
+
+fn collect_upload_files(root: &Path, path: &Path, files: &mut Vec<UploadFile>) -> Result<()> {
+    let metadata = fs::metadata(path).with_context(|| format!("read upload path {}", path.display()))?;
+    if metadata.is_file() {
+        let id = upload_id(root, path)?;
+        files.push(UploadFile { name: leaf_name(&id), id, path: path.to_path_buf(), modified_ms: metadata_modified_ms(&metadata) });
+        return Ok(());
+    }
+    if metadata.is_dir() {
+        for entry in fs::read_dir(path)? {
+            collect_upload_files(root, &entry?.path(), files)?;
+        }
+    }
+    Ok(())
+}
+
+fn upload_id(root: &Path, path: &Path) -> Result<String> {
+    let relative = path.strip_prefix(root).with_context(|| format!("upload path {} is outside {}", path.display(), root.display()))?;
+    Ok(relative.iter().map(|part| part.to_string_lossy()).collect::<Vec<_>>().join("/"))
+}
+
+fn metadata_modified_ms(metadata: &fs::Metadata) -> u64 {
+    metadata.modified().ok().and_then(|time| time.duration_since(UNIX_EPOCH).ok()).map(|duration| duration.as_millis() as u64).unwrap_or_else(now_ms)
 }
 
 fn summaries_with_prefix(prefix: &str, values: Vec<IrohSummary>) -> Vec<SmolStr> {
@@ -347,7 +380,7 @@ pub async fn run_daemon(root: impl AsRef<Path>, secret_key: SecretKey) -> Result
 }
 
 pub fn default_local_dir() -> PathBuf {
-    PathBuf::from(".iroh").join("local")
+    PathBuf::from(".iroh_store")
 }
 
 pub fn default_daemon_dir() -> PathBuf {
@@ -472,20 +505,6 @@ fn spawn_push_bytes(remote: EndpointId, id: String, name: String, bytes: Bytes, 
             log::warn!("iroh root background sync failed: {err}");
         }
     });
-}
-
-async fn pull_bytes(conn: &iroh::endpoint::Connection, id: String) -> Result<(IrohSummary, Bytes)> {
-    let (mut send, mut recv) = conn.open_bi().await?;
-    write_json(&mut send, &Request::Pull { id }).await?;
-    send.finish()?;
-    let response = read_json::<Response>(&mut recv).await?.into_result()?;
-    let (value, size) = match response {
-        Response::Pull { value, size } => (value, size),
-        other => bail!("unexpected iroh pull response: {other:?}"),
-    };
-    let mut bytes = vec![0; size as usize];
-    recv.read_exact(&mut bytes).await?;
-    Ok((value, Bytes::from(bytes)))
 }
 
 async fn request(conn: &iroh::endpoint::Connection, request: Request) -> Result<Response> {
@@ -642,6 +661,25 @@ mod tests {
 
         let dir = summaries_for_sync("map/demo/bg", values);
         assert_eq!(dir.iter().map(|value| value.id.as_str()).collect::<Vec<_>>(), vec!["map/demo/bg/0_0.png", "map/demo/bg/nested/0_1.png"]);
+    }
+
+    #[test]
+    fn upload_files_use_relative_ids() {
+        let root = std::env::temp_dir().join(format!("zust-root-upload-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(root.join("map/demo/bg")).unwrap();
+        std::fs::write(root.join("map/demo/bg/0_0.png"), b"tile").unwrap();
+        std::fs::write(root.join("map/demo/meta.json"), b"{}").unwrap();
+
+        let all = upload_files(&root, "map/demo").unwrap();
+        assert_eq!(all.iter().map(|file| file.id.as_str()).collect::<Vec<_>>(), vec!["map/demo/bg/0_0.png", "map/demo/meta.json"]);
+
+        let one = upload_files(&root, "map/demo/meta.json").unwrap();
+        assert_eq!(one.iter().map(|file| file.id.as_str()).collect::<Vec<_>>(), vec!["map/demo/meta.json"]);
+
+        let missing = upload_files(&root, "missing").unwrap();
+        assert!(missing.is_empty());
+
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]

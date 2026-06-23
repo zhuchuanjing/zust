@@ -1100,11 +1100,7 @@ where
     bigmodel.insert("stream", true);
 
     // 走 chat/completions（responses API 暂不支持流式）
-    let body = if msg.is_map() && msg.contains("messages") {
-        msg
-    } else {
-        map!("messages"=> list!(map!("role"=> "user", "content"=> chat_content(msg))))
-    };
+    let body = if msg.is_map() && msg.contains("messages") { msg } else { map!("messages"=> list!(map!("role"=> "user", "content"=> chat_content(msg)))) };
 
     let url = bigmodel.get_dynamic("url").ok_or(anyhow!("没有 url"))?;
     let token = bearer_token(&bigmodel)?;
@@ -1117,20 +1113,9 @@ where
     log::debug!("stream req: {}", body_str);
 
     let resp = if let Some(token) = token {
-        client
-            .post(&format!("{}/chat/completions", url.as_str()))
-            .header("Content-Type", "application/json")
-            .header("authorization", format!("Bearer {}", token))
-            .body(body_str)
-            .send()
-            .await?
+        client.post(&format!("{}/chat/completions", url.as_str())).header("Content-Type", "application/json").header("authorization", format!("Bearer {}", token)).body(body_str).send().await?
     } else {
-        client
-            .post(&format!("{}/chat/completions", url.as_str()))
-            .header("Content-Type", "application/json")
-            .body(body_str)
-            .send()
-            .await?
+        client.post(&format!("{}/chat/completions", url.as_str())).header("Content-Type", "application/json").body(body_str).send().await?
     };
     let status = resp.status();
 
@@ -1141,9 +1126,7 @@ where
         return Err(anyhow!(err));
     }
 
-    let stream = resp
-        .bytes_stream()
-        .map(|r| r.map_err(|e| tokio::io::Error::new(tokio::io::ErrorKind::Other, e)));
+    let stream = resp.bytes_stream().map(|r| r.map_err(|e| tokio::io::Error::new(tokio::io::ErrorKind::Other, e)));
     use tokio::io::AsyncBufReadExt;
     let reader = StreamReader::new(stream);
     let mut buf_reader = BufReader::new(reader);
@@ -1169,11 +1152,7 @@ where
             continue;
         };
 
-        let Some(choice) = v
-            .remove_dynamic("choices")
-            .and_then(|c| c.into_vec::<Dynamic>())
-            .and_then(|choices| choices.into_iter().next())
-        else {
+        let Some(choice) = v.remove_dynamic("choices").and_then(|c| c.into_vec::<Dynamic>()).and_then(|choices| choices.into_iter().next()) else {
             continue;
         };
         let Some(delta) = choice.remove_dynamic("delta") else {

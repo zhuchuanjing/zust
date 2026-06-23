@@ -1,5 +1,6 @@
 use std::{
     fs,
+    net::ToSocketAddrs,
     path::{Path, PathBuf},
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -8,7 +9,7 @@ use anyhow::{Context, Result, anyhow, bail};
 use bytes::Bytes;
 use fjall::{Database, Keyspace, KeyspaceCreateOptions, PersistMode};
 use iroh::{
-    Endpoint, EndpointId, SecretKey,
+    Endpoint, EndpointAddr, EndpointId, SecretKey, TransportAddr,
     endpoint::{Connection, presets},
     protocol::{AcceptError, ProtocolHandler, Router},
 };
@@ -168,7 +169,7 @@ impl IrohStore {
 
 #[derive(Clone)]
 pub struct IrohClient {
-    remote: EndpointId,
+    remote: EndpointAddr,
     local: IrohLocal,
 }
 
@@ -179,11 +180,12 @@ enum IrohLocal {
 }
 
 impl IrohClient {
-    pub fn new(remote: EndpointId) -> Result<Self> {
+    pub fn new(remote: impl Into<EndpointAddr>) -> Result<Self> {
         Self::with_local_dir(remote, default_local_dir())
     }
 
-    pub fn with_local_dir(remote: EndpointId, local_dir: impl AsRef<Path>) -> Result<Self> {
+    pub fn with_local_dir(remote: impl Into<EndpointAddr>, local_dir: impl AsRef<Path>) -> Result<Self> {
+        let remote = remote.into();
         let local = if local_dir.as_ref().as_os_str().is_empty() { IrohLocal::Store(block_on(async { IrohStore::open(default_local_dir()).await })?) } else { IrohLocal::UploadDir(local_dir.as_ref().to_path_buf()) };
         Ok(Self { remote, local })
     }
@@ -193,7 +195,7 @@ impl IrohClient {
             bail!("iroh upload dir mount does not support root value writes");
         };
         let local = local.clone();
-        let remote = self.remote;
+        let remote = self.remote.clone();
         let id = id.to_string();
         let name = leaf_name(&id);
         let modified_ms = now_ms();
@@ -234,7 +236,7 @@ impl IrohClient {
             bail!("iroh upload dir mount does not support root value delete");
         };
         let _ = local.delete(id);
-        let remote = self.remote;
+        let remote = self.remote.clone();
         let id = id.to_string();
         block_on(async move {
             let (endpoint, conn) = connect(remote).await?;
@@ -262,7 +264,7 @@ impl IrohClient {
     where
         F: FnMut(IrohSyncProgress) + Send + 'static,
     {
-        let remote = self.remote;
+        let remote = self.remote.clone();
         match &self.local {
             IrohLocal::Store(local) => {
                 let local = local.clone();
@@ -408,6 +410,19 @@ pub fn parse_secret_key(text: &str) -> Result<SecretKey> {
     })
 }
 
+pub fn parse_endpoint_addr(text: &str) -> Result<EndpointAddr> {
+    let text = text.trim();
+    let Some((node_id, direct_addr)) = text.split_once('@') else {
+        return Ok(EndpointAddr::new(text.parse()?));
+    };
+    let id = node_id.trim().parse()?;
+    let addrs = direct_addr.trim().to_socket_addrs().with_context(|| format!("resolve iroh endpoint address {direct_addr}"))?.map(TransportAddr::Ip).collect::<Vec<_>>();
+    if addrs.is_empty() {
+        bail!("iroh endpoint address has no resolved ip: {direct_addr}");
+    }
+    Ok(EndpointAddr::from_parts(id, addrs))
+}
+
 #[derive(Clone)]
 struct IrohRootProtocol {
     store: IrohStore,
@@ -477,7 +492,7 @@ async fn handle_request(store: &IrohStore, node_id: EndpointId, request: Request
     }
 }
 
-async fn connect(remote: EndpointId) -> Result<(Endpoint, iroh::endpoint::Connection)> {
+async fn connect(remote: EndpointAddr) -> Result<(Endpoint, iroh::endpoint::Connection)> {
     let endpoint = Endpoint::bind(presets::N0).await?;
     let conn = endpoint.connect(remote, ALPN).await?;
     Ok((endpoint, conn))
@@ -499,7 +514,7 @@ async fn push_bytes(conn: &iroh::endpoint::Connection, id: String, name: String,
     }
 }
 
-fn spawn_push_bytes(remote: EndpointId, id: String, name: String, bytes: Bytes, modified_ms: u64) {
+fn spawn_push_bytes(remote: EndpointAddr, id: String, name: String, bytes: Bytes, modified_ms: u64) {
     std::thread::spawn(move || {
         if let Err(err) = block_on(async move {
             let (endpoint, conn) = connect(remote).await?;
@@ -693,5 +708,21 @@ mod tests {
         let encoded = hex_encode(&key.to_bytes());
         let parsed = parse_secret_key(&encoded).unwrap();
         assert_eq!(parsed.to_bytes(), key.to_bytes());
+    }
+
+    #[test]
+    fn parse_endpoint_addr_accepts_plain_node_id() {
+        let id = SecretKey::generate().public();
+        let addr = parse_endpoint_addr(&id.to_string()).unwrap();
+        assert_eq!(addr.id, id);
+        assert!(addr.addrs.is_empty());
+    }
+
+    #[test]
+    fn parse_endpoint_addr_accepts_direct_ip() {
+        let id = SecretKey::generate().public();
+        let addr = parse_endpoint_addr(&format!("{id}@127.0.0.1:32145")).unwrap();
+        assert_eq!(addr.id, id);
+        assert!(addr.addrs.contains(&TransportAddr::Ip("127.0.0.1:32145".parse().unwrap())));
     }
 }

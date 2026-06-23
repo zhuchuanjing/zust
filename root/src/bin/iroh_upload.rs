@@ -37,7 +37,7 @@ fn main() -> Result<()> {
     }
 
     let dir = dir.canonicalize().with_context(|| format!("resolve upload dir {}", dir.display()))?;
-    let remote = node_id.parse()?;
+    let remote = root::iroh::parse_endpoint_addr(&node_id)?;
     let client = root::iroh::IrohClient::with_local_dir(remote, &dir)?;
 
     println!("iroh upload node: {node_id}");

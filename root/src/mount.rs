@@ -8,7 +8,7 @@ use anyhow::{Result, anyhow};
 use super::sync_await;
 use crate::directory;
 #[cfg(feature = "iroh")]
-use crate::iroh::IrohClient;
+use crate::iroh::{IrohClient, parse_endpoint_addr};
 use crate::node::Node;
 use fjall::{KeyspaceCreateOptions, OptimisticTxDatabase, OptimisticTxKeyspace};
 use redis::AsyncCommands;
@@ -55,7 +55,7 @@ impl<T: std::fmt::Debug + MsgPack + MsgUnpack + Default + Send> Mount<T> {
 
     #[cfg(feature = "iroh")]
     pub fn iroh(node_id: &str, local_dir: &str) -> Result<Self> {
-        let remote = node_id.parse()?;
+        let remote = parse_endpoint_addr(node_id)?;
         Ok(Self::Iroh { client: IrohClient::with_local_dir(remote, local_dir)?, write_lock: Arc::new(std::sync::Mutex::new(())) })
     }
 

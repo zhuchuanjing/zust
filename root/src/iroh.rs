@@ -13,7 +13,15 @@ use iroh::{
     endpoint::{Connection, presets},
     protocol::{AcceptError, ProtocolHandler, Router},
 };
-use iroh_blobs::{Hash, api::Store, store::fs::FsStore};
+use iroh_blobs::{
+    BlobFormat, Hash,
+    api::{
+        Store,
+        blobs::AddPathOptions,
+        proto::{BlobStatus, ImportMode},
+    },
+    store::fs::FsStore,
+};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use smol_str::SmolStr;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -43,7 +51,7 @@ enum Request {
     Ping,
     List,
     Get { id: String },
-    Push { id: String, name: String, size: u64, modified_ms: u64 },
+    Push { id: String, name: String, hash: String, size: u64, modified_ms: u64 },
     Pull { id: String },
     Delete { id: String },
 }
@@ -119,6 +127,33 @@ impl IrohStore {
         Ok(record.summary())
     }
 
+    pub async fn add_upload_path(&self, id: String, name: String, path: &Path, modified_ms: u64) -> Result<IrohSummary> {
+        let size = fs::metadata(path).with_context(|| format!("read upload path {}", path.display()))?.len();
+        let tag = self.blobs.blobs().add_path_with_opts(AddPathOptions { path: path.to_path_buf(), format: BlobFormat::Raw, mode: ImportMode::TryReference }).await?;
+        Ok(IrohSummary { id, name, hash: tag.hash.to_string(), size, modified_ms })
+    }
+
+    pub async fn pull_blob_from(&self, endpoint: &Endpoint, provider: EndpointId, id: String, name: String, hash: String, size: u64, modified_ms: u64) -> Result<IrohSummary> {
+        let hash: Hash = hash.parse().with_context(|| format!("parse iroh blob hash {hash}"))?;
+        log::info!("iroh root push received id={id} hash={hash} size={size} provider={provider}");
+        if !self.blobs.blobs().has(hash).await? {
+            log::info!("iroh root blob download start id={id} hash={hash} size={size}");
+            self.blob_store().downloader(endpoint).download(hash, [provider]).await?;
+            log::info!("iroh root blob download done id={id} hash={hash}");
+        }
+        match self.blobs.blobs().status(hash).await? {
+            BlobStatus::Complete { size: actual_size } if actual_size == size => {}
+            BlobStatus::Complete { size: actual_size } => bail!("iroh root blob size mismatch for {id}: expected {size}, got {actual_size}"),
+            BlobStatus::Partial { size: actual_size } => bail!("iroh root blob incomplete for {id}: partial size {actual_size:?}"),
+            BlobStatus::NotFound => bail!("iroh root blob missing after download for {id}: {hash}"),
+        }
+        let record = IrohRecord { id, name, hash: hash.to_string(), size, modified_ms, created_ms: now_ms() };
+        self.put_record(&record)?;
+        let value = record.summary();
+        log::info!("iroh root push stored id={} hash={} size={}", value.id, value.hash, value.size);
+        Ok(value)
+    }
+
     pub async fn bytes_for(&self, id: &str) -> Result<(IrohSummary, Bytes)> {
         let record = self.get_record(id)?.ok_or_else(|| anyhow!("iroh root value not found: {id}"))?;
         let hash: Hash = record.hash.parse().with_context(|| format!("parse blob hash {}", record.hash))?;
@@ -170,6 +205,7 @@ impl IrohStore {
 #[derive(Clone)]
 pub struct IrohClient {
     remote: EndpointAddr,
+    provider: IrohStore,
     local: IrohLocal,
 }
 
@@ -186,8 +222,9 @@ impl IrohClient {
 
     pub fn with_local_dir(remote: impl Into<EndpointAddr>, local_dir: impl AsRef<Path>) -> Result<Self> {
         let remote = remote.into();
-        let local = if local_dir.as_ref().as_os_str().is_empty() { IrohLocal::Store(block_on(async { IrohStore::open(default_local_dir()).await })?) } else { IrohLocal::UploadDir(local_dir.as_ref().to_path_buf()) };
-        Ok(Self { remote, local })
+        let provider = block_on(async { IrohStore::open(default_local_dir()).await })?;
+        let local = if local_dir.as_ref().as_os_str().is_empty() { IrohLocal::Store(provider.clone()) } else { IrohLocal::UploadDir(local_dir.as_ref().to_path_buf()) };
+        Ok(Self { remote, provider, local })
     }
 
     pub fn put_bytes(&self, id: &str, bytes: Bytes) -> Result<()> {
@@ -195,21 +232,19 @@ impl IrohClient {
             bail!("iroh upload dir mount does not support root value writes");
         };
         let local = local.clone();
+        let provider = self.provider.clone();
         let remote = self.remote.clone();
         let id = id.to_string();
         let name = leaf_name(&id);
         let modified_ms = now_ms();
-        block_on({
+        let value = block_on({
             let local = local.clone();
             let id = id.clone();
             let name = name.clone();
             let bytes = bytes.clone();
-            async move {
-                local.put_bytes(id, name, bytes, modified_ms).await?;
-                Ok(())
-            }
+            async move { local.put_bytes(id, name, bytes, modified_ms).await }
         })?;
-        spawn_push_bytes(remote, id, name, bytes, modified_ms);
+        spawn_push_blob(remote, provider, value);
         Ok(())
     }
 
@@ -268,40 +303,41 @@ impl IrohClient {
         match &self.local {
             IrohLocal::Store(local) => {
                 let local = local.clone();
+                let provider = self.provider.clone();
                 let values = summaries_for_sync(path, local.list()?);
                 if values.is_empty() {
                     return Ok(Vec::new());
                 }
                 block_on(async move {
-                    let (endpoint, conn) = connect(remote).await?;
+                    let (router, conn) = connect_with_blobs(remote, provider).await?;
                     let mut pushed = Vec::new();
                     let total = values.len();
                     for (idx, value) in values.into_iter().enumerate() {
-                        let (_, bytes) = local.bytes_for(&value.id).await?;
-                        let value = push_bytes(&conn, value.id, value.name, bytes, value.modified_ms).await?;
+                        let value = push_blob(&conn, value).await?;
                         progress(IrohSyncProgress { total, current: idx + 1, value: value.clone() });
                         pushed.push(value);
                     }
-                    close(endpoint, conn).await;
+                    close_router(router, conn).await;
                     Ok(pushed)
                 })
             }
             IrohLocal::UploadDir(root) => {
+                let provider = self.provider.clone();
                 let files = upload_files(root, path)?;
                 if files.is_empty() {
                     return Ok(Vec::new());
                 }
                 block_on(async move {
-                    let (endpoint, conn) = connect(remote).await?;
+                    let (router, conn) = connect_with_blobs(remote, provider.clone()).await?;
                     let mut pushed = Vec::new();
                     let total = files.len();
                     for (idx, file) in files.into_iter().enumerate() {
-                        let bytes = Bytes::from(fs::read(&file.path)?);
-                        let value = push_bytes(&conn, file.id, file.name, bytes, file.modified_ms).await?;
+                        let value = provider.add_upload_path(file.id, file.name, &file.path, file.modified_ms).await?;
+                        let value = push_blob(&conn, value).await?;
                         progress(IrohSyncProgress { total, current: idx + 1, value: value.clone() });
                         pushed.push(value);
                     }
-                    close(endpoint, conn).await;
+                    close_router(router, conn).await;
                     Ok(pushed)
                 })
             }
@@ -368,7 +404,7 @@ pub async fn run_daemon(root: impl AsRef<Path>, secret_key: SecretKey) -> Result
     let endpoint = Endpoint::builder(presets::N0).secret_key(secret_key).bind().await?;
     let node_id = endpoint.id();
     let blobs = iroh_blobs::BlobsProtocol::new(&store.blob_store(), None);
-    let router = Router::builder(endpoint).accept(ALPN, IrohRootProtocol { store: store.clone(), node_id }).accept(iroh_blobs::ALPN, blobs).spawn();
+    let router = Router::builder(endpoint.clone()).accept(ALPN, IrohRootProtocol { store: store.clone(), endpoint, node_id }).accept(iroh_blobs::ALPN, blobs).spawn();
 
     router.endpoint().online().await;
     println!("zust root iroh node: {}", router.endpoint().id());
@@ -426,6 +462,7 @@ pub fn parse_endpoint_addr(text: &str) -> Result<EndpointAddr> {
 #[derive(Clone)]
 struct IrohRootProtocol {
     store: IrohStore,
+    endpoint: Endpoint,
     node_id: EndpointId,
 }
 
@@ -437,21 +474,22 @@ impl std::fmt::Debug for IrohRootProtocol {
 
 impl ProtocolHandler for IrohRootProtocol {
     async fn accept(&self, connection: Connection) -> Result<(), AcceptError> {
-        if let Err(err) = handle_connection(self.store.clone(), self.node_id, connection).await {
+        if let Err(err) = handle_connection(self.store.clone(), self.endpoint.clone(), self.node_id, connection).await {
             log::error!("iroh root protocol error: {err}");
         }
         Ok(())
     }
 }
 
-async fn handle_connection(store: IrohStore, node_id: EndpointId, connection: Connection) -> Result<()> {
+async fn handle_connection(store: IrohStore, endpoint: Endpoint, node_id: EndpointId, connection: Connection) -> Result<()> {
+    let provider = connection.remote_id();
     loop {
         let Ok((mut send, mut recv)) = connection.accept_bi().await else {
             return Ok(());
         };
         let result = async {
             let request = read_json::<Request>(&mut recv).await?;
-            handle_request(&store, node_id, request, &mut recv).await
+            handle_request(&store, &endpoint, node_id, provider, request).await
         }
         .await;
         match result {
@@ -467,7 +505,7 @@ async fn handle_connection(store: IrohStore, node_id: EndpointId, connection: Co
     }
 }
 
-async fn handle_request(store: &IrohStore, node_id: EndpointId, request: Request, recv: &mut iroh::endpoint::RecvStream) -> Result<(Response, Option<Bytes>)> {
+async fn handle_request(store: &IrohStore, endpoint: &Endpoint, node_id: EndpointId, provider: EndpointId, request: Request) -> Result<(Response, Option<Bytes>)> {
     match request {
         Request::Ping => Ok((Response::Pong { node_id: node_id.to_string() }, None)),
         Request::List => Ok((Response::List { values: store.list()? }, None)),
@@ -475,10 +513,8 @@ async fn handle_request(store: &IrohStore, node_id: EndpointId, request: Request
             let value = store.get(&id)?.ok_or_else(|| anyhow!("iroh root value not found: {id}"))?;
             Ok((Response::Record { value }, None))
         }
-        Request::Push { id, name, size, modified_ms } => {
-            let mut body = vec![0; size as usize];
-            recv.read_exact(&mut body).await?;
-            let value = store.put_bytes(id, name, Bytes::from(body), modified_ms).await?;
+        Request::Push { id, name, hash, size, modified_ms } => {
+            let value = store.pull_blob_from(endpoint, provider, id, name, hash, size, modified_ms).await?;
             Ok((Response::Pushed { value }, None))
         }
         Request::Pull { id } => {
@@ -498,15 +534,27 @@ async fn connect(remote: EndpointAddr) -> Result<(Endpoint, iroh::endpoint::Conn
     Ok((endpoint, conn))
 }
 
+async fn connect_with_blobs(remote: EndpointAddr, store: IrohStore) -> Result<(Router, iroh::endpoint::Connection)> {
+    let endpoint = Endpoint::bind(presets::N0).await?;
+    let blobs = iroh_blobs::BlobsProtocol::new(&store.blob_store(), None);
+    let router = Router::builder(endpoint).accept(iroh_blobs::ALPN, blobs).spawn();
+    let conn = router.endpoint().connect(remote, ALPN).await?;
+    Ok((router, conn))
+}
+
 async fn close(endpoint: Endpoint, conn: iroh::endpoint::Connection) {
     conn.close(0u32.into(), b"done");
     endpoint.close().await;
 }
 
-async fn push_bytes(conn: &iroh::endpoint::Connection, id: String, name: String, bytes: Bytes, modified_ms: u64) -> Result<IrohSummary> {
+async fn close_router(router: Router, conn: iroh::endpoint::Connection) {
+    conn.close(0u32.into(), b"done");
+    let _ = router.shutdown().await;
+}
+
+async fn push_blob(conn: &iroh::endpoint::Connection, value: IrohSummary) -> Result<IrohSummary> {
     let (mut send, mut recv) = conn.open_bi().await?;
-    write_json(&mut send, &Request::Push { id, name, size: bytes.len() as u64, modified_ms }).await?;
-    send.write_all(&bytes).await?;
+    write_json(&mut send, &Request::Push { id: value.id, name: value.name, hash: value.hash, size: value.size, modified_ms: value.modified_ms }).await?;
     send.finish()?;
     match read_json::<Response>(&mut recv).await?.into_result()? {
         Response::Pushed { value } => Ok(value),
@@ -514,12 +562,12 @@ async fn push_bytes(conn: &iroh::endpoint::Connection, id: String, name: String,
     }
 }
 
-fn spawn_push_bytes(remote: EndpointAddr, id: String, name: String, bytes: Bytes, modified_ms: u64) {
+fn spawn_push_blob(remote: EndpointAddr, provider: IrohStore, value: IrohSummary) {
     std::thread::spawn(move || {
         if let Err(err) = block_on(async move {
-            let (endpoint, conn) = connect(remote).await?;
-            let response = push_bytes(&conn, id, name, bytes, modified_ms).await;
-            close(endpoint, conn).await;
+            let (router, conn) = connect_with_blobs(remote, provider).await?;
+            let response = push_blob(&conn, value).await;
+            close_router(router, conn).await;
             response.map(|_| ())
         }) {
             log::warn!("iroh root background sync failed: {err}");
@@ -650,6 +698,27 @@ mod tests {
 
         store.shutdown().await.unwrap();
         let _ = std::fs::remove_dir_all(data_dir);
+    }
+
+    #[tokio::test]
+    async fn store_add_upload_path_provides_blob_without_root_record() {
+        let data_dir = std::env::temp_dir().join(format!("zust-root-iroh-provider-{}", uuid::Uuid::new_v4()));
+        let source_dir = std::env::temp_dir().join(format!("zust-root-iroh-source-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&source_dir).unwrap();
+        let source = source_dir.join("big.bin");
+        std::fs::write(&source, vec![7u8; 1024 * 1024]).unwrap();
+        let store = IrohStore::open(&data_dir).await.unwrap();
+
+        let summary = store.add_upload_path("assets/big.bin".into(), "big.bin".into(), &source, 9).await.unwrap();
+        let hash: Hash = summary.hash.parse().unwrap();
+
+        assert_eq!(summary.size, 1024 * 1024);
+        assert!(store.blobs.blobs().has(hash).await.unwrap());
+        assert!(store.get("assets/big.bin").unwrap().is_none());
+
+        store.shutdown().await.unwrap();
+        let _ = std::fs::remove_dir_all(data_dir);
+        let _ = std::fs::remove_dir_all(source_dir);
     }
 
     #[test]

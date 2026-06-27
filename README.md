@@ -4,7 +4,7 @@ Zust is a Rust-like scripting language and runtime written in Rust. It keeps the
 
 Official website: [www.zust-lang.com](https://www.zust-lang.com)
 
-The project is close to a mature open-source release. The workspace now contains separately versioned crates, with the VM crate at `0.9.77`, the dynamic crate at `0.9.14`, the compiler at `0.9.32`, the parser at `0.9.13`, the SPIR-V backend at `0.9.8`, the Metal backend at `0.9.9`, and the editor-facing packages at `0.9.2`.
+The project is close to a mature open-source release. The workspace now contains separately versioned crates, with the VM crate at `0.9.88`, the dynamic crate at `0.9.18`, the compiler at `0.9.42`, the parser at `0.9.23`, the SPIR-V backend at `0.9.10`, the Metal backend at `0.9.12`, and the editor-facing packages at `0.9.2`.
 
 中文文档: [README.zh.md](README.zh.md)
 
@@ -28,6 +28,7 @@ Recent compiler/runtime fixes also include:
 - The parser rejects duplicate declarations within the same scope (function args, local lets).
 - Dict shorthand fields: `{name}` is equivalent to `{name: name}`.
 - `std::sqrt(value)` computes the square root of an `f64`.
+- `std::sleep(ms)` blocks the current execution thread for the given number of milliseconds.
 - `std::spawn(target, args)` starts a detached OS thread; callback closures support up to 24 arguments.
 
 ## Additional Documentation

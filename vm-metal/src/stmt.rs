@@ -98,6 +98,7 @@ impl MetalCompiler {
                 Ok(None)
             }
             StmtKind::Static { .. } => Ok(None),
+            StmtKind::Import { .. } => Ok(None),
             StmtKind::Fn { .. } | StmtKind::Struct { .. } | StmtKind::Impl { .. } | StmtKind::Const { .. } => bail!("statement is not supported by vm-metal yet: {stmt:?}"),
         }
     }
@@ -179,7 +180,15 @@ impl MetalCompiler {
             }
             StmtKind::While { body, .. } | StmtKind::Loop(body) => self.collect_missing_assignments(body, out),
             StmtKind::For { body, .. } => self.collect_missing_assignments(body, out),
-            StmtKind::Return(_) | StmtKind::Break | StmtKind::Continue | StmtKind::Fn { .. } | StmtKind::Struct { .. } | StmtKind::Impl { .. } | StmtKind::Static { .. } | StmtKind::Const { .. } => {}
+            StmtKind::Return(_)
+            | StmtKind::Break
+            | StmtKind::Continue
+            | StmtKind::Fn { .. }
+            | StmtKind::Struct { .. }
+            | StmtKind::Impl { .. }
+            | StmtKind::Static { .. }
+            | StmtKind::Const { .. }
+            | StmtKind::Import { .. } => {}
         }
     }
 

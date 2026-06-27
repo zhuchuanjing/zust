@@ -295,6 +295,7 @@ fn lsp_externs() -> Vec<LspExtern> {
         LspExtern { full_name: "std::spawn", arg_tys: vec![Type::Any, Type::Any], ret_ty: Type::Bool },
         LspExtern { full_name: "std::uuid", arg_tys: vec![], ret_ty: Type::Any },
         LspExtern { full_name: "std::rand", arg_tys: vec![Type::Any, Type::Any], ret_ty: Type::Any },
+        LspExtern { full_name: "std::sleep", arg_tys: vec![Type::I64], ret_ty: Type::Void },
         LspExtern { full_name: "std::__struct_alloc", arg_tys: vec![Type::I64], ret_ty: Type::Any },
         LspExtern { full_name: "std::__struct_from_ptr", arg_tys: vec![Type::I64, Type::I64], ret_ty: Type::Any },
         LspExtern { full_name: "std::log", arg_tys: vec![Type::F32], ret_ty: Type::F32 },
@@ -400,6 +401,7 @@ fn collect_stmt_symbols(text: &str, stmt: &Stmt, symbols: &mut Vec<SymbolInfo>) 
             collect_stmt_symbols(text, body, symbols);
         }
         StmtKind::Break | StmtKind::Continue | StmtKind::Return(None) => {}
+        StmtKind::Import { .. } => {}
     }
 }
 
@@ -716,7 +718,7 @@ mod tests {
 
     #[test]
     fn accepts_std_runtime_functions() {
-        let text = "pub fn main() {\n  let x = rand(-1.0, 1.0);\n  print(x);\n  uuid()\n}\n";
+        let text = "pub fn main() {\n  let x = rand(-1.0, 1.0);\n  print(x);\n  sleep(0);\n  uuid()\n}\n";
         let diagnostics = diagnostics_for("test", text, None);
 
         assert!(diagnostics.is_empty(), "{diagnostics:?}");

@@ -93,6 +93,10 @@ extern "C" fn sqrt(value: f64) -> f64 {
     value.sqrt()
 }
 
+extern "C" fn sleep(ms: i64) {
+    std::thread::sleep(std::time::Duration::from_millis(ms.max(0) as u64));
+}
+
 extern "C" fn log_any(addr: *const Dynamic) {
     if addr.is_null() {
         log::debug!("{:?}", Dynamic::Null);
@@ -1384,9 +1388,10 @@ extern "C" fn any_logic(left: *const Dynamic, op: i32, right: *const Dynamic) ->
     }
 }
 
-pub const STD: [(&str, &[Type], Type, *const u8); 5] = [
+pub const STD: [(&str, &[Type], Type, *const u8); 6] = [
     ("print", &[Type::Any], Type::Void, print as *const u8),
     ("sqrt", &[Type::F64], Type::F64, sqrt as *const u8),
+    ("sleep", &[Type::I64], Type::Void, sleep as *const u8),
     ("log", &[Type::Any], Type::Void, log_any as *const u8),
     ("uuid", &[], Type::Any, uuid as *const u8),
     ("rand", &[Type::Any, Type::Any], Type::Any, random as *const u8),

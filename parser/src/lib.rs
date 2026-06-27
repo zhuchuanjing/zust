@@ -1276,6 +1276,53 @@ mod tests {
     }
 
     #[test]
+    fn parses_import_top_level_declaration() {
+        // 顶层 import 声明:`import "module";` 和 `import "module", "path";`。
+        let stmts = parse_all(r#"import "foo";"#).expect("parse import decl");
+        assert_eq!(stmts.len(), 1);
+        let StmtKind::Import { module, path, is_pub } = &stmts[0].kind else {
+            panic!("expected StmtKind::Import, got {:?}", stmts[0].kind);
+        };
+        assert_eq!(module.as_str(), "foo");
+        assert_eq!(path.as_str(), "foo.zs", "省略路径时默认 <module>.zs");
+        assert!(!*is_pub);
+
+        let stmts = parse_all(r#"import "foo", "bar.zs";"#).expect("parse import decl with path");
+        let StmtKind::Import { module, path, .. } = &stmts[0].kind else {
+            panic!("expected StmtKind::Import, got {:?}", stmts[0].kind);
+        };
+        assert_eq!(module.as_str(), "foo");
+        assert_eq!(path.as_str(), "bar.zs");
+
+        let stmts = parse_all(r#"pub import "foo";"#).expect("parse pub import");
+        let StmtKind::Import { module, is_pub, .. } = &stmts[0].kind else {
+            panic!("expected StmtKind::Import, got {:?}", stmts[0].kind);
+        };
+        assert_eq!(module.as_str(), "foo");
+        assert!(*is_pub);
+    }
+
+    #[test]
+    fn import_call_form_is_still_recognized_as_expression() {
+        // 兼容旧 `import("name", "path");` 函数调用形式 —— 仍要能解析
+        // 成 `Expr(Call(import, ...))`,不应当成 import 顶层声明。
+        // 因为 `import` 后面紧跟 `(`(不是空白+字符串),peek 走 fall-through。
+        let stmts = parse_all(r#"import("foo", "foo.zs");"#).expect("parse import call");
+        assert_eq!(stmts.len(), 1);
+        let StmtKind::Expr(expr, _) = &stmts[0].kind else {
+            panic!("expected StmtKind::Expr, got {:?}", stmts[0].kind);
+        };
+        let ExprKind::Call { obj, params } = &expr.kind else {
+            panic!("expected ExprKind::Call, got {expr:?}");
+        };
+        let ExprKind::Ident(name) = &obj.kind else {
+            panic!("expected ident callee, got {:?}", obj.kind);
+        };
+        assert_eq!(name.as_str(), "import");
+        assert_eq!(params.len(), 2);
+    }
+
+    #[test]
     fn parses_bigfloat_cmp_context_segment() {
         let code = r#"
             struct BigFloat<N> { data: [u32; N], exp: i32, sign: bool }

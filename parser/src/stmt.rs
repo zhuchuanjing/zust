@@ -86,6 +86,7 @@ pub enum StmtKind {
     Impl { target: Type, body: Box<Stmt> },
     If { cond: Expr, then_body: Box<Stmt>, else_body: Option<Box<Stmt>> },
     Static { name: SmolStr, ty: Type, value: Option<Expr>, is_pub: bool },
+    Import { module: SmolStr, path: SmolStr, is_pub: bool },
     Const { name: SmolStr, ty: Type, value: Expr, is_pub: bool },
 }
 
@@ -285,6 +286,13 @@ impl fmt::Display for Stmt {
                     write!(f, "fn {:?}{} {:?}\n", name, generic_suffix, args)?
                 }
                 write!(f, "{}", body)?;
+            }
+            StmtKind::Import { module, path, is_pub } => {
+                if *is_pub {
+                    writeln!(f, "pub import {:?}, {:?};", module, path)?
+                } else {
+                    writeln!(f, "import {:?}, {:?};", module, path)?
+                }
             }
             _ => write!(f, "(todo display: {:?})", self.kind)?,
         }
@@ -491,6 +499,29 @@ impl Parser {
         Ok(Stmt::new(StmtKind::Block(stmts), span))
     }
 
+    /// 在 stmt 顶层 peek 一下,判断接下来的 token 是不是 `import` 顶层
+    /// 声明(`import "name";` 或 `import "name", "path";`)。区分点:
+    /// 声明形式是 `import` 后跟空白+字符串字面量(`"`)或 ident;
+    /// 函数调用形式是 `import(...)`,`import` 后紧跟 `(` —— 这种仍走
+    /// 普通表达式路径(`import` ident + 调用)。`import` 关键字不进
+    /// KEYWORDS 列表就是为了让函数调用形式继续 work。
+    fn peek_import_top_level(&self) -> bool {
+        let rest = &self.buf[self.pos..];
+        let Some(after_kw) = rest.strip_prefix(b"import") else {
+            return false;
+        };
+        // import 后必须是空白
+        let Some(&first) = after_kw.first() else {
+            return false;
+        };
+        if !first.is_ascii_whitespace() {
+            return false;
+        }
+        // 跳过空白, peek 第一个非空白字符
+        let mut after_ws = after_kw.iter().skip_while(|b| b.is_ascii_whitespace());
+        matches!(after_ws.next(), Some(b'"'))
+    }
+
     pub fn stmt(&mut self, is_pub: bool) -> Result<Stmt> {
         self.check_fatal()?;
         self.whitespace()?;
@@ -513,7 +544,37 @@ impl Parser {
                 }
             }
         }
-        let stmt = if self.keyword("let").is_ok() {
+        let stmt = if self.peek_import_top_level() {
+            // 顶层 import 声明:`import "module";` 或 `import "module", "path";`。
+            // 必须用 `peek` 而不是 `keyword`,因为 `import` 在 HEAD 下不
+            // 在 KEYWORDS 列表里 —— `import(...)` 函数调用形式仍要把
+            // `import` 当 ident 通过表达式解析路径走通。
+            // 区分要点:声明形式 `import` 后面是空白+字符串/ident;
+            // 函数调用形式 `import` 后面是 `(`。只在 stmt 顶层做这个判断。
+            if self.fn_body_depth > 0 || self.impl_body_depth > 0 {
+                return Err(anyhow!("import 只能作为顶层声明；请写在模块顶层"));
+            }
+            self.just("import").map_err(|_| anyhow!("expected import"))?;
+            self.whitespace()?;
+            let module = match self.get_expr()?.kind {
+                ExprKind::Value(Dynamic::String(value)) => value,
+                ExprKind::Ident(value) => value,
+                other => return Err(anyhow!("import 模块名必须是字符串或标识符，实际是 {:?}", other)),
+            };
+            self.whitespace()?;
+            let path = if self.take(b',').is_ok() {
+                self.whitespace()?;
+                match self.get_expr()?.kind {
+                    ExprKind::Value(Dynamic::String(value)) => value,
+                    ExprKind::Ident(value) => value,
+                    other => return Err(anyhow!("import 路径必须是字符串或标识符，实际是 {:?}", other)),
+                }
+            } else {
+                format!("{module}.zs").into()
+            };
+            self.until(b';')?;
+            Stmt::new(StmtKind::Import { module, path, is_pub }, Span::new(start, self.current_pos()))
+        } else if self.keyword("let").is_ok() {
             let pat = self.pattern()?;
             self.declare_pattern_symbols(&pat)?;
             self.until(b'=')?;

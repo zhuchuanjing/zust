@@ -57,6 +57,7 @@ impl SpirvCompiler {
                 Ok(None)
             }
             StmtKind::Static { .. } => Ok(None),
+            StmtKind::Import { .. } => Ok(None),
             StmtKind::Fn { .. } | StmtKind::Struct { .. } | StmtKind::Impl { .. } | StmtKind::Const { .. } => bail!("statement is not supported by vm-spirv yet: {stmt:?}"),
         }
     }
@@ -436,7 +437,7 @@ impl SpirvCompiler {
                 Self::collect_assigned_vars_expr(range, out);
                 Self::collect_assigned_vars_stmt(body, out);
             }
-            StmtKind::Break | StmtKind::Continue | StmtKind::Fn { .. } | StmtKind::Struct { .. } | StmtKind::Impl { .. } | StmtKind::Static { .. } | StmtKind::Const { .. } => {}
+            StmtKind::Break | StmtKind::Continue | StmtKind::Fn { .. } | StmtKind::Struct { .. } | StmtKind::Impl { .. } | StmtKind::Static { .. } | StmtKind::Const { .. } | StmtKind::Import { .. } => {}
         }
     }
 

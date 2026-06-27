@@ -4,7 +4,7 @@ Zust 是一个用 Rust 编写的类 Rust 脚本语言和运行时。它保留了
 
 官方网站：[www.zust-lang.com](https://www.zust-lang.com)
 
-项目已经接近成熟的开源版本。当前 workspace 内各 crate 独立发版：VM crate 为 `0.9.77`，dynamic crate 为 `0.9.14`，compiler 为 `0.9.32`，parser 为 `0.9.13`，SPIR-V 后端为 `0.9.8`，Metal 后端为 `0.9.9`，编辑器相关包为 `0.9.2`。
+项目已经接近成熟的开源版本。当前 workspace 内各 crate 独立发版：VM crate 为 `0.9.88`，dynamic crate 为 `0.9.18`，compiler 为 `0.9.42`，parser 为 `0.9.23`，SPIR-V 后端为 `0.9.10`，Metal 后端为 `0.9.12`，编辑器相关包为 `0.9.2`。
 
 English: [README.md](README.md)
 
@@ -28,6 +28,7 @@ VM 托管临时内存的工作已经完成。VM 创建的 `Any`/`Dynamic` 值和
 - parser 在同一 scope 内拒绝重复声明。
 - dict shorthand 字段：`{name}` 等价于 `{name: name}`。
 - `std::sqrt(value)` 计算 `f64` 的平方根。
+- `std::sleep(ms)` 阻塞当前执行线程指定毫秒数。
 - `std::spawn(target, args)` 启动独立 OS 线程；回调闭包支持最多 24 个参数。
 
 ## 设计思路

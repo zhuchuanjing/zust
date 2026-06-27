@@ -619,26 +619,29 @@ fn string_value(expr: &Expr) -> Option<&str> {
 }
 
 fn import_decl(stmt: &Stmt) -> Option<(SmolStr, SmolStr)> {
-    let StmtKind::Expr(expr, _) = &stmt.kind else {
-        return None;
-    };
-    let ExprKind::Call { obj, params } = &expr.kind else {
-        return None;
-    };
-    let ExprKind::Ident(name) = &obj.kind else {
-        return None;
-    };
-    if name.as_str() != "import" {
-        return None;
-    }
-
-    match params.as_slice() {
-        [module, path] => Some((string_value(module)?.into(), string_value(path)?.into())),
-        [module] => match &module.kind {
-            ExprKind::Value(Dynamic::String(value)) => Some((value.clone(), format!("{value}.zs").into())),
-            ExprKind::Ident(value) => Some((value.clone(), format!("{value}.zs").into())),
-            _ => None,
-        },
+    match &stmt.kind {
+        StmtKind::Import { module, path, .. } => Some((module.clone(), path.clone())),
+        StmtKind::Expr(expr, _) => {
+            // 兼容旧的 `import("name", "path");` 函数调用形式。
+            let ExprKind::Call { obj, params } = &expr.kind else {
+                return None;
+            };
+            let ExprKind::Ident(name) = &obj.kind else {
+                return None;
+            };
+            if name.as_str() != "import" {
+                return None;
+            }
+            match params.as_slice() {
+                [module, path] => Some((string_value(module)?.into(), string_value(path)?.into())),
+                [module] => match &module.kind {
+                    ExprKind::Value(Dynamic::String(value)) => Some((value.clone(), format!("{value}.zs").into())),
+                    ExprKind::Ident(value) => Some((value.clone(), format!("{value}.zs").into())),
+                    _ => None,
+                },
+                _ => None,
+            }
+        }
         _ => None,
     }
 }
@@ -1371,6 +1374,7 @@ impl Compiler {
                     }
                 }
                 StmtKind::Expr(expr, _) if is_top_level_import_expr(&expr) => {}
+                StmtKind::Import { .. } => {}
                 _ => return Err(Self::semantic_error(stmt.span, format!("不支持的顶层语句: {:?}", stmt.kind))),
             }
         }
@@ -1899,6 +1903,23 @@ impl Compiler {
         let stmt_span = stmt.span;
         match stmt.kind {
             StmtKind::Let { pat, value } => {
+                // Tuple 字面量解构:`let (a, b) = (1i32, 2i32)` 这种模式。
+                // 编译时已知每个子表达式位置,直接降级为多个独立 `let`,
+                // 保留每个元素的精确静态类型(不是 Any),也跳过运行时
+                // 索引访问 —— Tuple 没有运行时索引方法。
+                if let PatternKind::Tuple(pats) = &pat.kind
+                    && let StmtKind::Expr(expr, _) = &value.kind
+                    && let ExprKind::Tuple(items) = &expr.kind
+                {
+                    if pats.len() != items.len() {
+                        return Err(Self::semantic_error(stmt_span, format!("元组解构长度不匹配: 模式 {} 个,值 {} 个", pats.len(), items.len())));
+                    }
+                    for (p, item) in pats.iter().zip(items.iter()) {
+                        let inner = Stmt::new(StmtKind::Let { pat: p.clone(), value: Box::new(Stmt::new(StmtKind::Expr(item.clone(), false), item.span)) }, stmt_span);
+                        self.compile_stmt(inner, compiled, cap)?;
+                    }
+                    return Ok(());
+                }
                 let value = *value;
                 let annotated_ty = if let PatternKind::Ident { ty, .. } = &pat.kind {
                     let ty = self.symbols.get_type(ty)?;

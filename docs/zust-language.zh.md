@@ -390,6 +390,7 @@ zust 是**动态强类型 + 可选静态标注**:运行时的每个 `Dynamic` �
 | `print(any)` | `(Any) -> Void` | println,接任意类型 |
 | `log(any)` | `(Any) -> Void` | Rust `log::debug!` 格式输出 |
 | `sqrt(f64) -> f64` | `(F64) -> F64` | 平方根 |
+| `sleep(ms)` | `(I64) -> Void` | 阻塞当前执行线程指定毫秒数;负数按 0 处理 |
 | `uuid() -> string` | `() -> Any` | 生成 UUID 字符串 |
 | `rand(min, max) -> any` | `(Any, Any) -> Any` | 范围内随机数;两端类型决定结果是整型还是浮点 |
 | `import(name, path)` | `(Any, Any) -> Bool` | 加载 `.zs` 模块,见 §2.7;单参形式由 parser 顶层识别 |

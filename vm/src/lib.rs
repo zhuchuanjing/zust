@@ -622,6 +622,7 @@ mod tests {
         vm.add_any()?;
         assert_eq!(vm.infer("std::print", &[Type::Any])?, Type::Void);
         assert_eq!(vm.infer("std::sqrt", &[Type::F64])?, Type::F64);
+        assert_eq!(vm.infer("std::sleep", &[Type::I64])?, Type::Void);
 
         vm.import_code(
             "vm_new_default_any",
@@ -661,6 +662,26 @@ mod tests {
         assert_eq!(compiled.ret_ty(), &Type::F64);
         let run: extern "C" fn() -> f64 = unsafe { std::mem::transmute(compiled.ptr()) };
         assert_eq!(run(), 3.0);
+        Ok(())
+    }
+
+    #[test]
+    fn std_sleep_is_available_as_top_level_function() -> anyhow::Result<()> {
+        let vm = Vm::with_all()?;
+        vm.import_code(
+            "vm_std_sleep",
+            br#"
+            pub fn run() {
+                sleep(0)
+            }
+            "#
+            .to_vec(),
+        )?;
+
+        let compiled = vm.get_fn("vm_std_sleep::run", &[])?;
+        assert_eq!(compiled.ret_ty(), &Type::Void);
+        let run: extern "C" fn() = unsafe { std::mem::transmute(compiled.ptr()) };
+        run();
         Ok(())
     }
 

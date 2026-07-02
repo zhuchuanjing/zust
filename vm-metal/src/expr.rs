@@ -17,7 +17,7 @@ impl MetalCompiler {
         }
         match &expr.kind {
             ExprKind::Value(value) => self.const_dynamic(value.clone()),
-            ExprKind::Const(idx) => self.const_dynamic(self.compiler.consts.get_index(*idx).map(|(_, v)| v.clone()).ok_or_else(|| anyhow!("compiler constant {idx} missing"))?),
+            ExprKind::Const(idx) => self.const_dynamic(self.compiler.sym_tab.consts.get_index(*idx).map(|(_, v)| v.clone()).ok_or_else(|| anyhow!("compiler constant {idx} missing"))?),
             ExprKind::Typed { value, ty } => {
                 let ty = self.resolve_type(ty);
                 if ty.is_native()
@@ -46,7 +46,7 @@ impl MetalCompiler {
                 if let Type::Array(elem, len) | Type::Vec(elem, len) = &ty {
                     let raw_items = match &value.kind {
                         ExprKind::Value(Dynamic::List(items)) => Some(items.read().clone()),
-                        ExprKind::Const(idx) => self.compiler.consts.get_index(*idx).and_then(|(_, v)| match v {
+                        ExprKind::Const(idx) => self.compiler.sym_tab.consts.get_index(*idx).and_then(|(_, v)| match v {
                             Dynamic::List(items) => Some(items.read().clone()),
                             _ => None,
                         }),

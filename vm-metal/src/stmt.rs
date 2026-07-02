@@ -274,7 +274,7 @@ impl MetalCompiler {
     pub(crate) fn infer_const_u32(&self, expr: &Expr) -> Option<u32> {
         match &expr.kind {
             ExprKind::Value(value) => value.as_uint().map(|value| value as u32).or_else(|| value.as_int().and_then(|value| (value >= 0).then_some(value as u32))),
-            ExprKind::Const(idx) => self.compiler.consts.get_index(*idx).and_then(|(_, value)| value.as_uint().map(|value| value as u32).or_else(|| value.as_int().and_then(|value| (value >= 0).then_some(value as u32)))),
+            ExprKind::Const(idx) => self.compiler.sym_tab.consts.get_index(*idx).and_then(|(_, value)| value.as_uint().map(|value| value as u32).or_else(|| value.as_int().and_then(|value| (value >= 0).then_some(value as u32)))),
             _ => None,
         }
     }

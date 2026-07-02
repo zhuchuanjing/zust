@@ -15,6 +15,94 @@ use parking_lot::RwLock;
 use smol_str::SmolStr;
 use std::sync::{Arc, Weak};
 
+/// VM 运行时注册的内置函数 ID。原先是 15 个独立的 `Option<FuncId>` 字段(`xxx_fn`),
+/// 全部依赖 `_fn` 后缀区分,same_concept_multi_field 气味;现在统一为一个 enum,
+/// 编译期保证命名空间、调用方代码更易读、新增 builtin 只需 enum 加一行。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum BuiltinFn {
+    ScopeEnter,
+    ScopeExitVoid,
+    ScopeExitDynamic,
+    ScopeExitBytes,
+    StructAlloc,
+    RepeatFill,
+    Strcat,
+    StrcatI64,
+    StrcatAssign,
+    CallbackNew,
+    SpawnPtr,
+    StructFromPtr,
+    ArrayFromPtr,
+    ArrayToPtr,
+    ArithFault,
+}
+
+impl BuiltinFn {
+    /// 注册时用的 Cranelift 符号名。
+    /// 保留与原先 15 个独立字段的命名一致性,只改了字段 -> 集合里的 key。
+    fn symbol_name(self) -> &'static str {
+        match self {
+            Self::ScopeEnter => "__vm_scope_enter",
+            Self::ScopeExitVoid => "__vm_scope_exit_void",
+            Self::ScopeExitDynamic => "__vm_scope_exit_dynamic",
+            Self::ScopeExitBytes => "__vm_scope_exit_bytes",
+            Self::StructAlloc => "__vm_struct_alloc",
+            Self::RepeatFill => "__vm_repeat_fill",
+            Self::Strcat => "__vm_strcat",
+            Self::StrcatI64 => "__vm_strcat_i64",
+            Self::StrcatAssign => "__vm_strcat_assign",
+            Self::CallbackNew => "__vm_callback_new",
+            Self::SpawnPtr => "__vm_spawn_ptr",
+            Self::StructFromPtr => "__vm_struct_from_ptr",
+            Self::ArrayFromPtr => "__vm_array_from_ptr",
+            Self::ArrayToPtr => "__vm_array_to_ptr",
+            Self::ArithFault => "__vm_arith_fault",
+        }
+    }
+
+    /// 未注册时的错误信息,与原先 31 处调用点的 `anyhow!(...)` 消息一致。
+    fn unregistered_msg(self) -> &'static str {
+        match self {
+            Self::ScopeEnter => "VM scope enter runtime is not registered",
+            Self::ScopeExitVoid => "VM scope exit runtime is not registered",
+            Self::ScopeExitDynamic => "VM dynamic return runtime is not registered",
+            Self::ScopeExitBytes => "VM aggregate return runtime is not registered",
+            Self::StructAlloc => "VM struct allocator runtime is not registered",
+            Self::RepeatFill => "VM repeat fill runtime is not registered",
+            Self::Strcat => "VM strcat runtime is not registered",
+            Self::StrcatI64 => "VM strcat i64 runtime is not registered",
+            Self::StrcatAssign => "VM strcat assign runtime is not registered",
+            Self::CallbackNew => "VM callback runtime is not registered",
+            Self::SpawnPtr => "VM spawn ptr runtime is not registered",
+            Self::StructFromPtr => "VM struct Dynamic runtime is not registered",
+            Self::ArrayFromPtr => "VM array Dynamic runtime is not registered",
+            Self::ArrayToPtr => "VM array assignment runtime is not registered",
+            Self::ArithFault => "VM arith fault runtime is not registered",
+        }
+    }
+}
+
+/// 15 个内建函数的 FuncId 表,取代原先 `scope_enter_fn` ... `arith_fault_fn` 这 15 个
+/// `Option<FuncId>` 字段。新增 builtin 只需 `BuiltinFn` enum 加一行 + 写入这里。
+#[derive(Default, Debug, Clone)]
+pub struct BuiltinFnRegistry {
+    map: HashMap<BuiltinFn, FuncId>,
+}
+
+impl BuiltinFnRegistry {
+    pub(crate) fn register(&mut self, which: BuiltinFn, id: FuncId) {
+        self.map.insert(which, id);
+    }
+
+    pub fn get(&self, which: BuiltinFn) -> Option<FuncId> {
+        self.map.get(&which).copied()
+    }
+
+    pub fn get_or_err(&self, which: BuiltinFn) -> Result<FuncId> {
+        self.get(which).ok_or_else(|| anyhow!("{}", which.unregistered_msg()))
+    }
+}
+
 pub struct JITRunTime {
     pub compiler: Compiler,
     pub fns: BTreeMap<u32, FnVariant>,
@@ -31,21 +119,9 @@ pub struct JITRunTime {
     pub ir_disassembly: BTreeMap<SmolStr, String>,
     pub module: JITModule,
     pub consts: Vec<Option<usize>>,
-    pub(crate) scope_enter_fn: Option<FuncId>,
-    pub(crate) scope_exit_void_fn: Option<FuncId>,
-    pub(crate) scope_exit_dynamic_fn: Option<FuncId>,
-    pub(crate) scope_exit_bytes_fn: Option<FuncId>,
-    pub(crate) struct_alloc_fn: Option<FuncId>,
-    pub(crate) repeat_fill_fn: Option<FuncId>,
-    pub(crate) strcat_fn: Option<FuncId>,
-    pub(crate) strcat_i64_fn: Option<FuncId>,
-    pub(crate) strcat_assign_fn: Option<FuncId>,
-    pub(crate) callback_new_fn: Option<FuncId>,
-    pub(crate) spawn_ptr_fn: Option<FuncId>,
-    pub(crate) struct_from_ptr_fn: Option<FuncId>,
-    pub(crate) array_from_ptr_fn: Option<FuncId>,
-    pub(crate) array_to_ptr_fn: Option<FuncId>,
-    pub(crate) arith_fault_fn: Option<FuncId>,
+    /// 15 个 VM builtin runtime 函数的 FuncId 表,见 [`BuiltinFnRegistry`]。
+    /// 取代原先 15 个独立的 `Option<FuncId>` 字段(同概念多字段气味)。
+    pub(crate) builtin_fns: BuiltinFnRegistry,
 }
 
 // TODO(memory): 函数调用期间为 VM 内部临时 Any/struct 分配引入 arena。
@@ -79,15 +155,15 @@ impl JITRunTime {
         let stmts = Compiler::parse_code(code)?;
         self.compiler.resolve_imports(&stmts, None)?;
         self.compiler.clear();
-        self.compiler.symbols.add_module("__console".into());
+        self.compiler.sym_tab.symbols.add_module("__console".into());
         let mut cap = Capture::default();
         let body = Self::stmt(StmtKind::Block(self.compiler.compile_fn(&[arg_name], &mut vec![Type::Any], Self::stmt(StmtKind::Block(stmts)), &mut cap)?));
-        self.compiler.tys.push(Type::Any);
+        self.compiler.sym_tab.tys.push(Type::Any);
         let ret_ty = self.compiler.infer_stmt(&body)?;
         self.compiler.clear();
         let fn_id = self.compile_fn(None, &[Type::Any], ret_ty.clone(), &body)?;
         self.compiler.clear();
-        self.compiler.symbols.pop_module();
+        self.compiler.sym_tab.symbols.pop_module();
         self.module.finalize_definitions()?;
         Ok((self.module.get_finalized_function(fn_id) as i64, ret_ty))
     }
@@ -108,7 +184,7 @@ impl JITRunTime {
             return Ok(ir.clone());
         }
         let id = self.get_id(name)?;
-        let (_, symbol) = self.compiler.symbols.get_symbol(id)?;
+        let (_, symbol) = self.compiler.sym_tab.symbols.get_symbol(id)?;
         if let Symbol::Fn { ty, .. } = symbol
             && let Type::Fn { tys, .. } = ty
             && tys.is_empty()
@@ -137,13 +213,13 @@ impl JITRunTime {
         let ptr = if let Some(ptr) = self.consts.get(idx).cloned().unwrap_or(None) {
             ptr
         } else {
-            let c = Box::new(self.compiler.consts[idx].deep_clone()); //深度拷贝 避免常量被污染
+            let c = Box::new(self.compiler.sym_tab.consts[idx].deep_clone()); //深度拷贝 避免常量被污染
             let ptr = Box::into_raw(c) as usize;
             self.consts[idx] = Some(ptr);
             ptr
         };
         let value = ctx.builder.ins().iconst(ptr_type(), ptr as i64); //需要生成副本 避免被释放
-        let ty = if self.compiler.consts[idx].is_str() { Type::Str } else { Type::Any };
+        let ty = if self.compiler.sym_tab.consts[idx].is_str() { Type::Str } else { Type::Any };
         Ok((self.call(ctx, self.get_method(&Type::Any, "clone")?, vec![value])?.0, ty))
     }
 
@@ -155,7 +231,7 @@ impl JITRunTime {
     pub fn get_dynamic(&self, expr: &Expr) -> Option<Dynamic> {
         match &expr.kind {
             ExprKind::Value(value) => Some(value.clone()),
-            ExprKind::Const(idx) => self.compiler.consts.get_index(*idx).map(|(_, v)| v.clone()),
+            ExprKind::Const(idx) => self.compiler.sym_tab.consts.get_index(*idx).map(|(_, v)| v.clone()),
             _ => None,
         }
     }
@@ -171,14 +247,14 @@ impl JITRunTime {
 
     fn is_fn_field_type(&self, ty: &Type) -> bool {
         match ty {
-            Type::Symbol { id, .. } => self.compiler.symbols.get_symbol(*id).map(|(_, symbol)| symbol.is_fn()).unwrap_or(false),
+            Type::Symbol { id, .. } => self.compiler.sym_tab.symbols.get_symbol(*id).map(|(_, symbol)| symbol.is_fn()).unwrap_or(false),
             Type::Fn { .. } => true,
             _ => false,
         }
     }
 
     pub(crate) fn is_opaque_custom_ty(&self, ty: &Type) -> bool {
-        let ty = self.compiler.symbols.get_type(ty).unwrap_or_else(|_| ty.clone());
+        let ty = self.compiler.sym_tab.symbols.get_type(ty).unwrap_or_else(|_| ty.clone());
         matches!(ty, Type::Struct { fields, .. } if !fields.is_empty() && fields.iter().all(|(_, field_ty)| self.is_fn_field_type(field_ty)))
     }
 
@@ -187,7 +263,7 @@ impl JITRunTime {
     }
 
     pub fn get_id(&self, name: &str) -> Result<u32> {
-        self.compiler.symbols.get_id(name)
+        self.compiler.sym_tab.symbols.get_id(name)
     }
 
     fn get_native_fn_cached(&mut self, name: &'static str, arg_tys: &[Type]) -> Result<FnInfo> {
@@ -201,10 +277,10 @@ impl JITRunTime {
 
     pub fn get_type(&mut self, name: &str, arg_tys: &[Type]) -> Result<Type> {
         let id = self.get_id(name)?;
-        if self.compiler.symbols.symbols.get(name).map(|s| s.is_fn()).unwrap_or(false) {
+        if self.compiler.sym_tab.symbols.symbols.get(name).map(|s| s.is_fn()).unwrap_or(false) {
             return self.compiler.infer_fn(id, arg_tys);
         }
-        self.compiler.symbols.get_type(&Type::Symbol { id, params: Vec::new() })
+        self.compiler.sym_tab.symbols.get_type(&Type::Symbol { id, params: Vec::new() })
     }
 
     pub fn new<F: FnMut(&mut JITBuilder)>(mut f: F) -> Self {
@@ -232,21 +308,7 @@ impl JITRunTime {
             ir_disassembly: BTreeMap::new(),
             module,
             consts: Vec::new(),
-            scope_enter_fn: None,
-            scope_exit_void_fn: None,
-            scope_exit_dynamic_fn: None,
-            scope_exit_bytes_fn: None,
-            struct_alloc_fn: None,
-            repeat_fill_fn: None,
-            strcat_fn: None,
-            strcat_i64_fn: None,
-            strcat_assign_fn: None,
-            callback_new_fn: None,
-            spawn_ptr_fn: None,
-            struct_from_ptr_fn: None,
-            array_from_ptr_fn: None,
-            array_to_ptr_fn: None,
-            arith_fault_fn: None,
+            builtin_fns: BuiltinFnRegistry::default(),
         }
     }
 
@@ -313,14 +375,14 @@ impl JITRunTime {
     }
 
     pub(crate) fn scope_enter(&mut self, ctx: &mut BuildContext) -> Result<()> {
-        let fn_id = self.scope_enter_fn.ok_or_else(|| anyhow!("VM scope enter runtime is not registered"))?;
+        let fn_id = self.builtin_fns.get_or_err(BuiltinFn::ScopeEnter)?;
         let fn_ref = self.get_fn_ref(ctx, fn_id);
         ctx.builder.ins().call(fn_ref, &[]);
         Ok(())
     }
 
     fn scope_exit_void(&mut self, ctx: &mut BuildContext) -> Result<()> {
-        let fn_id = self.scope_exit_void_fn.ok_or_else(|| anyhow!("VM scope exit runtime is not registered"))?;
+        let fn_id = self.builtin_fns.get_or_err(BuiltinFn::ScopeExitVoid)?;
         let fn_ref = self.get_fn_ref(ctx, fn_id);
         ctx.builder.ins().call(fn_ref, &[]);
         Ok(())
@@ -342,7 +404,7 @@ impl JITRunTime {
 
         if ret_ty.is_any() || ret_ty.is_str() || matches!(ret_ty, Type::Map | Type::List(_) | Type::Iter) {
             let value = self.convert(ctx, (value, value_ty), Type::Any)?;
-            let fn_id = self.scope_exit_dynamic_fn.ok_or_else(|| anyhow!("VM dynamic return runtime is not registered"))?;
+            let fn_id = self.builtin_fns.get_or_err(BuiltinFn::ScopeExitDynamic)?;
             let fn_ref = self.get_fn_ref(ctx, fn_id);
             let call_inst = ctx.builder.ins().call(fn_ref, &[value]);
             let promoted = ctx.builder.inst_results(call_inst)[0];
@@ -351,7 +413,7 @@ impl JITRunTime {
             let value = self.convert(ctx, (value, value_ty), ret_ty.clone())?;
             let size = ctx.builder.ins().iconst(types::I64, ret_ty.width() as i64);
             let ty_ptr = Self::type_ptr_const(ctx, &ret_ty);
-            let fn_id = self.scope_exit_bytes_fn.ok_or_else(|| anyhow!("VM aggregate return runtime is not registered"))?;
+            let fn_id = self.builtin_fns.get_or_err(BuiltinFn::ScopeExitBytes)?;
             let fn_ref = self.get_fn_ref(ctx, fn_id);
             let call_inst = ctx.builder.ins().call(fn_ref, &[value, size, ty_ptr]);
             let promoted = ctx.builder.inst_results(call_inst)[0];
@@ -425,7 +487,7 @@ impl JITRunTime {
 
     fn struct_alloc(&mut self, ctx: &mut BuildContext, ty: &Type) -> Result<Value> {
         let size = ctx.builder.ins().iconst(types::I64, ty.width() as i64);
-        let fn_id = self.struct_alloc_fn.ok_or_else(|| anyhow!("VM struct allocator runtime is not registered"))?;
+        let fn_id = self.builtin_fns.get_or_err(BuiltinFn::StructAlloc)?;
         let fn_ref = self.get_fn_ref(ctx, fn_id);
         let call_inst = ctx.builder.ins().call(fn_ref, &[size]);
         Ok(ctx.builder.inst_results(call_inst)[0])
@@ -458,7 +520,7 @@ impl JITRunTime {
     }
 
     fn struct_field_index(&self, struct_ty: &Type, right: &Expr) -> Result<usize> {
-        let value = if let ExprKind::Const(idx) = right.kind { self.compiler.consts.get_index(idx).map(|(_, v)| v.clone()).ok_or_else(|| anyhow!("missing const {}", idx))? } else { right.clone().value()? };
+        let value = if let ExprKind::Const(idx) = right.kind { self.compiler.sym_tab.consts.get_index(idx).map(|(_, v)| v.clone()).ok_or_else(|| anyhow!("missing const {}", idx))? } else { right.clone().value()? };
         if let Some(idx) = value.as_int() {
             return usize::try_from(idx).map_err(|_| anyhow!("结构字段索引越界 {}", idx));
         }
@@ -514,7 +576,7 @@ impl JITRunTime {
         let array_ty = Type::Array(std::rc::Rc::new(elem_ty.clone()), len);
         let base = self.struct_alloc(ctx, &array_ty)?;
         if let Some(pattern) = self.repeat_fill_pattern(ctx, value.0, &elem_ty) {
-            let fn_id = self.repeat_fill_fn.ok_or_else(|| anyhow!("VM repeat fill runtime is not registered"))?;
+            let fn_id = self.builtin_fns.get_or_err(BuiltinFn::RepeatFill)?;
             let fn_ref = self.get_fn_ref(ctx, fn_id);
             let width = ctx.builder.ins().iconst(types::I64, elem_ty.storage_width() as i64);
             let len = ctx.builder.ins().iconst(types::I64, len as i64);
@@ -566,7 +628,7 @@ impl JITRunTime {
         };
         let base = self.struct_alloc(ctx, ty)?;
         let ty_ptr = Self::type_ptr_const(ctx, ty);
-        let fn_id = self.array_to_ptr_fn.ok_or_else(|| anyhow!("VM array assignment runtime is not registered"))?;
+        let fn_id = self.builtin_fns.get_or_err(BuiltinFn::ArrayToPtr)?;
         let fn_ref = self.get_fn_ref(ctx, fn_id);
         ctx.builder.ins().call(fn_ref, &[base, value, ty_ptr]);
         Ok(base)
@@ -1009,7 +1071,7 @@ impl JITRunTime {
     fn expr_is_empty_list(&self, expr: &Expr) -> bool {
         match &expr.kind {
             ExprKind::Value(value) => value.is_list() && value.len() == 0,
-            ExprKind::Const(idx) => self.compiler.consts.get_index(*idx).is_some_and(|(_, value)| value.is_list() && value.len() == 0),
+            ExprKind::Const(idx) => self.compiler.sym_tab.consts.get_index(*idx).is_some_and(|(_, value)| value.is_list() && value.len() == 0),
             ExprKind::Typed { value, .. } => self.expr_is_empty_list(value),
             _ => false,
         }
@@ -1127,7 +1189,7 @@ impl JITRunTime {
     }
 
     fn closure_value(&self, ctx: &mut BuildContext, id: u32) -> Result<LocalVar> {
-        let (name, symbol) = self.compiler.symbols.get_symbol(id)?;
+        let (name, symbol) = self.compiler.sym_tab.symbols.get_symbol(id)?;
         let captures = match symbol {
             Symbol::Fn { cap, .. } => cap
                 .vars
@@ -1150,7 +1212,7 @@ impl JITRunTime {
         match &expr.kind {
             ExprKind::Tuple(items) | ExprKind::List(items) => Some(items.len()),
             ExprKind::Value(value) => value.is_list().then(|| value.len()),
-            ExprKind::Const(idx) => self.compiler.consts.get_index(*idx).and_then(|(_, value)| value.is_list().then(|| value.len())),
+            ExprKind::Const(idx) => self.compiler.sym_tab.consts.get_index(*idx).and_then(|(_, value)| value.is_list().then(|| value.len())),
             ExprKind::Typed { value, .. } => self.spawn_arg_pack_len(value),
             _ => None,
         }
@@ -1181,7 +1243,7 @@ impl JITRunTime {
     }
 
     fn callback_value(&mut self, ctx: &mut BuildContext, id: u32, captures: Vec<(Value, Type)>) -> Result<LocalVar> {
-        let explicit_arg_len = match self.compiler.symbols.get_symbol(id)?.1 {
+        let explicit_arg_len = match self.compiler.sym_tab.symbols.get_symbol(id)?.1 {
             Symbol::Fn { ty: Type::Fn { tys, .. }, .. } => tys.len(),
             _ => 0,
         };
@@ -1207,7 +1269,7 @@ impl JITRunTime {
         let fn_addr = ctx.builder.ins().func_addr(ptr_type(), fn_ref);
         let ret_ty = Self::type_ptr_const(ctx, &ret);
         let explicit_arg_len = ctx.builder.ins().iconst(types::I64, explicit_arg_len as i64);
-        let callback_new = self.callback_new_fn.ok_or_else(|| anyhow!("VM callback runtime is not registered"))?;
+        let callback_new = self.builtin_fns.get_or_err(BuiltinFn::CallbackNew)?;
         let callback_new_ref = self.get_fn_ref(ctx, callback_new);
         let call_inst = ctx.builder.ins().call(callback_new_ref, &[fn_addr, ret_ty, explicit_arg_len, captures.0]);
         Ok((ctx.builder.inst_results(call_inst)[0], Type::Any).into())
@@ -1231,7 +1293,7 @@ impl JITRunTime {
         let fn_ref = self.get_fn_ref(ctx, fn_id);
         let fn_addr = ctx.builder.ins().func_addr(ptr_type(), fn_ref);
         let ret_ty = Self::type_ptr_const(ctx, &ret);
-        let spawn_ptr = self.spawn_ptr_fn.ok_or_else(|| anyhow!("VM spawn ptr runtime is not registered"))?;
+        let spawn_ptr = self.builtin_fns.get_or_err(BuiltinFn::SpawnPtr)?;
         let spawn_ref = self.get_fn_ref(ctx, spawn_ptr);
         let call_inst = ctx.builder.ins().call(spawn_ref, &[fn_addr, ret_ty, args]);
         Ok((ctx.builder.inst_results(call_inst)[0], Type::Bool).into())
@@ -1412,7 +1474,7 @@ impl JITRunTime {
         if self.inline_depth >= 4 || self.inline_stack.contains(&id) || !generic_args.is_empty() || capture_len != 0 {
             return Ok(None);
         }
-        let (fn_name, symbol) = self.compiler.symbols.get_symbol(id).map(|(name, symbol)| (name.clone(), symbol.clone()))?;
+        let (fn_name, symbol) = self.compiler.sym_tab.symbols.get_symbol(id).map(|(name, symbol)| (name.clone(), symbol.clone()))?;
         let Symbol::Fn { ty: Type::Fn { tys, .. }, generic_params, cap, body, .. } = symbol else {
             return Ok(None);
         };
@@ -1473,7 +1535,7 @@ impl JITRunTime {
     }
 
     pub(crate) fn call_fn_with_capture_values(&mut self, ctx: &mut BuildContext, id: u32, generic_args: &[Type], obj: Option<Expr>, params: &Vec<Expr>, capture_values: Option<Vec<(Value, Type)>>) -> Result<LocalVar> {
-        let fn_name = self.compiler.symbols.get_symbol(id).map(|(name, _)| name.clone())?;
+        let fn_name = self.compiler.sym_tab.symbols.get_symbol(id).map(|(name, _)| name.clone())?;
         let has_receiver = obj.is_some();
         if capture_values.is_none()
             && generic_args.is_empty()
@@ -1515,7 +1577,7 @@ impl JITRunTime {
         let fn_info = match if generic_args.is_empty() { self.get_fn(id, &arg_tys) } else { Err(anyhow!("generic function needs specialization")) } {
             Ok(info) => info,
             Err(_) => self.gen_fn_with_params(Some(ctx), id, &arg_tys, generic_args).map_err(|e| {
-                log::error!("{:?}", self.compiler.symbols.get_symbol(id));
+                log::error!("{:?}", self.compiler.sym_tab.symbols.get_symbol(id));
                 e
             })?,
         };
@@ -1599,7 +1661,7 @@ impl JITRunTime {
                         None => return Err(anyhow!("binary left has no value: {:?}", left)),
                     };
                     if op == &BinaryOp::Idx {
-                        let left_ty = self.compiler.symbols.get_type(&left.1).unwrap_or_else(|_| left.1.clone());
+                        let left_ty = self.compiler.sym_tab.symbols.get_type(&left.1).unwrap_or_else(|_| left.1.clone());
                         let left = (left.0, left_ty);
                         if let Type::Struct { params: _, fields: _ } = &left.1 {
                             let idx = self.struct_field_index(&left.1, right)?;
@@ -1683,7 +1745,7 @@ impl JITRunTime {
                     if obj.is_idx() {
                         let (left, _, right) = obj.clone().binary().unwrap();
                         let left = self.eval(ctx, &left)?.get(ctx).ok_or(anyhow!("obj {:?}", obj))?;
-                        let ty = self.compiler.symbols.get_type(&left.1)?;
+                        let ty = self.compiler.sym_tab.symbols.get_type(&left.1)?;
                         if let Some(name) = self.get_dynamic(&right) {
                             if name.as_str() == "swap"
                                 && let Some(elem_ty) = Self::vec_elem_ty(&ty)

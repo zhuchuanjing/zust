@@ -17,6 +17,10 @@ name = "llm"
 default = []
 candle = ["dep:candle-core", "dep:candle-nn", "dep:candle-transformers", "dep:tokenizers", "dep:serde_json"]
 
+[[example]]
+name = "kalm_embed"
+required-features = ["candle"]
+
 [dependencies]
 dynamic = { package = "zust-dynamic", version = "0.9.18", path = "../dynamic" }
 root = { package = "zust-root", version = "0.9.11", path = "../root" }

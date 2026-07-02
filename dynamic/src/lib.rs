@@ -798,48 +798,19 @@ impl Dynamic {
     }
 
     pub fn add(&mut self, val: i64) -> Option<i64> {
-        //如果是 整数类型 增加指定值 并返回新的值 不考虑溢出
+        // 如果是 整数类型 增加指定值 并返回新的值 不考虑溢出
+        // 关键不变量:返回 Some(n) 时,*self 的实际值 == n(没有"写入截断但返回溢出值"的不一致 bug)。
+        // 原代码 v: i64 = *u as i64 + val 后 *u = v as u8 会静默截断 + 返回不一致;
+        // 这里改用 checked_add_signed:失败时返回 None,不修改 *self。
         match self {
-            Self::U8(u) => {
-                let v = (*u as i64) + val;
-                *u = v as u8;
-                Some(v)
-            }
-            Self::U16(u) => {
-                let v = (*u as i64) + val;
-                *u = v as u16;
-                Some(v)
-            }
-            Self::U32(u) => {
-                let v = (*u as i64) + val;
-                *u = v as u32;
-                Some(v)
-            }
-            Self::U64(u) => {
-                let v = (*u as i64) + val;
-                *u = v as u64;
-                Some(v)
-            }
-            Self::I8(i) => {
-                let v = (*i as i64) + val;
-                *i = v as i8;
-                Some(v)
-            }
-            Self::I16(i) => {
-                let v = (*i as i64) + val;
-                *i = v as i16;
-                Some(v)
-            }
-            Self::I32(i) => {
-                let v = (*i as i64) + val;
-                *i = v as i32;
-                Some(v)
-            }
-            Self::I64(i) => {
-                let v = (*i as i64) + val;
-                *i = v;
-                Some(v)
-            }
+            Self::U8(u)  => u.checked_add_signed(val as i8).map(|v| { *u = v; v as i64 }),
+            Self::U16(u) => u.checked_add_signed(val as i16).map(|v| { *u = v; v as i64 }),
+            Self::U32(u) => u.checked_add_signed(val as i32).map(|v| { *u = v; v as i64 }),
+            Self::U64(u) => u.checked_add(val as u64).map(|v| { *u = v; v as i64 }),
+            Self::I8(i)  => i.checked_add(val as i8).map(|v| { *i = v; v as i64 }),
+            Self::I16(i) => i.checked_add(val as i16).map(|v| { *i = v; v as i64 }),
+            Self::I32(i) => i.checked_add(val as i32).map(|v| { *i = v; v as i64 }),
+            Self::I64(i) => i.checked_add(val).map(|v| { *i = v; v }),
             _ => None,
         }
     }

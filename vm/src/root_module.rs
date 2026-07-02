@@ -60,43 +60,6 @@ extern "C" fn root_mount_fjall(data_dir: *const Dynamic) {
     }
 }
 
-#[cfg(feature = "iroh")]
-extern "C" fn root_mount_iroh(name: *const Dynamic, node_id: *const Dynamic, local_dir: *const Dynamic) {
-    unsafe {
-        let _ = root::mount_iroh(&(*name).as_str(), &(*node_id).as_str(), &(*local_dir).as_str());
-    }
-}
-
-#[cfg(feature = "iroh")]
-extern "C" fn root_sync(name: *const Dynamic, callback: *const Dynamic) -> *const Dynamic {
-    let name = unsafe { (*name).as_str().to_string() };
-    let Some(callback) = (unsafe { (&*callback).as_custom::<ZustCallback>() }).cloned() else {
-        return alloc_dynamic(dynamic::map!("ok"=> false, "error"=> "root::sync callback must be closure"));
-    };
-    let info = dynamic::map!("kind"=> "iroh_sync", "path"=> name.clone());
-    let task_id = root::start_task(info, move || {
-        Box::pin(async move {
-            let path = name.clone();
-            match root::sync(&name, {
-                let callback = callback.clone();
-                move |progress| {
-                    let _ = callback.call1(progress);
-                }
-            }) {
-                Ok(result) => {
-                    let _ = callback.call1(dynamic::map!("kind"=> "done", "path"=> path, "result"=> result));
-                    Ok(())
-                }
-                Err(err) => {
-                    let _ = callback.call1(dynamic::map!("kind"=> "error", "path"=> path, "error"=> err.to_string()));
-                    Err(err)
-                }
-            }
-        })
-    });
-    alloc_dynamic(task_id)
-}
-
 extern "C" fn root_get(name: *const Dynamic) -> *const Dynamic {
     unsafe { alloc_dynamic(if let Ok((m, name)) = get_mount(&(*name).as_str()) { m.get(name, |v| v.value()).unwrap_or(Dynamic::Null) } else { Dynamic::Null }) }
 }
@@ -176,10 +139,6 @@ extern "C" fn root_update_key(name: *const Dynamic, key: *const Dynamic, callbac
 pub const ROOT_NATIVE: &[(&str, &[Type], Type, *const u8)] = &[
     ("mount", &[Type::Any, Type::Any], Type::Void, root_mount as *const u8),
     ("mount_fjall", &[Type::Any], Type::Void, root_mount_fjall as *const u8),
-    #[cfg(feature = "iroh")]
-    ("mount_iroh", &[Type::Any, Type::Any, Type::Any], Type::Void, root_mount_iroh as *const u8),
-    #[cfg(feature = "iroh")]
-    ("sync", &[Type::Any, Type::Any], Type::Any, root_sync as *const u8),
     ("add_list", &[Type::Any], Type::Bool, root_add_list as *const u8),
     ("add_map", &[Type::Any], Type::Bool, root_add_map as *const u8),
     ("add", &[Type::Any, Type::Any], Type::Bool, root_add as *const u8),

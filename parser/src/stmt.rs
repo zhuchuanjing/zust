@@ -529,7 +529,7 @@ impl Parser {
         let start = self.current_pos();
         // 函数体内不允许 fn / struct / impl / const / static 顶层声明。
         // 编译器对这些位置直接 panic，这里前置到 parser，让错误落到用户可见的地方。
-        if self.fn_body_depth > 0 {
+        if self.scope_depths.fn_body_depth > 0 {
             for kw in &["fn", "struct", "impl", "const", "static"] {
                 if self.keyword(kw).is_ok() {
                     return Err(anyhow!("函数体内不能定义 {}；请移到顶层或改用闭包", kw));
@@ -537,7 +537,7 @@ impl Parser {
             }
         }
         // impl body 允许 fn(方法)和 pub fn,但拒绝嵌套 struct / impl / const / static。
-        if self.impl_body_depth > 0 {
+        if self.scope_depths.impl_body_depth > 0 {
             for kw in &["struct", "impl", "const", "static"] {
                 if self.keyword(kw).is_ok() {
                     return Err(anyhow!("impl 体内不能定义 {}；请移到顶层", kw));
@@ -551,7 +551,7 @@ impl Parser {
             // `import` 当 ident 通过表达式解析路径走通。
             // 区分要点:声明形式 `import` 后面是空白+字符串/ident;
             // 函数调用形式 `import` 后面是 `(`。只在 stmt 顶层做这个判断。
-            if self.fn_body_depth > 0 || self.impl_body_depth > 0 {
+            if self.scope_depths.fn_body_depth > 0 || self.scope_depths.impl_body_depth > 0 {
                 return Err(anyhow!("import 只能作为顶层声明；请写在模块顶层"));
             }
             self.just("import").map_err(|_| anyhow!("expected import"))?;

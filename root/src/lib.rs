@@ -1,7 +1,5 @@
 mod arrow;
 mod directory;
-#[cfg(feature = "iroh")]
-pub mod iroh;
 mod mount;
 mod node;
 pub use arrow::query::{Query, SearchDescriptionResult};
@@ -398,11 +396,6 @@ pub fn mount_fjall(data_dir: &str) -> Result<bool> {
     ROOT.mount_fjall("fjall", data_dir)
 }
 
-#[cfg(feature = "iroh")]
-pub fn mount_iroh(name: &str, node_id: &str, local_dir: &str) -> Result<bool> {
-    ROOT.mount_iroh(name, node_id, local_dir)
-}
-
 pub fn get_mount<'a>(name: &'a str) -> Result<(Mount<Object>, &'a str)> {
     ROOT.get_mount(name)
 }
@@ -446,45 +439,6 @@ pub fn dir(name: &str) -> Result<Dynamic> {
     let mount_name = name.split_once('/').map(|(n, _)| n).unwrap_or(name);
     let (m, name) = get_mount(name)?;
     m.dir(name).map(|names| if matches!(m, Mount::Redis { .. }) { names.into_iter().map(|n| format!("{}/{}", mount_name, n).into()).collect::<Vec<SmolStr>>().into() } else { names.into() })
-}
-
-#[cfg(feature = "iroh")]
-pub fn sync<F>(name: &str, mut progress: F) -> Result<Dynamic>
-where
-    F: FnMut(Dynamic) + Send + 'static,
-{
-    let mount_name = name.split_once('/').map(|(n, _)| n.to_string()).unwrap_or_else(|| name.to_string());
-    let (m, name) = get_mount(name)?;
-    let progress_mount_name = mount_name.clone();
-    let values = m.sync(name, move |value| progress(iroh_progress_to_dynamic(&progress_mount_name, value)))?;
-    Ok(Dynamic::list(values.into_iter().map(iroh_summary_to_dynamic).collect()))
-}
-
-#[cfg(feature = "iroh")]
-fn iroh_summary_to_dynamic(value: iroh::IrohSummary) -> Dynamic {
-    dynamic::map!(
-        "id"=> value.id,
-        "name"=> value.name,
-        "hash"=> value.hash,
-        "size"=> value.size as i64,
-        "modified_ms"=> value.modified_ms as i64
-    )
-}
-
-#[cfg(feature = "iroh")]
-fn iroh_progress_to_dynamic(mount_name: &str, progress: iroh::IrohSyncProgress) -> Dynamic {
-    let path = format!("{}/{}", mount_name, progress.value.id);
-    dynamic::map!(
-        "kind"=> "file",
-        "total"=> progress.total as i64,
-        "current"=> progress.current as i64,
-        "path"=> path,
-        "id"=> progress.value.id,
-        "name"=> progress.value.name,
-        "hash"=> progress.value.hash,
-        "size"=> progress.value.size as i64,
-        "modified_ms"=> progress.value.modified_ms as i64
-    )
 }
 
 pub fn contains(name: &str) -> bool {
@@ -607,17 +561,6 @@ pub fn get_list(name: &str) -> Result<Vec<Dynamic>> {
             Ok(items)
         }
         Mount::Fjall { .. } => {
-            let len = m.len(name)?;
-            let mut items = Vec::new();
-            for idx in 0..len {
-                if let Ok(value) = m.get_idx(name, idx, |obj| obj.value()) {
-                    items.push(value);
-                }
-            }
-            Ok(items)
-        }
-        #[cfg(feature = "iroh")]
-        Mount::Iroh { .. } => {
             let len = m.len(name)?;
             let mut items = Vec::new();
             for idx in 0..len {

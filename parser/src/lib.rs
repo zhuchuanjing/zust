@@ -34,22 +34,33 @@ impl Span {
 }
 
 #[derive(Debug)]
+/// 解析器内的作用域嵌套深度。把同类 depth 字段打包成一个子结构,
+/// 让 Parser struct 字段更扁平、四个 depth 字段不再散落、调用方一看就懂这是"嵌套深度"
+/// 而不是别的状态。
+#[derive(Default, Clone)]
+pub(crate) struct ScopeDepths {
+    /// impl 体嵌套深度。>0 表示当前 stmt 处于 `impl { ... }` 内,
+    /// 拒绝嵌套 `struct / impl / const / static`(fn 仍允许,即方法)。
+    pub(crate) impl_depth: usize,
+    /// impl body 嵌套深度,和 impl_depth 同周期,但语义不同:
+    /// 允许方法定义,只拒绝 struct/impl/const/static。
+    pub(crate) impl_body_depth: usize,
+    /// 函数体嵌套深度。>0 表示当前 stmt 处于某个 `fn body` 内,需要拒绝
+    /// `fn / struct / impl / const / static` 等顶层声明关键字。
+    pub(crate) fn_body_depth: usize,
+    /// 当前表达式/语句递归深度,防止恶意深嵌套输入打爆调用栈
+    pub(crate) depth: usize,
+}
+
 pub struct Parser {
     pos: usize,   //当前解析的位置
     buf: Vec<u8>, //待解析的字符串
     spans: Vec<usize>,
     decl_scopes: Vec<BTreeSet<SmolStr>>,
-    impl_depth: usize,
-    /// 函数体嵌套深度。>0 表示当前 stmt 处于某个 `fn body` 内,需要拒绝
-    /// `fn / struct / impl / const / static` 等顶层声明关键字。
-    fn_body_depth: usize,
-    /// impl 体嵌套深度。>0 表示当前 stmt 处于 `impl { ... }` 内,
-    /// 拒绝嵌套 `struct / impl / const / static`(fn 仍允许,即方法)。
-    impl_body_depth: usize,
+    scope_depths: ScopeDepths,
     /// `match` 块顶层临时变量(__m_scrut_N / __m_done_N / __m_out_N)的后缀计数器,
     /// 用于避免嵌套 match 重名。
     pub(crate) match_counter: usize,
-    depth: usize, //当前表达式/语句递归深度,防止恶意深嵌套输入打爆调用栈
     fatal: bool,  //递归过深等不可恢复错误;置位后所有解析入口立即失败,避免回溯重试导致死循环
 }
 
@@ -106,7 +117,7 @@ macro_rules! try_parse {
     ($self: ident, $method: expr) => {{
         let save_pos = $self.pos; //保存当前 pos
         let save_decl_scopes = $self.decl_scopes.clone();
-        let save_impl_depth = $self.impl_depth;
+        let save_impl_depth = $self.scope_depths.impl_depth;
         match $method {
             Ok(expr) => Ok(expr),
             // fatal(如递归过深)不可恢复:不回退 pos,直接上抛,避免外层换产生式重试导致死循环
@@ -114,7 +125,7 @@ macro_rules! try_parse {
             Err(e) => {
                 $self.pos = save_pos;
                 $self.decl_scopes = save_decl_scopes;
-                $self.impl_depth = save_impl_depth;
+                $self.scope_depths.impl_depth = save_impl_depth;
                 Err(e)
             }
         }
@@ -168,7 +179,7 @@ impl SpannedParseError {
 
 impl Parser {
     pub fn new(buf: Vec<u8>) -> Self {
-        Self { pos: 0, buf, spans: Vec::new(), decl_scopes: vec![BTreeSet::new()], impl_depth: 0, fn_body_depth: 0, impl_body_depth: 0, match_counter: 0, depth: 0, fatal: false }
+        Self { pos: 0, buf, spans: Vec::new(), decl_scopes: vec![BTreeSet::new()], scope_depths: ScopeDepths::default(), match_counter: 0, fatal: false }
     }
 
     /// 进入一层递归:自增深度并校验上限。配合 [`Parser::exit_depth`] 使用。
@@ -178,9 +189,9 @@ impl Parser {
     /// 形成死循环。置位后 [`Parser::check_fatal`] 让每个解析入口立即失败,错误一路
     /// 通过 `?` 上抛终止解析。
     fn enter_depth(&mut self) -> Result<()> {
-        self.depth += 1;
-        if self.depth > MAX_PARSE_DEPTH {
-            self.depth -= 1;
+        self.scope_depths.depth += 1;
+        if self.scope_depths.depth > MAX_PARSE_DEPTH {
+            self.scope_depths.depth -= 1;
             self.fatal = true;
             return Err(ParserErr::at("表达式嵌套过深", self.current_pos()).into());
         }
@@ -188,7 +199,7 @@ impl Parser {
     }
 
     fn exit_depth(&mut self) {
-        self.depth = self.depth.saturating_sub(1);
+        self.scope_depths.depth = self.scope_depths.depth.saturating_sub(1);
     }
 
     /// 解析入口的快速失败检查:一旦进入 fatal 状态,立即返回错误,阻止任何回溯重试。
@@ -230,7 +241,7 @@ impl Parser {
     }
 
     fn declare_function_name(&mut self, name: &SmolStr) -> Result<()> {
-        if self.impl_depth > 0 { self.declare_symbol_in_current_scope(name) } else { self.declare_symbol(name) }
+        if self.scope_depths.impl_depth > 0 { self.declare_symbol_in_current_scope(name) } else { self.declare_symbol(name) }
     }
 
     fn declare_args(&mut self, args: &[(SmolStr, Type)]) -> Result<()> {
@@ -271,23 +282,23 @@ impl Parser {
 
     fn function_body(&mut self, args: &[(SmolStr, Type)]) -> Result<Stmt> {
         self.push_decl_scope();
-        self.fn_body_depth += 1;
+        self.scope_depths.fn_body_depth += 1;
         let result = (|| {
             self.declare_args(args)?;
             self.block()
         })();
-        self.fn_body_depth -= 1;
+        self.scope_depths.fn_body_depth -= 1;
         self.pop_decl_scope();
         result
     }
 
     fn impl_body(&mut self) -> Result<Stmt> {
         self.push_decl_scope();
-        self.impl_depth += 1;
-        self.impl_body_depth += 1;
+        self.scope_depths.impl_depth += 1;
+        self.scope_depths.impl_body_depth += 1;
         let result = self.block();
-        self.impl_body_depth -= 1;
-        self.impl_depth -= 1;
+        self.scope_depths.impl_body_depth -= 1;
+        self.scope_depths.impl_depth -= 1;
         self.pop_decl_scope();
         result
     }
@@ -904,34 +915,7 @@ mod tests {
     }
 
     fn binop_sym(op: &crate::BinaryOp) -> &'static str {
-        use crate::BinaryOp::*;
-        match op {
-            Add => "+",
-            Sub => "-",
-            Mul => "*",
-            Div => "/",
-            Mod => "%",
-            Shl => "<<",
-            Shr => ">>",
-            BitAnd => "&",
-            BitOr => "|",
-            BitXor => "^",
-            Assign => "=",
-            AddAssign => "+=",
-            Eq => "==",
-            Ne => "!=",
-            Lt => "<",
-            Gt => ">",
-            Le => "<=",
-            Ge => ">=",
-            And => "&&",
-            Or => "||",
-            Idx => "idx",
-            other => {
-                let _ = other;
-                "?"
-            }
-        }
+        op.symbol()
     }
 
     fn fmt_shape(expr: &crate::Expr) -> String {

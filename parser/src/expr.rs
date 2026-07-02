@@ -63,6 +63,68 @@ impl BinaryOp {
         matches!(self, Self::Add | Self::AddAssign)
     }
 
+    pub fn is_arith(&self) -> bool {
+        matches!(
+            self,
+            Self::Sub
+                | Self::Mul
+                | Self::Div
+                | Self::Mod
+                | Self::Shr
+                | Self::Shl
+                | Self::BitAnd
+                | Self::BitOr
+                | Self::BitXor
+                | Self::SubAssign
+                | Self::MulAssign
+                | Self::DivAssign
+                | Self::ModAssign
+                | Self::ShrAssign
+                | Self::ShlAssign
+                | Self::BitAndAssign
+                | Self::BitOrAssign
+                | Self::BitXorAssign
+        )
+    }
+
+    pub fn symbol(&self) -> &'static str {
+        match self {
+            Self::Add => "+",
+            Self::Sub => "-",
+            Self::Mul => "*",
+            Self::Div => "/",
+            Self::Mod => "%",
+            Self::Shl => "<<",
+            Self::Shr => ">>",
+            Self::BitAnd => "&",
+            Self::BitOr => "|",
+            Self::BitXor => "^",
+            Self::AddAssign => "+=",
+            Self::SubAssign => "-=",
+            Self::MulAssign => "*=",
+            Self::DivAssign => "/=",
+            Self::ModAssign => "%=",
+            Self::ShlAssign => "<<=",
+            Self::ShrAssign => ">>=",
+            Self::BitAndAssign => "&=",
+            Self::BitOrAssign => "|=",
+            Self::BitXorAssign => "^=",
+            Self::Assign => "=",
+            Self::Eq => "==",
+            Self::Ne => "!=",
+            Self::Lt => "<",
+            Self::Gt => ">",
+            Self::Le => "<=",
+            Self::Ge => ">=",
+            Self::And => "&&",
+            Self::Or => "||",
+            Self::Idx => "[]",
+            Self::RangeOpen => "..",
+            Self::RangeClose => "..=",
+            Self::Unknow => "?",
+        }
+    }
+
     pub fn is_assign(&self) -> bool {
         matches!(
             self,

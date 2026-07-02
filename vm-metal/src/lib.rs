@@ -87,8 +87,8 @@ pub fn compile_function_with_externs_generic_args_and_workgroup_size(
     workgroup_size: [u32; 3],
 ) -> Result<Kernel> {
     let full_name = format!("{module_name}::{fn_name}");
-    let id = compiler.symbols.get_id(&full_name).or_else(|_| compiler.symbols.get_id(fn_name)).with_context(|| format!("function {full_name} not found"))?;
-    let symbol = compiler.symbols.get_symbol(id)?.1.clone();
+    let id = compiler.sym_tab.symbols.get_id(&full_name).or_else(|_| compiler.sym_tab.symbols.get_id(fn_name)).with_context(|| format!("function {full_name} not found"))?;
+    let symbol = compiler.sym_tab.symbols.get_symbol(id)?.1.clone();
     let Symbol::Fn { ty, args, generic_params, cap, body, is_pub: _ } = symbol else {
         bail!("{full_name} is not a zust function");
     };
@@ -97,7 +97,7 @@ pub fn compile_function_with_externs_generic_args_and_workgroup_size(
     };
     let (arg_tys, body) = specialize_entry_function(compiler, module_name, &args, &generic_params, generic_args, &decl_arg_tys, body.as_ref(), cap)?;
     let ret_ty = compiler.infer_fn_with_params(id, &arg_tys, generic_args)?;
-    let ret_ty = compiler.symbols.get_type(&ret_ty)?;
+    let ret_ty = compiler.sym_tab.symbols.get_type(&ret_ty)?;
     let type_defs = collect_type_defs(compiler);
     let type_names = collect_type_names(compiler);
     let user_fns = collect_user_fns(compiler)?;
@@ -132,7 +132,7 @@ fn specialize_entry_function(
 }
 
 fn resolve_entry_type(compiler: &Compiler, module_name: &str, ty: &Type) -> Result<Type> {
-    compiler.symbols.get_type(ty).or_else(|_| compiler.symbols.get_type(&qualify_entry_type(module_name, ty)))
+    compiler.sym_tab.symbols.get_type(ty).or_else(|_| compiler.sym_tab.symbols.get_type(&qualify_entry_type(module_name, ty)))
 }
 
 fn qualify_entry_type(module_name: &str, ty: &Type) -> Type {

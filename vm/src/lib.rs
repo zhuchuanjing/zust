@@ -13,7 +13,7 @@ pub use context::BuildContext;
 mod rt;
 use cranelift::prelude::types;
 use dynamic::{Dynamic, Type};
-pub use rt::JITRunTime;
+pub use rt::{BuiltinFn, BuiltinFnRegistry, JITRunTime};
 #[cfg(feature = "candle")]
 mod candle_module;
 #[cfg(feature = "db")]
@@ -84,7 +84,7 @@ pub fn with_native_context<T>(context: NativeContext, f: impl FnOnce(&Vm) -> Res
 
 fn add_method_field(jit: &mut JITRunTime, def: &str, method: &str, id: u32) -> Result<()> {
     let def_id = jit.get_id(def)?;
-    if let Some((_, define)) = jit.compiler.symbols.get_symbol_mut(def_id) {
+    if let Some((_, define)) = jit.compiler.sym_tab.symbols.get_symbol_mut(def_id) {
         if let Symbol::Struct(Type::Struct { params, fields }, _) = define {
             fields.push((method.into(), Type::Symbol { id, params: params.clone() }));
         }
@@ -121,52 +121,52 @@ impl JITRunTime {
         self.native_symbols.write().insert("__vm_arith_fault".to_string(), memory::arith_fault as *const () as usize);
 
         let void_sig = self.get_sig(&[], Type::Void)?;
-        self.scope_enter_fn = Some(self.module.declare_function("__vm_scope_enter", cranelift_module::Linkage::Import, &void_sig)?);
-        self.scope_exit_void_fn = Some(self.module.declare_function("__vm_scope_exit_void", cranelift_module::Linkage::Import, &void_sig)?);
+        self.builtin_fns.register(BuiltinFn::ScopeEnter, self.module.declare_function("__vm_scope_enter", cranelift_module::Linkage::Import, &void_sig)?);
+        self.builtin_fns.register(BuiltinFn::ScopeExitVoid, self.module.declare_function("__vm_scope_exit_void", cranelift_module::Linkage::Import, &void_sig)?);
 
         let dynamic_sig = self.get_sig(&[Type::Any], Type::Any)?;
-        self.scope_exit_dynamic_fn = Some(self.module.declare_function("__vm_scope_exit_dynamic", cranelift_module::Linkage::Import, &dynamic_sig)?);
+        self.builtin_fns.register(BuiltinFn::ScopeExitDynamic, self.module.declare_function("__vm_scope_exit_dynamic", cranelift_module::Linkage::Import, &dynamic_sig)?);
 
         let bytes_sig = self.get_sig(&[Type::Any, Type::I64, Type::I64], Type::Any)?;
-        self.scope_exit_bytes_fn = Some(self.module.declare_function("__vm_scope_exit_bytes", cranelift_module::Linkage::Import, &bytes_sig)?);
+        self.builtin_fns.register(BuiltinFn::ScopeExitBytes, self.module.declare_function("__vm_scope_exit_bytes", cranelift_module::Linkage::Import, &bytes_sig)?);
 
         let struct_alloc_sig = self.get_sig(&[Type::I64], Type::Any)?;
-        self.struct_alloc_fn = Some(self.module.declare_function("__vm_struct_alloc", cranelift_module::Linkage::Import, &struct_alloc_sig)?);
+        self.builtin_fns.register(BuiltinFn::StructAlloc, self.module.declare_function("__vm_struct_alloc", cranelift_module::Linkage::Import, &struct_alloc_sig)?);
 
         let repeat_fill_sig = self.get_sig(&[Type::Any, Type::I64, Type::I64, Type::I64], Type::Void)?;
-        self.repeat_fill_fn = Some(self.module.declare_function("__vm_repeat_fill", cranelift_module::Linkage::Import, &repeat_fill_sig)?);
+        self.builtin_fns.register(BuiltinFn::RepeatFill, self.module.declare_function("__vm_repeat_fill", cranelift_module::Linkage::Import, &repeat_fill_sig)?);
 
         let strcat_sig = self.get_sig(&[Type::Str, Type::Str], Type::Str)?;
-        self.strcat_fn = Some(self.module.declare_function("__vm_strcat", cranelift_module::Linkage::Import, &strcat_sig)?);
+        self.builtin_fns.register(BuiltinFn::Strcat, self.module.declare_function("__vm_strcat", cranelift_module::Linkage::Import, &strcat_sig)?);
 
         let strcat_i64_sig = self.get_sig(&[Type::Str, Type::I64], Type::Str)?;
-        self.strcat_i64_fn = Some(self.module.declare_function("__vm_strcat_i64", cranelift_module::Linkage::Import, &strcat_i64_sig)?);
+        self.builtin_fns.register(BuiltinFn::StrcatI64, self.module.declare_function("__vm_strcat_i64", cranelift_module::Linkage::Import, &strcat_i64_sig)?);
 
         let strcat_assign_sig = self.get_sig(&[Type::Any, Type::Any], Type::Any)?;
-        self.strcat_assign_fn = Some(self.module.declare_function("__vm_strcat_assign", cranelift_module::Linkage::Import, &strcat_assign_sig)?);
+        self.builtin_fns.register(BuiltinFn::StrcatAssign, self.module.declare_function("__vm_strcat_assign", cranelift_module::Linkage::Import, &strcat_assign_sig)?);
 
         let callback_new_sig = self.get_sig(&[Type::I64, Type::I64, Type::I64, Type::Any], Type::Any)?;
-        self.callback_new_fn = Some(self.module.declare_function("__vm_callback_new", cranelift_module::Linkage::Import, &callback_new_sig)?);
+        self.builtin_fns.register(BuiltinFn::CallbackNew, self.module.declare_function("__vm_callback_new", cranelift_module::Linkage::Import, &callback_new_sig)?);
 
         let spawn_ptr_sig = self.get_sig(&[Type::I64, Type::I64, Type::Any], Type::Bool)?;
-        self.spawn_ptr_fn = Some(self.module.declare_function("__vm_spawn_ptr", cranelift_module::Linkage::Import, &spawn_ptr_sig)?);
+        self.builtin_fns.register(BuiltinFn::SpawnPtr, self.module.declare_function("__vm_spawn_ptr", cranelift_module::Linkage::Import, &spawn_ptr_sig)?);
 
         let struct_from_ptr_sig = self.get_sig(&[Type::I64, Type::I64], Type::Any)?;
-        self.struct_from_ptr_fn = Some(self.module.declare_function("__vm_struct_from_ptr", cranelift_module::Linkage::Import, &struct_from_ptr_sig)?);
-        self.array_from_ptr_fn = Some(self.module.declare_function("__vm_array_from_ptr", cranelift_module::Linkage::Import, &struct_from_ptr_sig)?);
+        self.builtin_fns.register(BuiltinFn::StructFromPtr, self.module.declare_function("__vm_struct_from_ptr", cranelift_module::Linkage::Import, &struct_from_ptr_sig)?);
+        self.builtin_fns.register(BuiltinFn::ArrayFromPtr, self.module.declare_function("__vm_array_from_ptr", cranelift_module::Linkage::Import, &struct_from_ptr_sig)?);
         let array_to_ptr_sig = self.get_sig(&[Type::Any, Type::Any, Type::I64], Type::Void)?;
-        self.array_to_ptr_fn = Some(self.module.declare_function("__vm_array_to_ptr", cranelift_module::Linkage::Import, &array_to_ptr_sig)?);
+        self.builtin_fns.register(BuiltinFn::ArrayToPtr, self.module.declare_function("__vm_array_to_ptr", cranelift_module::Linkage::Import, &array_to_ptr_sig)?);
 
-        self.arith_fault_fn = Some(self.module.declare_function("__vm_arith_fault", cranelift_module::Linkage::Import, &void_sig)?);
+        self.builtin_fns.register(BuiltinFn::ArithFault, self.module.declare_function("__vm_arith_fault", cranelift_module::Linkage::Import, &void_sig)?);
         Ok(())
     }
 
     pub fn add_module(&mut self, name: &str) {
-        self.compiler.symbols.add_module(name.into());
+        self.compiler.sym_tab.symbols.add_module(name.into());
     }
 
     pub fn pop_module(&mut self) {
-        self.compiler.symbols.pop_module();
+        self.compiler.sym_tab.symbols.pop_module();
     }
 
     pub fn add_native_const(&mut self, name: &str, value: impl Into<Dynamic>, ty: Type) -> u32 {
@@ -209,7 +209,7 @@ impl JITRunTime {
     }
 
     pub fn add_std(&mut self) -> Result<()> {
-        if self.compiler.symbols.get_id("std::print").is_ok() {
+        if self.compiler.sym_tab.symbols.get_id("std::print").is_ok() {
             return Ok(());
         }
         self.add_module("std");
@@ -222,7 +222,7 @@ impl JITRunTime {
     }
 
     pub fn add_any(&mut self) -> Result<()> {
-        if self.compiler.symbols.get_id("Any").is_ok() && self.compiler.symbols.get_id("Any::is_map").is_ok() {
+        if self.compiler.sym_tab.symbols.get_id("Any").is_ok() && self.compiler.sym_tab.symbols.get_id("Any::is_map").is_ok() {
             return Ok(());
         }
         for (name, arg_tys, ret_ty, fn_ptr) in ANY {
@@ -233,7 +233,7 @@ impl JITRunTime {
     }
 
     pub fn add_vec(&mut self) -> Result<()> {
-        if self.compiler.symbols.get_id("Vec::get_idx").is_ok() {
+        if self.compiler.sym_tab.symbols.get_id("Vec::get_idx").is_ok() {
             return Ok(());
         }
         self.add_empty_type("Vec")?;
@@ -268,7 +268,7 @@ impl JITRunTime {
 
     #[cfg(feature = "llm")]
     pub fn add_llm(&mut self) -> Result<()> {
-        if self.compiler.symbols.get_id("llm::complete").is_ok() {
+        if self.compiler.sym_tab.symbols.get_id("llm::complete").is_ok() {
             return Ok(());
         }
         add_native_module_fns(self, "llm", &llm_module::LLM_NATIVE)?;
@@ -277,14 +277,14 @@ impl JITRunTime {
 
     #[cfg(feature = "candle")]
     pub fn add_candle(&mut self) -> Result<()> {
-        if self.compiler.symbols.get_id("candle::embed").is_ok() {
+        if self.compiler.sym_tab.symbols.get_id("candle::embed").is_ok() {
             return Ok(());
         }
         add_native_module_fns(self, "candle", &candle_module::CANDLE_NATIVE)
     }
 
     pub fn add_root(&mut self) -> Result<()> {
-        if self.compiler.symbols.get_id("root::get").is_ok() {
+        if self.compiler.sym_tab.symbols.get_id("root::get").is_ok() {
             return Ok(());
         }
         add_native_module_fns(self, "root", &root_module::ROOT_NATIVE)?;
@@ -293,7 +293,7 @@ impl JITRunTime {
     }
 
     pub fn add_time(&mut self) -> Result<()> {
-        if self.compiler.symbols.get_id("time::now").is_ok() {
+        if self.compiler.sym_tab.symbols.get_id("time::now").is_ok() {
             return Ok(());
         }
         add_native_module_fns(self, "time", &time_module::TIME_NATIVE)
@@ -301,7 +301,7 @@ impl JITRunTime {
 
     #[cfg(feature = "http")]
     pub fn add_http(&mut self) -> Result<()> {
-        if self.compiler.symbols.get_id("http::request").is_ok() {
+        if self.compiler.sym_tab.symbols.get_id("http::request").is_ok() {
             return Ok(());
         }
         add_native_module_fns(self, "http", &http_module::HTTP_NATIVE)?;
@@ -310,7 +310,7 @@ impl JITRunTime {
 
     #[cfg(feature = "db")]
     pub fn add_db(&mut self) -> Result<()> {
-        if self.compiler.symbols.get_id("db::select").is_ok() {
+        if self.compiler.sym_tab.symbols.get_id("db::select").is_ok() {
             return Ok(());
         }
         add_native_module_fns(self, "db", &db_module::DB_NATIVE)
@@ -318,7 +318,7 @@ impl JITRunTime {
 
     #[cfg(feature = "gpu")]
     pub fn add_gpu(&mut self) -> Result<()> {
-        if self.compiler.symbols.get_id("gpu::spirv_check").is_ok() {
+        if self.compiler.sym_tab.symbols.get_id("gpu::spirv_check").is_ok() {
             return Ok(());
         }
         add_native_module_fns(self, "gpu", &gpu_module::GPU_NATIVE)
@@ -514,7 +514,7 @@ mod tests {
         }
         fn gpu_struct_layout(&self, name: &str, params: &[Type]) -> anyhow::Result<GpuStructLayout> {
             let jit = self.jit.write();
-            GpuStructLayout::from_symbol_table(&jit.compiler.symbols, name, params)
+            GpuStructLayout::from_symbol_table(&jit.compiler.sym_tab.symbols, name, params)
         }
         fn load(&self, code: Vec<u8>, arg_name: smol_str::SmolStr) -> anyhow::Result<(i64, Type)> {
             self.jit.write().load(code, arg_name)
@@ -4793,7 +4793,7 @@ mod tests {
         )?;
 
         let compiled = vm.get_fn("vm_dynamic_index_sum::sum_list", &[Type::I64])?;
-        let sum_list_id = vm.jit.write().compiler.symbols.get_id("vm_dynamic_index_sum::sum_list")?;
+        let sum_list_id = vm.jit.write().compiler.sym_tab.symbols.get_id("vm_dynamic_index_sum::sum_list")?;
         let hints = vm.jit.write().compiler.inferred_local_type_hints(sum_list_id, &[], &[Type::I64]);
         assert!(hints.iter().any(|ty| matches!(ty, Some(Type::List(elem)) if elem.as_ref() == &Type::I64)), "local type hints: {:?}", hints);
         assert_eq!(compiled.ret_ty(), &Type::I64);
@@ -4972,7 +4972,7 @@ mod tests {
         )?;
 
         let compiled = vm.get_fn("vm_inferred_list_shortcuts::second_bool", &[])?;
-        let second_bool_id = vm.jit.write().compiler.symbols.get_id("vm_inferred_list_shortcuts::second_bool")?;
+        let second_bool_id = vm.jit.write().compiler.sym_tab.symbols.get_id("vm_inferred_list_shortcuts::second_bool")?;
         let hints = vm.jit.write().compiler.inferred_local_type_hints(second_bool_id, &[], &[]);
         assert!(hints.iter().any(|ty| matches!(ty, Some(Type::List(elem)) if elem.as_ref() == &Type::Bool)), "bool local type hints: {:?}", hints);
         assert_eq!(compiled.ret_ty(), &Type::Bool);
@@ -4980,7 +4980,7 @@ mod tests {
         assert!(!second_bool());
 
         let compiled = vm.get_fn("vm_inferred_list_shortcuts::first_u8", &[])?;
-        let first_u8_id = vm.jit.write().compiler.symbols.get_id("vm_inferred_list_shortcuts::first_u8")?;
+        let first_u8_id = vm.jit.write().compiler.sym_tab.symbols.get_id("vm_inferred_list_shortcuts::first_u8")?;
         let hints = vm.jit.write().compiler.inferred_local_type_hints(first_u8_id, &[], &[]);
         assert!(hints.iter().any(|ty| matches!(ty, Some(Type::List(elem)) if elem.as_ref() == &Type::U8)), "u8 local type hints: {:?}", hints);
         assert_eq!(compiled.ret_ty(), &Type::U8);
@@ -4998,7 +4998,7 @@ mod tests {
         assert_eq!(count_bool_for_in(), 2);
 
         let compiled = vm.get_fn("vm_inferred_list_shortcuts::sum_i32", &[Type::I64])?;
-        let sum_i32_id = vm.jit.write().compiler.symbols.get_id("vm_inferred_list_shortcuts::sum_i32")?;
+        let sum_i32_id = vm.jit.write().compiler.sym_tab.symbols.get_id("vm_inferred_list_shortcuts::sum_i32")?;
         let hints = vm.jit.write().compiler.inferred_local_type_hints(sum_i32_id, &[], &[Type::I64]);
         assert!(hints.iter().any(|ty| matches!(ty, Some(Type::List(elem)) if elem.as_ref() == &Type::I32)), "i32 local type hints: {:?}", hints);
         assert_eq!(compiled.ret_ty(), &Type::I32);
@@ -5006,7 +5006,7 @@ mod tests {
         assert_eq!(sum_i32(100), 4950);
 
         let compiled = vm.get_fn("vm_inferred_list_shortcuts::sum_f32", &[Type::I64])?;
-        let sum_f32_id = vm.jit.write().compiler.symbols.get_id("vm_inferred_list_shortcuts::sum_f32")?;
+        let sum_f32_id = vm.jit.write().compiler.sym_tab.symbols.get_id("vm_inferred_list_shortcuts::sum_f32")?;
         let hints = vm.jit.write().compiler.inferred_local_type_hints(sum_f32_id, &[], &[Type::I64]);
         assert!(hints.iter().any(|ty| matches!(ty, Some(Type::List(elem)) if elem.as_ref() == &Type::F32)), "f32 local type hints: {:?}", hints);
         assert_eq!(compiled.ret_ty(), &Type::F32);
@@ -5014,7 +5014,7 @@ mod tests {
         assert_eq!(sum_f32(10), 45.0);
 
         let compiled = vm.get_fn("vm_inferred_list_shortcuts::second_str", &[])?;
-        let second_str_id = vm.jit.write().compiler.symbols.get_id("vm_inferred_list_shortcuts::second_str")?;
+        let second_str_id = vm.jit.write().compiler.sym_tab.symbols.get_id("vm_inferred_list_shortcuts::second_str")?;
         let hints = vm.jit.write().compiler.inferred_local_type_hints(second_str_id, &[], &[]);
         assert!(hints.iter().any(|ty| matches!(ty, Some(Type::List(elem)) if elem.as_ref() == &Type::Str)), "str local type hints: {:?}", hints);
         assert_eq!(compiled.ret_ty(), &Type::Str);

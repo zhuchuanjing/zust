@@ -1,6 +1,6 @@
 [package]
 name = "zust-root"
-version = "0.9.14"
+version = "0.9.15"
 edition = "2024"
 rust-version = "1.85"
 description = "Addressable object tree and storage abstractions for Zust runtime integrations."
@@ -17,7 +17,7 @@ name = "root"
 default = []
 
 [dependencies]
-dynamic = { package = "zust-dynamic", version = "0.9.14", path = "../dynamic" }
+dynamic = { package = "zust-dynamic", version = "0.9.19", path = "../dynamic" }
 
 anyhow = "1.0.102"
 thiserror = "2.0.18"

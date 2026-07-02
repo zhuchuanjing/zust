@@ -21,6 +21,6 @@ name = "spectral_concurrent"
 path = "src/spectral_concurrent.rs"
 
 [dependencies]
-dynamic = { package = "zust-dynamic", version = "0.9.5", path = "../dynamic" }
-vm = { package = "zust-vm", version = "0.9.11", path = "../vm" }
+dynamic = { package = "zust-dynamic", version = "0.9.19", path = "../dynamic" }
+vm = { package = "zust-vm", version = "0.9.89", path = "../vm" }
 anyhow = "1.0.102"

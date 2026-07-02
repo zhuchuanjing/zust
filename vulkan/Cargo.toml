@@ -1,6 +1,6 @@
 [package]
 name = "zust-vulkan"
-version = "0.9.4"
+version = "0.9.5"
 edition = "2024"
 rust-version = "1.85"
 description = "Vulkan execution helpers for Zust SPIR-V kernels."
@@ -20,7 +20,7 @@ image = "0.25.10"
 vulkano = "0.35.2"
 
 [dev-dependencies]
-vm-spirv = { package = "zust-vm-spirv", version = "0.9.8", path = "../vm-spirv" }
+vm-spirv = { package = "zust-vm-spirv", version = "0.9.11", path = "../vm-spirv" }
 
 [[example]]
 name = "vulkan_run_bitonic"

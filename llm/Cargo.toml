@@ -1,6 +1,6 @@
 [package]
 name = "zust-llm"
-version = "0.9.19"
+version = "0.9.20"
 edition = "2024"
 rust-version = "1.85"
 description = "LLM request helpers for Zust runtime integrations."
@@ -22,8 +22,8 @@ name = "kalm_embed"
 required-features = ["candle"]
 
 [dependencies]
-dynamic = { package = "zust-dynamic", version = "0.9.18", path = "../dynamic" }
-root = { package = "zust-root", version = "0.9.11", path = "../root" }
+dynamic = { package = "zust-dynamic", version = "0.9.19", path = "../dynamic" }
+root = { package = "zust-root", version = "0.9.15", path = "../root" }
 hex = "0.4.3"
 reqwest = { version = "0.13.3", features = ["stream"] }
 anyhow = "1.0.102"

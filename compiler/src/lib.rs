@@ -24,23 +24,48 @@ pub enum ListElemState {
     Mixed,
 }
 
-#[derive(Clone)]
-pub struct Compiler {
+/// 编译器的符号/作用域/类型/常量状态。把"编译期状态"打包成一个子结构,
+/// 让 Compiler 顶层字段更扁平、5 个编译期字段不再散落、
+/// 单元测试只关心"名字 + 类型 + 常量"时可单独测 SymTab。
+#[derive(Default, Clone)]
+pub struct SymTab {
     pub symbols: SymbolTable,
     pub frames: Vec<usize>,
+    /// 每个 symbol 的类型;索引与 SymbolTable 对齐(对应 names 数组的相对位置)。
     pub tys: Vec<Type>,
     /// 编译期常量表:键是稳定的 SmolStr 名字(通常来自字面量文本或字段名),
     /// 值是 Dynamic。`ExprKind::Const(idx)` 中的 idx 是 IndexMap 中的位置,
     /// 在单次编译中稳定;热重载场景下同一名字会拿到同一 idx,跨编译不保证。
     pub consts: IndexMap<SmolStr, Dynamic>,
-    names: Vec<SmolStr>,
-    list_elem_states: Vec<Option<ListElemState>>,
-    arg_counts: Vec<usize>,
-    fns: BTreeMap<u32, Vec<(Vec<Type>, Vec<Type>, FnInferRet)>>,
-    local_type_hints: BTreeMap<u32, Vec<(Vec<Type>, Vec<Type>, Vec<Option<Type>>)>>,
-    infer_stack: Vec<(u32, Vec<Type>, Vec<Type>)>,
-    importing_paths: BTreeSet<PathBuf>,
-    source_files: BTreeMap<SmolStr, SourceFile>,
+    pub names: Vec<SmolStr>,
+}
+
+/// 编译器的类型推导状态。推导逻辑(类型推导栈、列表元素状态、参数计数等)集中在这里,
+/// 改推导算法时只需读这个文件,不会被符号表或 IO 状态干扰。
+#[derive(Default, Clone)]
+pub struct TypeCtx {
+    pub list_elem_states: Vec<Option<ListElemState>>,
+    pub arg_counts: Vec<usize>,
+    pub fns: BTreeMap<u32, Vec<(Vec<Type>, Vec<Type>, FnInferRet)>>,
+    pub local_type_hints: BTreeMap<u32, Vec<(Vec<Type>, Vec<Type>, Vec<Option<Type>>)>>,
+    pub infer_stack: Vec<(u32, Vec<Type>, Vec<Type>)>,
+}
+
+/// 编译器的 IO 状态。import 路径和源文件列表,与符号/推导逻辑解耦。
+#[derive(Default, Clone)]
+pub struct IoState {
+    pub importing_paths: BTreeSet<PathBuf>,
+    pub source_files: BTreeMap<SmolStr, SourceFile>,
+}
+
+#[derive(Default, Clone)]
+pub struct Compiler {
+    /// 编译期静态状态(符号、作用域、常量)。改符号表相关逻辑只看这里。
+    pub sym_tab: SymTab,
+    /// 类型推导状态。改推导算法只看这里。
+    pub type_ctx: TypeCtx,
+    /// IO 状态(import 路径、源文件)。改 IO 相关逻辑只看这里。
+    pub io: IoState,
 }
 
 #[derive(Clone)]
@@ -80,16 +105,16 @@ mod tests {
             .to_vec(),
         )?;
 
-        let is_alive = compiler.symbols.get_id("compiler_infer_return::is_alive")?;
+        let is_alive = compiler.sym_tab.symbols.get_id("compiler_infer_return::is_alive")?;
         assert_eq!(compiler.infer_fn(is_alive, &[])?, Type::Bool);
 
-        let (_, symbol) = compiler.symbols.get_symbol(is_alive)?;
+        let (_, symbol) = compiler.sym_tab.symbols.get_symbol(is_alive)?;
         let Symbol::Fn { ty: Type::Fn { ret, .. }, .. } = symbol else {
             panic!("is_alive should be a function symbol");
         };
         assert_eq!(ret.as_ref(), &Type::Bool);
 
-        let can_act = compiler.symbols.get_id("compiler_infer_return::can_act")?;
+        let can_act = compiler.sym_tab.symbols.get_id("compiler_infer_return::can_act")?;
         assert_eq!(compiler.infer_fn(can_act, &[])?, Type::Bool);
         Ok(())
     }
@@ -110,8 +135,8 @@ mod tests {
             .to_vec(),
         )?;
 
-        let table = compiler.symbols.get_id("compiler_const_table::GEM_TABLE")?;
-        let (_, symbol) = compiler.symbols.get_symbol(table)?;
+        let table = compiler.sym_tab.symbols.get_id("compiler_const_table::GEM_TABLE")?;
+        let (_, symbol) = compiler.sym_tab.symbols.get_symbol(table)?;
         let Symbol::Const { value, .. } = symbol else {
             panic!("GEM_TABLE should be a const symbol");
         };
@@ -133,8 +158,8 @@ mod tests {
             .to_vec(),
         )?;
 
-        let id = compiler.symbols.get_id("compiler_const_min_int::MIN_I32")?;
-        let (_, symbol) = compiler.symbols.get_symbol(id)?;
+        let id = compiler.sym_tab.symbols.get_id("compiler_const_min_int::MIN_I32")?;
+        let (_, symbol) = compiler.sym_tab.symbols.get_symbol(id)?;
         let Symbol::Const { value, .. } = symbol else {
             panic!("MIN_I32 should be a const symbol");
         };
@@ -188,14 +213,14 @@ mod tests {
             .to_vec(),
         )?;
 
-        let no_value_return = compiler.symbols.get_id("compiler_return_check_args::no_value_return")?;
+        let no_value_return = compiler.sym_tab.symbols.get_id("compiler_return_check_args::no_value_return")?;
         assert_eq!(compiler.infer_fn(no_value_return, &[Type::Bool])?, Type::Void);
 
-        let tail_if = compiler.symbols.get_id("compiler_return_check_args::tail_if")?;
+        let tail_if = compiler.sym_tab.symbols.get_id("compiler_return_check_args::tail_if")?;
         // 无后缀整数字面量默认 I64
         assert_eq!(compiler.infer_fn(tail_if, &[Type::Bool])?, Type::I64);
 
-        let loop_index = compiler.symbols.get_id("compiler_return_check_args::loop_index")?;
+        let loop_index = compiler.sym_tab.symbols.get_id("compiler_return_check_args::loop_index")?;
         assert_eq!(compiler.infer_fn(loop_index, &[Type::I64, Type::I64])?, Type::I64);
 
         Ok(())
@@ -233,7 +258,7 @@ mod tests {
             .to_vec(),
         )?;
 
-        let main_id = compiler.symbols.get_id("compiler_return_check_assoc::main")?;
+        let main_id = compiler.sym_tab.symbols.get_id("compiler_return_check_assoc::main")?;
         assert_eq!(compiler.infer_fn(main_id, &[])?, Type::I32);
         Ok(())
     }
@@ -331,10 +356,10 @@ mod tests {
             .to_vec(),
         )?;
 
-        let can_start = compiler.symbols.get_id("compiler_forward_bool::can_start")?;
+        let can_start = compiler.sym_tab.symbols.get_id("compiler_forward_bool::can_start")?;
         assert_eq!(compiler.infer_fn(can_start, &[])?, Type::Bool);
 
-        let is_ready = compiler.symbols.get_id("compiler_forward_bool::is_ready")?;
+        let is_ready = compiler.sym_tab.symbols.get_id("compiler_forward_bool::is_ready")?;
         assert_eq!(compiler.infer_fn(is_ready, &[])?, Type::Bool);
         Ok(())
     }
@@ -356,10 +381,10 @@ mod tests {
             .to_vec(),
         )?;
 
-        let dynamic_value = compiler.symbols.get_id("compiler_pending_any::dynamic_value")?;
+        let dynamic_value = compiler.sym_tab.symbols.get_id("compiler_pending_any::dynamic_value")?;
         assert_eq!(compiler.infer_fn(dynamic_value, &[Type::Any])?, Type::Any);
 
-        let bool_value = compiler.symbols.get_id("compiler_pending_any::bool_value")?;
+        let bool_value = compiler.sym_tab.symbols.get_id("compiler_pending_any::bool_value")?;
         assert_eq!(compiler.infer_fn(bool_value, &[])?, Type::Bool);
         Ok(())
     }
@@ -387,10 +412,10 @@ mod tests {
             .to_vec(),
         )?;
 
-        let factorial = compiler.symbols.get_id("compiler_recursive_return::factorial")?;
+        let factorial = compiler.sym_tab.symbols.get_id("compiler_recursive_return::factorial")?;
         assert_eq!(compiler.infer_fn(factorial, &[Type::I64])?, Type::I64);
 
-        let factorial_reversed = compiler.symbols.get_id("compiler_recursive_return::factorial_reversed")?;
+        let factorial_reversed = compiler.sym_tab.symbols.get_id("compiler_recursive_return::factorial_reversed")?;
         assert_eq!(compiler.infer_fn(factorial_reversed, &[Type::I64])?, Type::I64);
         Ok(())
     }
@@ -408,7 +433,7 @@ mod tests {
             .to_vec(),
         )?;
 
-        let identity = compiler.symbols.get_id("compiler_generic_identity::identity")?;
+        let identity = compiler.sym_tab.symbols.get_id("compiler_generic_identity::identity")?;
         assert_eq!(compiler.infer_fn(identity, &[Type::I64])?, Type::I64);
         assert_eq!(compiler.infer_fn(identity, &[Type::Bool])?, Type::Bool);
         Ok(())
@@ -427,7 +452,7 @@ mod tests {
             .to_vec(),
         )?;
 
-        let value = compiler.symbols.get_id("compiler_generic_const::value")?;
+        let value = compiler.sym_tab.symbols.get_id("compiler_generic_const::value")?;
         assert_eq!(compiler.infer_fn_with_params(value, &[], &[Type::ConstInt(7)])?, Type::I32);
         Ok(())
     }
@@ -445,7 +470,7 @@ mod tests {
             .to_vec(),
         )?;
 
-        let len = compiler.symbols.get_id("compiler_generic_array_len::len")?;
+        let len = compiler.sym_tab.symbols.get_id("compiler_generic_array_len::len")?;
         assert_eq!(compiler.infer_fn(len, &[Type::Array(std::rc::Rc::new(Type::I32), 3)])?, Type::I32);
         Ok(())
     }
@@ -463,7 +488,7 @@ mod tests {
             .to_vec(),
         )?;
 
-        let value = compiler.symbols.get_id("compiler_generic_uninferred::value")?;
+        let value = compiler.sym_tab.symbols.get_id("compiler_generic_uninferred::value")?;
         let err = compiler.infer_fn(value, &[]).expect_err("generic parameter should not be inferred");
         assert!(format!("{err:#}").contains("无法从实参类型推断函数范型参数"));
         Ok(())
@@ -490,7 +515,7 @@ mod tests {
             .to_vec(),
         )?;
 
-        let sum_list = compiler.symbols.get_id("compiler_dynamic_index_sum::sum_list")?;
+        let sum_list = compiler.sym_tab.symbols.get_id("compiler_dynamic_index_sum::sum_list")?;
         assert_eq!(compiler.infer_fn(sum_list, &[Type::I64])?, Type::I64);
         Ok(())
     }
@@ -523,15 +548,15 @@ mod tests {
             .to_vec(),
         )?;
 
-        let pushed_empty = compiler.symbols.get_id("compiler_list_elem_type::pushed_empty")?;
+        let pushed_empty = compiler.sym_tab.symbols.get_id("compiler_list_elem_type::pushed_empty")?;
         assert_eq!(compiler.infer_fn(pushed_empty, &[])?, Type::I64);
         let hints = compiler.inferred_local_type_hints(pushed_empty, &[], &[]);
         assert_eq!(hints.first().cloned().flatten(), Some(Type::List(std::rc::Rc::new(Type::I64))));
 
-        let ints = compiler.symbols.get_id("compiler_list_elem_type::ints")?;
+        let ints = compiler.sym_tab.symbols.get_id("compiler_list_elem_type::ints")?;
         assert_eq!(compiler.infer_fn(ints, &[])?, Type::Any);
 
-        let mixed_then_int = compiler.symbols.get_id("compiler_list_elem_type::mixed_then_int")?;
+        let mixed_then_int = compiler.sym_tab.symbols.get_id("compiler_list_elem_type::mixed_then_int")?;
         assert_eq!(compiler.infer_fn(mixed_then_int, &[])?, Type::Any);
         let hints = compiler.inferred_local_type_hints(mixed_then_int, &[], &[]);
         assert_eq!(hints.first().cloned().flatten(), None);
@@ -584,6 +609,68 @@ mod tests {
         let msg = format!("{err:#}");
         assert!(msg.contains("未注册函数"), "got: {msg}");
         Ok(())
+    }
+
+    /// Bug #2 回归测试:算术/位/移位运算涉及 Str/Bool 应编译失败。
+    #[test]
+    fn arithmetic_with_string_is_compile_error() {
+        let mut compiler = Compiler::new();
+        let err = compiler
+            .import_code(
+                "arith_str",
+                br#"pub fn main() { let _ = 1i64 - "x"; }"#.to_vec(),
+            )
+            .expect_err("Str - Str should fail");
+        let msg = format!("{err:#}");
+        assert!(msg.contains("不支持 Str/Bool"), "got: {msg}");
+    }
+
+    #[test]
+    fn arithmetic_with_bool_is_compile_error() {
+        let mut compiler = Compiler::new();
+        let err = compiler
+            .import_code(
+                "arith_bool",
+                br#"pub fn main() { let _ = true * false; }"#.to_vec(),
+            )
+            .expect_err("Bool * Bool should fail");
+        let msg = format!("{err:#}");
+        assert!(msg.contains("不支持 Str/Bool"), "got: {msg}");
+    }
+
+    #[test]
+    fn add_with_string_still_allowed() {
+        // Str + 任何 = Str,与动态语义一致,合理保留
+        let mut compiler = Compiler::new();
+        compiler
+            .import_code("add_ok", br#"pub fn main() { let _ = 1i64 + "x"; }"#.to_vec())
+            .expect("Str + Int is allowed");
+    }
+
+    /// Bug #1 回归测试:`import_file` 走 strict 路径,EOF 时不再静默吞错。
+    #[test]
+    fn unclosed_string_in_file_is_reported() {
+        let tmp = std::env::temp_dir().join(format!("zust_compiler_test_{}.zs", std::process::id()));
+        std::fs::write(&tmp, "fn main() { let s = \"unterminated\nfn next() { 1 }").unwrap();
+        let mut compiler = Compiler::new();
+        let err = compiler
+            .import_file("unclosed_str_file", &tmp)
+            .expect_err("unclosed string at EOF should be reported");
+        let msg = format!("{err:#}");
+        assert!(msg.contains("未关闭") || msg.contains("截断"), "got: {msg}");
+        let _ = std::fs::remove_file(&tmp);
+    }
+
+    #[test]
+    fn trailing_whitespace_file_still_parses() {
+        // trailing whitespace + trailing newline 是常见格式,不应误报
+        let tmp = std::env::temp_dir().join(format!("zust_compiler_ws_{}.zs", std::process::id()));
+        std::fs::write(&tmp, "fn main() { 42 }\n   \n").unwrap();
+        let mut compiler = Compiler::new();
+        compiler
+            .import_file("whitespace_ok", &tmp)
+            .expect("trailing whitespace should be allowed");
+        let _ = std::fs::remove_file(&tmp);
     }
 }
 
@@ -851,29 +938,29 @@ pub struct CompilerDiagnostic {
 
 impl Compiler {
     pub fn clear(&mut self) {
-        self.frames.clear();
-        self.names.clear();
-        self.tys.clear();
-        self.list_elem_states.clear();
-        self.arg_counts.clear();
+        self.sym_tab.frames.clear();
+        self.sym_tab.names.clear();
+        self.sym_tab.tys.clear();
+        self.type_ctx.list_elem_states.clear();
+        self.type_ctx.arg_counts.clear();
     }
 
     pub fn take_local_state(&mut self) -> (Vec<usize>, Vec<SmolStr>, Vec<Type>, Vec<Option<ListElemState>>, Vec<usize>) {
-        (std::mem::take(&mut self.frames), std::mem::take(&mut self.names), std::mem::take(&mut self.tys), std::mem::take(&mut self.list_elem_states), std::mem::take(&mut self.arg_counts))
+        (std::mem::take(&mut self.sym_tab.frames), std::mem::take(&mut self.sym_tab.names), std::mem::take(&mut self.sym_tab.tys), std::mem::take(&mut self.type_ctx.list_elem_states), std::mem::take(&mut self.type_ctx.arg_counts))
     }
 
     pub fn restore_local_state(&mut self, state: (Vec<usize>, Vec<SmolStr>, Vec<Type>, Vec<Option<ListElemState>>, Vec<usize>)) {
-        self.frames = state.0;
-        self.names = state.1;
-        self.tys = state.2;
-        self.list_elem_states = state.3;
-        self.arg_counts = state.4;
+        self.sym_tab.frames = state.0;
+        self.sym_tab.names = state.1;
+        self.sym_tab.tys = state.2;
+        self.type_ctx.list_elem_states = state.3;
+        self.type_ctx.arg_counts = state.4;
     }
 
     pub fn get_value(&self, expr: &Expr) -> Option<Dynamic> {
         match &expr.kind {
             ExprKind::Value(v) => Some(v.clone()),
-            ExprKind::Const(idx) => self.consts.get_index(*idx).map(|(_, v)| v.clone()),
+            ExprKind::Const(idx) => self.sym_tab.consts.get_index(*idx).map(|(_, v)| v.clone()),
             _ => None,
         }
     }
@@ -886,10 +973,10 @@ impl Compiler {
         } else {
             format!("{value:?}").into()
         };
-        if let Some((idx, _, _)) = self.consts.get_full(&key) {
+        if let Some((idx, _, _)) = self.sym_tab.consts.get_full(&key) {
             return idx;
         }
-        self.consts.insert_full(key, value).0
+        self.sym_tab.consts.insert_full(key, value).0
     }
 
     fn normalize_self_assign(left: Expr, op: BinaryOp, right: Expr, span: Span, arg_count: usize) -> Expr {
@@ -941,12 +1028,12 @@ impl Compiler {
     }
 
     pub fn top(&self) -> usize {
-        self.frames.last().copied().unwrap_or(0)
+        self.sym_tab.frames.last().copied().unwrap_or(0)
     }
 
     fn add_name(&mut self, name: SmolStr) -> u32 {
-        self.names.push(name);
-        (self.names.len() - self.top() - 1) as u32
+        self.sym_tab.names.push(name);
+        (self.sym_tab.names.len() - self.top() - 1) as u32
     }
 
     fn list_elem_state_for_ty(ty: &Type) -> Option<ListElemState> {
@@ -958,21 +1045,21 @@ impl Compiler {
     }
 
     pub(crate) fn list_elem_state(&self, idx: u32) -> Option<ListElemState> {
-        self.list_elem_states.get(self.top() + idx as usize).cloned().flatten()
+        self.type_ctx.list_elem_states.get(self.top() + idx as usize).cloned().flatten()
     }
 
     pub(crate) fn set_list_elem_state(&mut self, idx: u32, state: Option<ListElemState>) {
         let pos = idx as usize + self.top();
-        if self.list_elem_states.len() <= pos {
-            self.list_elem_states.resize(pos + 1, None);
+        if self.type_ctx.list_elem_states.len() <= pos {
+            self.type_ctx.list_elem_states.resize(pos + 1, None);
         }
-        self.list_elem_states[pos] = state;
+        self.type_ctx.list_elem_states[pos] = state;
     }
 
     fn add_ty(&mut self, ty: Type) -> u32 {
-        self.list_elem_states.push(Self::list_elem_state_for_ty(&ty));
-        self.tys.push(ty);
-        (self.tys.len() - self.top() - 1) as u32
+        self.type_ctx.list_elem_states.push(Self::list_elem_state_for_ty(&ty));
+        self.sym_tab.tys.push(ty);
+        (self.sym_tab.tys.len() - self.top() - 1) as u32
     }
 
     /// 分配一个匿名临时变量槽,同时 push `names` 和 `tys` 保持对齐。
@@ -984,48 +1071,34 @@ impl Compiler {
     /// —— 表现为 list/tuple 解构的临时数组槽被后续 `let` 复用,JIT verifier
     /// 报 "invalid pointer width"。临时变量一律走这个入口。
     fn add_temp(&mut self, ty: Type) -> u32 {
-        self.names.push(SmolStr::new_static(""));
-        self.list_elem_states.push(Self::list_elem_state_for_ty(&ty));
-        self.tys.push(ty);
-        (self.tys.len() - self.top() - 1) as u32
+        self.sym_tab.names.push(SmolStr::new_static(""));
+        self.type_ctx.list_elem_states.push(Self::list_elem_state_for_ty(&ty));
+        self.sym_tab.tys.push(ty);
+        (self.sym_tab.tys.len() - self.top() - 1) as u32
     }
 
     fn set_ty(&mut self, idx: u32, ty: Type) {
         let pos = idx as usize + self.top();
-        if self.list_elem_states.len() <= pos {
-            self.list_elem_states.resize(pos + 1, None);
+        if self.type_ctx.list_elem_states.len() <= pos {
+            self.type_ctx.list_elem_states.resize(pos + 1, None);
         }
-        self.list_elem_states[pos] = Self::list_elem_state_for_ty(&ty);
-        if pos < self.tys.len() {
-            self.tys[pos] = ty;
-        } else if pos == self.tys.len() {
-            self.tys.push(ty);
+        self.type_ctx.list_elem_states[pos] = Self::list_elem_state_for_ty(&ty);
+        if pos < self.sym_tab.tys.len() {
+            self.sym_tab.tys[pos] = ty;
+        } else if pos == self.sym_tab.tys.len() {
+            self.sym_tab.tys.push(ty);
         } else {
-            self.tys.resize(pos + 1, Type::Any);
-            self.tys[pos] = ty;
+            self.sym_tab.tys.resize(pos + 1, Type::Any);
+            self.sym_tab.tys[pos] = ty;
         }
     }
 
     pub fn add_symbol(&mut self, name: &str, s: Symbol) -> u32 {
-        self.symbols.add(name.into(), s)
+        self.sym_tab.symbols.add(name.into(), s)
     }
 
     pub fn new() -> Self {
-        let symbols = SymbolTable::default();
-        Self {
-            symbols,
-            tys: Vec::new(),
-            names: Vec::new(),
-            consts: IndexMap::with_capacity(10240),
-            frames: Vec::new(),
-            list_elem_states: Vec::new(),
-            arg_counts: Vec::new(),
-            fns: BTreeMap::new(),
-            local_type_hints: BTreeMap::new(),
-            infer_stack: Vec::new(),
-            importing_paths: BTreeSet::new(),
-            source_files: BTreeMap::new(),
-        }
+        Self::default()
     }
 
     fn byte_to_line_col(src: &[u8], pos: usize) -> (usize, usize) {
@@ -1078,7 +1151,7 @@ impl Compiler {
 
     pub fn format_source_span(&self, fn_name: &str, span: Span, message: &str) -> String {
         let module = fn_name.split_once("::").map(|(module, _)| module).unwrap_or(fn_name);
-        let Some(source) = self.source_files.get(module) else {
+        let Some(source) = self.io.source_files.get(module) else {
             return format!("{fn_name}: 字节偏移 {}：{message}", span.start);
         };
         let code = source.code.as_ref();
@@ -1109,12 +1182,48 @@ impl Compiler {
         }
     }
 
+    /// 严格模式解析:`import_file` 走这里。文件末尾遇到 EOF 时的错误
+    /// (未关闭字符串、未关闭块、未关闭括号等) 必须透传给用户,而不是静默丢弃。
+    /// partial 输入 (`import_source` / `import_code`) 仍走 `parse_code`。
+    pub fn parse_code_strict(code: Vec<u8>) -> Result<Vec<Stmt>> {
+        let mut p = Parser::new(code.clone());
+        let mut stmts = Vec::new();
+        loop {
+            match p.stmt(false) {
+                Ok(stmt) => stmts.push(stmt),
+                Err(e) => {
+                    // strict 模式:即使在 EOF,也不吞错误,把"未关闭"等结构错误透传
+                    let pos = e.downcast_ref::<parser::SpannedParseError>().map(|s| s.pos).or_else(|| e.downcast_ref::<parser::ParserErr>().map(|s| s.span().start)).unwrap_or_else(|| p.current_pos());
+                    let (line, col) = Self::byte_to_line_col(&code, pos);
+                    let raw = format!("{e:#}");
+                    if p.is_eof() {
+                        // EOF 处的错误:区分 "真正的未关闭结构" vs "末尾自然 EOF"
+                        // - 如果原始错误是 "未关闭字符串/未关闭块/unclosed",这是真未闭合
+                        // - 如果原始错误是 "输入结束"(来自 get() 在 EOF 处) 且 stmts 非空,
+                        //   说明最后一个 stmt 已完整结束,只是末尾多了一段空白后遇到 EOF,这是允许的
+                        // - 如果 stmts 为空且 EOF 报错,说明整个文件只有部分内容,可能是被截断的源码
+                        if raw.contains("未关闭") || raw.contains("unclosed") {
+                            return Err(anyhow!("解析错误：第 {line} 行，第 {col} 列（字节偏移 {pos}）：{raw}\n{}", p.error_stmt()));
+                        }
+                        if raw.contains("输入结束") && !stmts.is_empty() {
+                            // 末尾自然 EOF,允许
+                            return Ok(stmts);
+                        }
+                        // 其他情况:报错,但提示是"未关闭/截断"
+                        return Err(anyhow!("解析错误：第 {line} 行，第 {col} 列（字节偏移 {pos}）：文件末尾有未关闭或截断的语法结构 (原始错误: {raw})\n{}", p.error_stmt()));
+                    }
+                    return Err(anyhow!("解析错误：第 {line} 行，第 {col} 列（字节偏移 {pos}）：{raw}\n{}", p.error_stmt()));
+                }
+            }
+        }
+    }
+
     pub fn parse_source(source: &str) -> Result<Vec<Stmt>> {
         Self::parse_code(source.as_bytes().to_vec())
     }
 
     pub fn import_code(&mut self, name: &str, code: Vec<u8>) -> Result<Vec<u32>> {
-        self.import_code_with_source(name, code, None, None)
+        self.import_code_with_source(name, code, None, None, false)
     }
 
     pub fn import_source(&mut self, name: &str, source: &str) -> Result<Vec<u32>> {
@@ -1123,24 +1232,24 @@ impl Compiler {
 
     pub fn import_code_from_path(&mut self, name: &str, code: Vec<u8>, path: impl AsRef<Path>) -> Result<Vec<u32>> {
         let path = path.as_ref();
-        self.import_code_with_source(name, code, path.parent(), Some(path))
+        self.import_code_with_source(name, code, path.parent(), Some(path), true)
     }
 
     pub fn import_file(&mut self, name: &str, path: impl AsRef<Path>) -> Result<Vec<u32>> {
         let path = path.as_ref();
         let canonical = std::fs::canonicalize(path).with_context(|| format!("failed to resolve import path {}", path.display()))?;
-        if !self.importing_paths.insert(canonical.clone()) {
+        if !self.io.importing_paths.insert(canonical.clone()) {
             return Ok(Vec::new());
         }
         let code = std::fs::read(&canonical).with_context(|| format!("failed to read import path {}", canonical.display()))?;
         let result = self.import_code_from_path(name, code, &canonical);
-        self.importing_paths.remove(&canonical);
+        self.io.importing_paths.remove(&canonical);
         result
     }
 
-    fn import_code_with_source(&mut self, name: &str, code: Vec<u8>, base_dir: Option<&Path>, source_path: Option<&Path>) -> Result<Vec<u32>> {
-        self.source_files.insert(name.into(), SourceFile { path: source_path.map(Path::to_path_buf), code: Arc::new(code.clone()) });
-        let stmts = Self::parse_code(code.clone())?;
+    fn import_code_with_source(&mut self, name: &str, code: Vec<u8>, base_dir: Option<&Path>, source_path: Option<&Path>, strict: bool) -> Result<Vec<u32>> {
+        self.io.source_files.insert(name.into(), SourceFile { path: source_path.map(Path::to_path_buf), code: Arc::new(code.clone()) });
+        let stmts = if strict { Self::parse_code_strict(code.clone())? } else { Self::parse_code(code.clone())? };
         log::debug!("func->{}", name);
         for s in stmts.iter() {
             log::debug!("{}", s);
@@ -1155,7 +1264,7 @@ impl Compiler {
             let Some((module, path)) = import_decl(stmt) else {
                 continue;
             };
-            if !self.symbols.symbol(module.as_str()).is_empty() {
+            if !self.sym_tab.symbols.symbol(module.as_str()).is_empty() {
                 continue;
             }
             let path = Path::new(path.as_str());
@@ -1201,17 +1310,17 @@ impl Compiler {
     }
 
     pub fn get_field(&self, ty: &Type, name: &str) -> Result<(usize, Type)> {
-        self.symbols.get_field(ty, name)
+        self.sym_tab.symbols.get_field(ty, name)
     }
 
     pub fn get_ident(&mut self, ident: &str, span: Span) -> Result<Expr> {
-        for idx in (self.top()..self.names.len()).rev() {
-            if self.names[idx].eq(ident) {
+        for idx in (self.top()..self.sym_tab.names.len()).rev() {
+            if self.sym_tab.names[idx].eq(ident) {
                 return Ok(Expr::new(ExprKind::Var((idx - self.top()) as u32), span));
             }
         }
-        let id = self.symbols.get_id(ident).map_err(|_| Self::semantic_error(span, format!("未找到标识符 {}", ident)))?;
-        let s = self.symbols.get_symbol(id).map(|(_, v)| v.clone()).unwrap();
+        let id = self.sym_tab.symbols.get_id(ident).map_err(|_| Self::semantic_error(span, format!("未找到标识符 {}", ident)))?;
+        let s = self.sym_tab.symbols.get_symbol(id).map(|(_, v)| v.clone()).unwrap();
         if let Symbol::Const { value, ty, .. } = s {
             let c = self.get_const(value);
             return Ok(Expr::new(ExprKind::Typed { value: Box::new(Expr::new(ExprKind::Const(c), span)), ty }, span));
@@ -1252,10 +1361,10 @@ impl Compiler {
     }
 
     fn global_method_access_expr(&self, left: Expr, method: &str, span: Span) -> Result<Option<Expr>> {
-        let Ok(id) = self.symbols.get_id(method) else {
+        let Ok(id) = self.sym_tab.symbols.get_id(method) else {
             return Ok(None);
         };
-        if self.symbols.get_symbol(id)?.1.is_fn() { Ok(Some(Expr::new(ExprKind::Id(id, Some(Box::new(left))), span))) } else { Ok(None) }
+        if self.sym_tab.symbols.get_symbol(id)?.1.is_fn() { Ok(Some(Expr::new(ExprKind::Id(id, Some(Box::new(left))), span))) } else { Ok(None) }
     }
 
     fn method_call_obj_expr(&mut self, obj: &Expr, stmts: &mut Vec<Stmt>, cap: &mut Capture) -> Result<Option<Expr>> {
@@ -1263,11 +1372,11 @@ impl Compiler {
             let left = self.eval(left, stmts, cap)?;
             let base_name = match ty {
                 Type::Ident { name, .. } => name.clone(),
-                Type::Symbol { id, .. } => self.symbols.get_symbol(*id)?.0.clone(),
+                Type::Symbol { id, .. } => self.sym_tab.symbols.get_symbol(*id)?.0.clone(),
                 _ => return Err(Self::semantic_error(obj.span, format!("方法调用类型提示必须是类型: {:?}", ty))),
             };
             let method = format!("{}::{}", base_name, name);
-            let id = self.symbols.get_id(&method).map_err(|_| Self::semantic_error(obj.span, format!("未找到类型方法 {}", method)))?;
+            let id = self.sym_tab.symbols.get_id(&method).map_err(|_| Self::semantic_error(obj.span, format!("未找到类型方法 {}", method)))?;
             return Ok(Some(Expr::new(ExprKind::Id(id, Some(Box::new(left))), obj.span)));
         }
 
@@ -1288,17 +1397,17 @@ impl Compiler {
     }
 
     pub fn compile_fn(&mut self, args: &[SmolStr], tys: &mut Vec<Type>, body: Stmt, cap: &mut Capture) -> Result<Vec<Stmt>> {
-        let top = self.tys.len();
-        self.frames.push(top);
-        self.arg_counts.push(args.len());
+        let top = self.sym_tab.tys.len();
+        self.sym_tab.frames.push(top);
+        self.type_ctx.arg_counts.push(args.len());
         let result = (|| -> Result<Vec<Stmt>> {
             for (arg, ty) in args.iter().zip(tys.iter_mut()) {
-                *ty = self.symbols.get_type(ty)?;
+                *ty = self.sym_tab.symbols.get_type(ty)?;
                 self.add_name(arg.clone());
                 self.add_ty(ty.clone());
             }
             if cap.names.is_empty() && tys.iter().all(|ty| !ty.is_any()) {
-                let saved_state = (self.frames.clone(), self.names.clone(), self.tys.clone(), self.list_elem_states.clone(), self.arg_counts.clone());
+                let saved_state = (self.sym_tab.frames.clone(), self.sym_tab.names.clone(), self.sym_tab.tys.clone(), self.type_ctx.list_elem_states.clone(), self.type_ctx.arg_counts.clone());
                 let result = self.check_return_type(&body);
                 self.restore_local_state(saved_state);
                 result?;
@@ -1310,40 +1419,40 @@ impl Compiler {
             }
             Ok(compiled)
         })();
-        if let Some(top) = self.frames.pop() {
-            self.tys.truncate(top);
-            self.names.truncate(top);
-            self.list_elem_states.truncate(top);
+        if let Some(top) = self.sym_tab.frames.pop() {
+            self.sym_tab.tys.truncate(top);
+            self.sym_tab.names.truncate(top);
+            self.type_ctx.list_elem_states.truncate(top);
         }
-        self.arg_counts.pop();
+        self.type_ctx.arg_counts.pop();
         result
     }
 
     pub fn compile(&mut self, mod_name: SmolStr, stmts: Vec<Stmt>) -> Result<Vec<u32>> {
-        self.symbols.add_module(mod_name.clone());
+        self.sym_tab.symbols.add_module(mod_name.clone());
         for stmt in stmts {
             match stmt.kind {
                 StmtKind::Struct { name, def, is_pub } => {
-                    self.symbols.add(name, Symbol::Struct(def, is_pub));
+                    self.sym_tab.symbols.add(name, Symbol::Struct(def, is_pub));
                 }
                 StmtKind::Static { name, ty, value, is_pub } => {
                     let value = value.map(|value| self.const_expr_value(&value)).transpose()?;
-                    self.symbols.add(name, Symbol::Static { value, ty, is_pub });
+                    self.sym_tab.symbols.add(name, Symbol::Static { value, ty, is_pub });
                 }
                 StmtKind::Const { name, ty, value, is_pub } => {
                     let value = self.const_expr_value(&value)?;
                     let ty = if ty.is_any() { value.get_type() } else { ty };
-                    self.symbols.add(name, Symbol::Const { value, ty, is_pub });
+                    self.sym_tab.symbols.add(name, Symbol::Const { value, ty, is_pub });
                 }
                 StmtKind::Fn { name, generic_params, args, body, is_pub } => {
                     let (ty, args) = Type::from_args(args);
-                    self.symbols.add(name, Symbol::Fn { ty, args, generic_params, cap: Capture::default(), body: Arc::new(*body), is_pub });
+                    self.sym_tab.symbols.add(name, Symbol::Fn { ty, args, generic_params, cap: Capture::default(), body: Arc::new(*body), is_pub });
                 }
                 StmtKind::Impl { target, body } => {
                     let name = impl_target_name(&target)?;
-                    let def_id = match self.symbols.get_id(&name) {
+                    let def_id = match self.sym_tab.symbols.get_id(&name) {
                         Ok(id) => id,
-                        Err(_) if name.as_str() == "Vec" => self.symbols.add(name.clone(), Symbol::Struct(Type::Struct { params: Vec::new(), fields: Vec::new() }, true)),
+                        Err(_) if name.as_str() == "Vec" => self.sym_tab.symbols.add(name.clone(), Symbol::Struct(Type::Struct { params: Vec::new(), fields: Vec::new() }, true)),
                         Err(err) => return Err(err),
                     };
                     if let StmtKind::Block(fns) = body.kind {
@@ -1363,8 +1472,8 @@ impl Compiler {
                                         generic_params.push(param);
                                     }
                                 }
-                                let fn_id = self.symbols.add(SmolStr::from(format!("{}::{}", name, fn_name)), Symbol::Fn { ty, args, generic_params, cap: Capture::default(), body: Arc::new(*body), is_pub });
-                                if let Symbol::Struct(ty, _) = &mut self.symbols.symbols[def_id as usize] {
+                                let fn_id = self.sym_tab.symbols.add(SmolStr::from(format!("{}::{}", name, fn_name)), Symbol::Fn { ty, args, generic_params, cap: Capture::default(), body: Arc::new(*body), is_pub });
+                                if let Symbol::Struct(ty, _) = &mut self.sym_tab.symbols.symbols[def_id as usize] {
                                     ty.add_field(fn_name.into(), Type::Symbol { id: fn_id, params: Vec::new() })?;
                                 }
                             } else {
@@ -1379,28 +1488,28 @@ impl Compiler {
             }
         }
         let mut fn_ids = Vec::new();
-        for (name, id) in self.symbols.symbol(&mod_name) {
+        for (name, id) in self.sym_tab.symbols.symbol(&mod_name) {
             log::debug!("compile symbol {:?}[{}]", name, id);
-            if let Some((_, Symbol::Fn { ty, generic_params, .. })) = self.symbols.get_symbol(id).ok() {
-                let resolved_ty = self.symbols.get_type(ty).unwrap_or_else(|_| ty.clone());
+            if let Some((_, Symbol::Fn { ty, generic_params, .. })) = self.sym_tab.symbols.get_symbol(id).ok() {
+                let resolved_ty = self.sym_tab.symbols.get_type(ty).unwrap_or_else(|_| ty.clone());
                 if has_unresolved_generic_param(&resolved_ty) || !generic_params.is_empty() {
                     continue;
                 }
             }
-            if let Some(s) = self.symbols.get_symbol(id).ok().map(|(_, symbol)| symbol.clone()) {
+            if let Some(s) = self.sym_tab.symbols.get_symbol(id).ok().map(|(_, symbol)| symbol.clone()) {
                 if let Symbol::Fn { ty, args, generic_params, mut cap, body, is_pub } = s {
                     if let Type::Fn { mut tys, ret } = ty {
                         let compiled = self.compile_fn(&args, &mut tys, body.as_ref().clone(), &mut cap)?;
                         for s in compiled.iter() {
                             log::debug!("{}", s);
                         }
-                        self.symbols.symbols[id as usize] = Symbol::Fn { ty: Type::Fn { tys, ret }, args, generic_params, cap, body: Arc::new(Stmt::new(StmtKind::Block(compiled), Span::default())), is_pub };
+                        self.sym_tab.symbols.symbols[id as usize] = Symbol::Fn { ty: Type::Fn { tys, ret }, args, generic_params, cap, body: Arc::new(Stmt::new(StmtKind::Block(compiled), Span::default())), is_pub };
                         fn_ids.push(id);
                     }
                 }
             }
         }
-        self.symbols.pop_module();
+        self.sym_tab.symbols.pop_module();
         Ok(fn_ids)
     }
 
@@ -1408,7 +1517,7 @@ impl Compiler {
         match pat.kind {
             PatternKind::Var { idx, ty } => Ok(Pattern { kind: PatternKind::Var { idx, ty }, span: pat.span }),
             PatternKind::Ident { name, ty } => {
-                let ty = self.symbols.get_type(&ty)?;
+                let ty = self.sym_tab.symbols.get_type(&ty)?;
                 let ty = if ty.is_any() { expr_ty } else { ty };
                 self.add_ty(ty.clone());
                 Ok(Pattern { kind: PatternKind::Var { idx: self.add_name(name), ty }, span: pat.span })
@@ -1588,7 +1697,7 @@ impl Compiler {
     fn static_literal_value(&self, expr: &Expr) -> Result<Option<Dynamic>> {
         match &expr.kind {
             ExprKind::Value(value) => Ok(Some(value.clone())),
-            ExprKind::Const(idx) => Ok(self.consts.get_index(*idx).map(|(_, v)| v.clone())),
+            ExprKind::Const(idx) => Ok(self.sym_tab.consts.get_index(*idx).map(|(_, v)| v.clone())),
             ExprKind::Typed { value, ty } if ty.is_native() => Ok(self.static_literal_value(value)?.map(|value| ty.force(value)).transpose()?),
             _ => self.static_composite_literal(expr),
         }
@@ -1597,10 +1706,10 @@ impl Compiler {
     fn const_expr_value(&self, expr: &Expr) -> Result<Dynamic> {
         match &expr.kind {
             ExprKind::Value(value) => Ok(value.clone()),
-            ExprKind::Const(idx) => self.consts.get_index(*idx).map(|(_, v)| v.clone()).ok_or_else(|| Self::semantic_error(expr.span, format!("常量索引 {} 不存在", idx))),
+            ExprKind::Const(idx) => self.sym_tab.consts.get_index(*idx).map(|(_, v)| v.clone()).ok_or_else(|| Self::semantic_error(expr.span, format!("常量索引 {} 不存在", idx))),
             ExprKind::Ident(ident) => {
-                let id = self.symbols.get_id(ident).map_err(|_| Self::semantic_error(expr.span, format!("未找到常量 {}", ident)))?;
-                match self.symbols.get_symbol(id).map(|(_, symbol)| symbol) {
+                let id = self.sym_tab.symbols.get_id(ident).map_err(|_| Self::semantic_error(expr.span, format!("未找到常量 {}", ident)))?;
+                match self.sym_tab.symbols.get_symbol(id).map(|(_, symbol)| symbol) {
                     Ok(Symbol::Const { value, .. }) => Ok(value.clone()),
                     Ok(Symbol::Static { value: Some(value), .. }) => Ok(value.clone()),
                     _ => Err(Self::semantic_error(expr.span, format!("{} 不是可用于 const 的静态值", ident))),
@@ -1652,7 +1761,7 @@ impl Compiler {
             ExprKind::Closure { args, body } => {
                 let (mut names, mut tys): (Vec<SmolStr>, Vec<Type>) = args.clone().into_iter().unzip();
                 let top = self.top();
-                let mut cap_vars: Vec<(SmolStr, Type)> = self.names[top..].iter().zip(self.tys[top..].iter()).map(|(n, ty)| (n.clone(), ty.clone())).collect();
+                let mut cap_vars: Vec<(SmolStr, Type)> = self.sym_tab.names[top..].iter().zip(self.sym_tab.tys[top..].iter()).map(|(n, ty)| (n.clone(), ty.clone())).collect();
                 let parent_cap_start = cap_vars.len();
                 cap_vars.extend(cap.names.iter().cloned());
                 let mut local_cap = Capture::new(cap_vars);
@@ -1668,7 +1777,7 @@ impl Compiler {
                 let (ty, args) = Type::from_args(args.clone());
                 let body_stmt = if compiled.len() == 1 { compiled.pop().unwrap() } else { Stmt::new(StmtKind::Block(compiled), expr.span) };
                 let name = SmolStr::from(format!("__closure_{}_{}", expr.span.start, expr.span.end));
-                let fn_id = self.symbols.add(name, Symbol::Fn { ty, args, generic_params: Vec::new(), cap: local_cap, body: Arc::new(body_stmt), is_pub: false });
+                let fn_id = self.sym_tab.symbols.add(name, Symbol::Fn { ty, args, generic_params: Vec::new(), cap: local_cap, body: Arc::new(body_stmt), is_pub: false });
                 Ok(Expr::new(ExprKind::Id(fn_id, None), expr.span))
             }
             ExprKind::Value(v) => {
@@ -1679,7 +1788,7 @@ impl Compiler {
                 }
             }
             ExprKind::Typed { value, ty } => {
-                let ty = self.symbols.get_type(ty)?;
+                let ty = self.sym_tab.symbols.get_type(ty)?;
                 if let Type::Struct { fields, .. } = &ty
                     && let ExprKind::Dict(dict) = &value.kind
                 {
@@ -1741,8 +1850,8 @@ impl Compiler {
             }
             ExprKind::Ident(ident) => {
                 // 局部变量 → 捕获变量 → 全局符号
-                for idx in (self.top()..self.names.len()).rev() {
-                    if self.names[idx].eq(ident) {
+                for idx in (self.top()..self.sym_tab.names.len()).rev() {
+                    if self.sym_tab.names[idx].eq(ident) {
                         return Ok(Expr::new(ExprKind::Var((idx - self.top()) as u32), expr.span));
                     }
                 }
@@ -1753,7 +1862,7 @@ impl Compiler {
             }
             ExprKind::Generic { obj, params } => {
                 let obj = self.eval(obj, stmts, cap)?;
-                let params = params.iter().map(|param| self.symbols.get_type(param).unwrap_or_else(|_| param.clone())).collect();
+                let params = params.iter().map(|param| self.sym_tab.symbols.get_type(param).unwrap_or_else(|_| param.clone())).collect();
                 match obj.kind {
                     ExprKind::Id(id, None) | ExprKind::AssocId { id, .. } => Ok(Expr::new(ExprKind::AssocId { id, params }, expr.span)),
                     _ => Err(Self::semantic_error(expr.span, format!("范型参数只能用于函数或关联函数调用: {:?}", obj))),
@@ -1762,12 +1871,12 @@ impl Compiler {
             ExprKind::Assoc { ty, name } => {
                 let base_name = match ty {
                     Type::Ident { name, .. } => name.clone(),
-                    Type::Symbol { id, .. } => self.symbols.get_symbol(*id)?.0.clone(),
+                    Type::Symbol { id, .. } => self.sym_tab.symbols.get_symbol(*id)?.0.clone(),
                     _ => return Err(Self::semantic_error(expr.span, format!("关联函数目标必须是类型: {:?}", ty))),
                 };
-                let id = self.symbols.get_id(&format!("{}::{}", base_name, name)).map_err(|_| Self::semantic_error(expr.span, format!("未找到关联函数 {}::{}", base_name, name)))?;
+                let id = self.sym_tab.symbols.get_id(&format!("{}::{}", base_name, name)).map_err(|_| Self::semantic_error(expr.span, format!("未找到关联函数 {}::{}", base_name, name)))?;
                 let params = match ty {
-                    Type::Ident { params, .. } | Type::Symbol { params, .. } => params.iter().map(|param| self.symbols.get_type(param).unwrap_or_else(|_| param.clone())).collect(),
+                    Type::Ident { params, .. } | Type::Symbol { params, .. } => params.iter().map(|param| self.sym_tab.symbols.get_type(param).unwrap_or_else(|_| param.clone())).collect(),
                     _ => Vec::new(),
                 };
                 Ok(Expr::new(ExprKind::AssocId { id, params }, expr.span))
@@ -1815,7 +1924,7 @@ impl Compiler {
                     }
                 }
                 let right = self.eval(right, stmts, cap)?;
-                let value = Self::normalize_self_assign(left, op.clone(), right, expr.span, self.arg_counts.last().copied().unwrap_or(0));
+                let value = Self::normalize_self_assign(left, op.clone(), right, expr.span, self.type_ctx.arg_counts.last().copied().unwrap_or(0));
                 if let Some(v) = value.compact() { Ok(Expr::new(ExprKind::Value(v), expr.span)) } else { Ok(value) }
             }
             ExprKind::Call { obj, params } => {
@@ -1859,7 +1968,7 @@ impl Compiler {
                 Ok(self.dyn_init(list, stmts, items, Type::Any))
             }
             ExprKind::Repeat { value, len } => {
-                let len = self.symbols.get_type(len)?;
+                let len = self.sym_tab.symbols.get_type(len)?;
                 let Type::ConstInt(len) = len else {
                     return Err(Self::semantic_error(expr.span, format!("重复数组长度必须是编译期整数: {:?}", len)));
                 };
@@ -1922,7 +2031,7 @@ impl Compiler {
                 }
                 let value = *value;
                 let annotated_ty = if let PatternKind::Ident { ty, .. } = &pat.kind {
-                    let ty = self.symbols.get_type(ty)?;
+                    let ty = self.sym_tab.symbols.get_type(ty)?;
                     if ty.is_any() { None } else { Some(ty) }
                 } else {
                     None
@@ -1987,7 +2096,7 @@ impl Compiler {
                 if let Type::Fn { mut tys, ret } = ty {
                     let mut fn_cap = Capture::default();
                     let compiled_body = self.compile_fn(&args, &mut tys, *body, &mut fn_cap)?;
-                    self.symbols.add(name, Symbol::Fn { ty: Type::Fn { tys, ret }, args, generic_params, cap: fn_cap, body: Arc::new(Stmt::new(StmtKind::Block(compiled_body), stmt_span)), is_pub });
+                    self.sym_tab.symbols.add(name, Symbol::Fn { ty: Type::Fn { tys, ret }, args, generic_params, cap: fn_cap, body: Arc::new(Stmt::new(StmtKind::Block(compiled_body), stmt_span)), is_pub });
                 } else {
                     panic!("nested functions are not supported here")
                 }

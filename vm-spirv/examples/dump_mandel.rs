@@ -11,8 +11,8 @@ fn main() -> Result<()> {
     for ext in spirv_builtins() {
         let native = Symbol::native(ext.arg_tys, ext.ret_ty);
         if let Some((module, name)) = ext.full_name.split_once("::") {
-            compiler.symbols.add_module(module.into());
-            let _ = compiler.symbols.add_to_module(module, name.into(), native);
+            compiler.sym_tab.symbols.add_module(module.into());
+            let _ = compiler.sym_tab.symbols.add_to_module(module, name.into(), native);
         } else {
             compiler.add_symbol(&ext.full_name, native);
         }
@@ -23,9 +23,9 @@ fn main() -> Result<()> {
     let id = if let Ok(id) = std::env::var("MANDEL_ID") {
         id.parse().with_context(|| format!("parse MANDEL_ID={id:?}"))?
     } else {
-        compiler.symbols.get_id(&full_name).or_else(|_| compiler.symbols.get_id(&fn_name)).with_context(|| format!("function {full_name} not found"))?
+        compiler.sym_tab.symbols.get_id(&full_name).or_else(|_| compiler.sym_tab.symbols.get_id(&fn_name)).with_context(|| format!("function {full_name} not found"))?
     };
-    let symbol = compiler.symbols.get_symbol(id)?.1.clone();
+    let symbol = compiler.sym_tab.symbols.get_symbol(id)?.1.clone();
     let Symbol::Fn { ty, args, generic_params, cap, body, is_pub } = symbol else {
         anyhow::bail!("{full_name} is not a function");
     };

@@ -47,7 +47,7 @@ impl MetalCompiler {
     }
 
     pub(crate) fn resolve_type(&self, ty: &Type) -> Type {
-        let ty = self.compiler.symbols.get_type(ty).unwrap_or_else(|_| ty.clone());
+        let ty = self.compiler.sym_tab.symbols.get_type(ty).unwrap_or_else(|_| ty.clone());
         resolve_type_in_defs(&ty, &self.type_defs)
     }
 

@@ -18,7 +18,7 @@ impl SpirvCompiler {
         match &expr.kind {
             ExprKind::Value(value) => self.const_dynamic(value.clone()),
             ExprKind::Const(idx) => {
-                let value = self.compiler.consts.get_index(*idx).map(|(_, v)| v.clone()).ok_or_else(|| anyhow!("compiler constant index {idx} is not available in this SPIR-V context"))?;
+                let value = self.compiler.sym_tab.consts.get_index(*idx).map(|(_, v)| v.clone()).ok_or_else(|| anyhow!("compiler constant index {idx} is not available in this SPIR-V context"))?;
                 self.const_dynamic(value)
             }
             ExprKind::Typed { value, ty } => {
@@ -75,7 +75,7 @@ impl SpirvCompiler {
                 if let Type::Array(elem_ty, len) | Type::Vec(elem_ty, len) = &ty {
                     let raw_items = match &value.kind {
                         ExprKind::Value(Dynamic::List(items)) => Some(items.read().clone()),
-                        ExprKind::Const(idx) => self.compiler.consts.get_index(*idx).and_then(|(_, v)| match v {
+                        ExprKind::Const(idx) => self.compiler.sym_tab.consts.get_index(*idx).and_then(|(_, v)| match v {
                             Dynamic::List(items) => Some(items.read().clone()),
                             _ => None,
                         }),
@@ -327,7 +327,7 @@ impl SpirvCompiler {
         }
         let actual_arg_tys = args.iter().map(|arg| arg.ty.clone()).collect::<Vec<_>>();
         let ret_ty = self.compiler.infer_fn_with_params(id, &actual_arg_tys, generic_args)?;
-        let ret_ty = self.resolve_type(&self.compiler.symbols.get_type(&ret_ty)?);
+        let ret_ty = self.resolve_type(&self.compiler.sym_tab.symbols.get_type(&ret_ty)?);
         let mut compile_tys = arg_tys;
         let saved_state = self.compiler.take_local_state();
         let compiled_body = self.compiler.compile_fn(&user_fn.arg_names, &mut compile_tys, body, &mut Capture::default());
@@ -337,7 +337,7 @@ impl SpirvCompiler {
             let saved_state = self.compiler.take_local_state();
             let inferred = self.compiler.infer_stmt(&body);
             self.compiler.restore_local_state(saved_state);
-            self.resolve_type(&self.compiler.symbols.get_type(&inferred?)?)
+            self.resolve_type(&self.compiler.sym_tab.symbols.get_type(&inferred?)?)
         } else {
             ret_ty
         };

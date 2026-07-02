@@ -1,4 +1,4 @@
-use super::{JITRunTime, context::BuildContext};
+use super::{BuiltinFn, JITRunTime, context::BuildContext};
 use cranelift::prelude::*;
 use dynamic::{Dynamic, Type};
 use parser::{BinaryOp, Expr};
@@ -7,21 +7,21 @@ use anyhow::{Result, anyhow};
 
 impl JITRunTime {
     fn strcat(&mut self, ctx: &mut BuildContext, left: Value, right: Value) -> Result<Value> {
-        let fn_id = self.strcat_fn.ok_or_else(|| anyhow!("VM strcat runtime is not registered"))?;
+        let fn_id = self.builtin_fns.get_or_err(BuiltinFn::Strcat)?;
         let fn_ref = self.get_fn_ref(ctx, fn_id);
         let call_inst = ctx.builder.ins().call(fn_ref, &[left, right]);
         Ok(ctx.builder.inst_results(call_inst)[0])
     }
 
     fn strcat_i64(&mut self, ctx: &mut BuildContext, left: Value, right: Value) -> Result<Value> {
-        let fn_id = self.strcat_i64_fn.ok_or_else(|| anyhow!("VM strcat i64 runtime is not registered"))?;
+        let fn_id = self.builtin_fns.get_or_err(BuiltinFn::StrcatI64)?;
         let fn_ref = self.get_fn_ref(ctx, fn_id);
         let call_inst = ctx.builder.ins().call(fn_ref, &[left, right]);
         Ok(ctx.builder.inst_results(call_inst)[0])
     }
 
     fn strcat_assign(&mut self, ctx: &mut BuildContext, left: Value, right: Value) -> Result<Value> {
-        let fn_id = self.strcat_assign_fn.ok_or_else(|| anyhow!("VM strcat assign runtime is not registered"))?;
+        let fn_id = self.builtin_fns.get_or_err(BuiltinFn::StrcatAssign)?;
         let fn_ref = self.get_fn_ref(ctx, fn_id);
         let call_inst = ctx.builder.ins().call(fn_ref, &[left, right]);
         Ok(ctx.builder.inst_results(call_inst)[0])
@@ -47,7 +47,7 @@ impl JITRunTime {
             return Err(anyhow!("不是结构体 {:?}", ty));
         };
         let ty_ptr = Self::type_ptr_const(ctx, ty);
-        let fn_id = self.struct_from_ptr_fn.ok_or_else(|| anyhow!("VM struct Dynamic runtime is not registered"))?;
+        let fn_id = self.builtin_fns.get_or_err(BuiltinFn::StructFromPtr)?;
         let fn_ref = self.get_fn_ref(ctx, fn_id);
         let call_inst = ctx.builder.ins().call(fn_ref, &[base, ty_ptr]);
         Ok(ctx.builder.inst_results(call_inst)[0])
@@ -58,7 +58,7 @@ impl JITRunTime {
             return Err(anyhow!("不是数组 {:?}", ty));
         };
         let ty_ptr = Self::type_ptr_const(ctx, ty);
-        let fn_id = self.array_from_ptr_fn.ok_or_else(|| anyhow!("VM array Dynamic runtime is not registered"))?;
+        let fn_id = self.builtin_fns.get_or_err(BuiltinFn::ArrayFromPtr)?;
         let fn_ref = self.get_fn_ref(ctx, fn_id);
         let call_inst = ctx.builder.ins().call(fn_ref, &[base, ty_ptr]);
         Ok(ctx.builder.inst_results(call_inst)[0])
@@ -86,7 +86,7 @@ impl JITRunTime {
 
     pub fn convert(&mut self, ctx: &mut BuildContext, vt: (Value, Type), ty: Type) -> Result<Value> {
         let vt = if matches!(vt.1, Type::Symbol { .. }) {
-            let resolved = self.compiler.symbols.get_type(&vt.1).unwrap_or_else(|_| vt.1.clone());
+            let resolved = self.compiler.sym_tab.symbols.get_type(&vt.1).unwrap_or_else(|_| vt.1.clone());
             (vt.0, resolved)
         } else {
             vt
@@ -259,7 +259,7 @@ impl JITRunTime {
         ctx.builder.seal_block(ok_block);
 
         ctx.builder.switch_to_block(bad_block);
-        let fault_fn = self.arith_fault_fn.ok_or_else(|| anyhow!("VM arith fault runtime is not registered"))?;
+        let fault_fn = self.builtin_fns.get_or_err(BuiltinFn::ArithFault)?;
         let fault_ref = self.get_fn_ref(ctx, fault_fn);
         ctx.builder.ins().call(fault_ref, &[]);
         let zero = ctx.builder.ins().iconst(int_ty, 0);
@@ -281,7 +281,7 @@ impl JITRunTime {
     fn idiv_imm(&mut self, ctx: &mut BuildContext, left: Value, divisor: i64, signed: bool, is_rem: bool) -> Result<Value> {
         let int_ty = ctx.builder.func.dfg.value_type(left);
         if divisor == 0 {
-            let fault_fn = self.arith_fault_fn.ok_or_else(|| anyhow!("VM arith fault runtime is not registered"))?;
+            let fault_fn = self.builtin_fns.get_or_err(BuiltinFn::ArithFault)?;
             let fault_ref = self.get_fn_ref(ctx, fault_fn);
             ctx.builder.ins().call(fault_ref, &[]);
             return Ok(ctx.builder.ins().iconst(int_ty, 0));

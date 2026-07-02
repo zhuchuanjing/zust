@@ -214,7 +214,7 @@ fn register_lsp_imports(compiler: &mut Compiler, stmts: &[Stmt], source_path: Op
         let Some((module, path)) = lsp_import_decl(stmt) else {
             continue;
         };
-        if !compiler.symbols.symbol(&module).is_empty() {
+        if !compiler.sym_tab.symbols.symbol(&module).is_empty() {
             continue;
         }
         let resolved = resolve_lsp_import_path(&path, source_path).map_err(|err| err.to_string()).and_then(|path| compiler.import_file(&module, &path).map(|_| ()).map_err(|err| format!("{err:#}")));
@@ -273,9 +273,9 @@ fn register_lsp_externs(compiler: &mut Compiler) {
         let native = Symbol::native(ext.arg_tys, ext.ret_ty);
         if let Some((module, name)) = ext.full_name.split_once("::") {
             if modules.insert(module.to_string()) {
-                compiler.symbols.add_module(module.into());
+                compiler.sym_tab.symbols.add_module(module.into());
             }
-            let _ = compiler.symbols.add_to_module(module, name.into(), native);
+            let _ = compiler.sym_tab.symbols.add_to_module(module, name.into(), native);
         } else {
             compiler.add_symbol(ext.full_name, native);
         }
@@ -710,8 +710,8 @@ mod tests {
         let mut compiler = Compiler::new();
         register_lsp_externs(&mut compiler);
 
-        let id = compiler.symbols.get_id("rand").expect("rand should resolve through the std root");
-        let (name, symbol) = compiler.symbols.get_symbol(id).expect("rand symbol should exist");
+        let id = compiler.sym_tab.symbols.get_id("rand").expect("rand should resolve through the std root");
+        let (name, symbol) = compiler.sym_tab.symbols.get_symbol(id).expect("rand symbol should exist");
         assert_eq!(name.as_str(), "std::rand");
         assert!(symbol.is_fn(), "{symbol:?}");
     }

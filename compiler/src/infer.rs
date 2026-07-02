@@ -10,19 +10,37 @@ struct ReturnInfo {
     shape: Option<Type>,
 }
 
-/// 类型推断递归链的硬上限。同一实例化由 `self.fns` 记忆化挡住,但互递归的泛型
+/// 类型推断递归链的硬上限。同一实例化由 `self.type_ctx.fns` 记忆化挡住,但互递归的泛型
 /// 函数每次可能产生新的 (generic_args, fn_tys) 实例化,记忆化命不中,会无限递归
 /// 直至栈溢出。超过此深度即把推断结果回退成 [`Type::Any`],把"挂起/崩溃"降级为
 /// 一个保守但安全的类型。正常代码的推断链远不及此。
 const MAX_INFER_DEPTH: usize = 64;
 
 impl Compiler {
+    /// 类型检查:算术/位/移位运算符两侧涉及 Str 或 Bool 时报错。
+    /// 设计依据:动态语义下,字符串与数值拼接合理 (`1 + "x"` = "1x"),
+    /// 但减/乘/除/位运算遇到字符串或布尔没有合理动态行为,运行时只会 panic。
+    /// `Add/AddAssign` 显式跳过 — 与 `Type::add` 一致允许字符串拼接。
+    /// 比较运算 (Eq/Ne/Lt/...) 也跳过 — dynamic 端已有任意类型比较语义。
+    fn check_arith_types(op: &BinaryOp, left_ty: &Type, right_ty: &Type, span: Span) -> Result<()> {
+        if !op.is_arith() || op.is_add() {
+            return Ok(());
+        }
+        let bad_left = matches!(left_ty, Type::Str | Type::Bool);
+        let bad_right = matches!(right_ty, Type::Str | Type::Bool);
+        if bad_left || bad_right {
+            let op_name = op.symbol();
+            return Err(Self::semantic_error(span, format!("运算符 {op_name} 不支持 Str/Bool 类型:左侧 {left_ty:?},右侧 {right_ty:?}")));
+        }
+        Ok(())
+    }
+
     fn current_infer_key(&self) -> Option<(u32, Vec<Type>, Vec<Type>)> {
-        self.infer_stack.last().cloned()
+        self.type_ctx.infer_stack.last().cloned()
     }
 
     fn pending_return_seed(&self, id: u32, generic_args: &[Type], fn_tys: &[Type]) -> Option<Type> {
-        self.fns.get(&id).and_then(|fns| {
+        self.type_ctx.fns.get(&id).and_then(|fns| {
             fns.iter().find_map(|item| {
                 if item.0 == generic_args
                     && item.1 == fn_tys
@@ -43,7 +61,7 @@ impl Compiler {
         let Some((id, generic_args, fn_tys)) = self.current_infer_key() else {
             return;
         };
-        let Some(fns) = self.fns.get_mut(&id) else {
+        let Some(fns) = self.type_ctx.fns.get_mut(&id) else {
             return;
         };
         if let Some(item) = fns.iter_mut().find(|item| item.0 == generic_args && item.1 == fn_tys)
@@ -68,7 +86,7 @@ impl Compiler {
     /// 带作用域的 base case 返回类型查找
     fn try_find_base_return_ty_with_scope(&mut self, body: &Stmt, fn_id: u32, fn_name: &str, args: &[SmolStr], fn_tys: &[Type]) -> Option<Type> {
         let saved_state = self.take_local_state();
-        self.frames.push(0);
+        self.sym_tab.frames.push(0);
         for (arg, ty) in args.iter().zip(fn_tys.iter()) {
             self.add_name(arg.clone());
             self.add_ty(ty.clone());
@@ -133,7 +151,7 @@ impl Compiler {
     fn add_pattern_bindings_for_infer(&mut self, pat: &Pattern, expr_ty: Type) -> Result<()> {
         match &pat.kind {
             PatternKind::Ident { name, ty } => {
-                let annotated_ty = self.symbols.get_type(ty)?;
+                let annotated_ty = self.sym_tab.symbols.get_type(ty)?;
                 self.add_name(name.clone());
                 self.add_ty(if annotated_ty.is_any() { expr_ty } else { annotated_ty });
             }
@@ -221,7 +239,7 @@ impl Compiler {
             ExprKind::List(_) | ExprKind::Tuple(_) => Some(Type::list_any()),
             ExprKind::Dict(_) => Some(Type::Map),
             ExprKind::Value(value) => Self::dynamic_return_shape(value.get_type()),
-            ExprKind::Const(idx) => self.consts.get_index(*idx).and_then(|(_, value)| Self::dynamic_return_shape(value.get_type())),
+            ExprKind::Const(idx) => self.sym_tab.consts.get_index(*idx).and_then(|(_, value)| Self::dynamic_return_shape(value.get_type())),
             ExprKind::Typed { ty, .. } => Some(ty.clone()),
             _ => None,
         }
@@ -239,7 +257,7 @@ impl Compiler {
     fn local_var_idx_for_expr(&self, expr: &Expr) -> Option<u32> {
         match &expr.kind {
             ExprKind::Var(idx) => Some(*idx),
-            ExprKind::Ident(name) => (self.top()..self.names.len()).rev().find(|idx| self.names[*idx].eq(name)).map(|idx| (idx - self.top()) as u32),
+            ExprKind::Ident(name) => (self.top()..self.sym_tab.names.len()).rev().find(|idx| self.sym_tab.names[*idx].eq(name)).map(|idx| (idx - self.top()) as u32),
             _ => None,
         }
     }
@@ -416,23 +434,23 @@ impl Compiler {
             ExprKind::Value(v) if v.is_list() => Ok(v.get_type()),
             ExprKind::Value(v) if v.is_map() => Ok(Type::Any),
             ExprKind::Value(v) => Ok(v.get_type()),
-            ExprKind::Const(idx) => Ok(match self.consts.get_index(*idx) {
+            ExprKind::Const(idx) => Ok(match self.sym_tab.consts.get_index(*idx) {
                 Some((_, value)) if value.is_str() => Type::Str,
                 Some((_, value)) if value.is_list() && value.len() == 0 => Type::list_any(),
                 _ => Type::Any,
             }),
             ExprKind::Var(idx) => {
                 let idx = self.top() + (*idx as usize);
-                if idx < self.tys.len() { self.symbols.get_type(&self.tys[idx]) } else { Ok(Type::Any) }
+                if idx < self.sym_tab.tys.len() { self.sym_tab.symbols.get_type(&self.sym_tab.tys[idx]) } else { Ok(Type::Any) }
             }
             ExprKind::Ident(ident) => {
-                for idx in (self.top()..self.names.len()).rev() {
-                    if self.names[idx].eq(ident) && idx < self.tys.len() {
-                        return self.symbols.get_type(&self.tys[idx]);
+                for idx in (self.top()..self.sym_tab.names.len()).rev() {
+                    if self.sym_tab.names[idx].eq(ident) && idx < self.sym_tab.tys.len() {
+                        return self.sym_tab.symbols.get_type(&self.sym_tab.tys[idx]);
                     }
                 }
-                let id = self.symbols.get_id(ident).map_err(|_| Self::semantic_error(expr.span, format!("未找到标识符 {}", ident)))?;
-                match self.symbols.get_symbol(id)?.1 {
+                let id = self.sym_tab.symbols.get_id(ident).map_err(|_| Self::semantic_error(expr.span, format!("未找到标识符 {}", ident)))?;
+                match self.sym_tab.symbols.get_symbol(id)?.1 {
                     Symbol::Const { ty, .. } => Ok(ty.clone()),
                     Symbol::Static { ty, .. } => Ok(ty.clone()),
                     Symbol::Struct(ty, _) => Ok(ty.clone()),
@@ -441,7 +459,7 @@ impl Compiler {
                     s => Err(Self::semantic_error(expr.span, format!("符号 {:?} 不是变量、常量、静态变量、结构体", s))),
                 }
             }
-            ExprKind::Id(id, _) => match self.symbols.get_symbol(*id)?.1 {
+            ExprKind::Id(id, _) => match self.sym_tab.symbols.get_symbol(*id)?.1 {
                 Symbol::Const { ty, .. } => Ok(ty.clone()),
                 Symbol::Static { ty, .. } => Ok(ty.clone()),
                 Symbol::Struct(ty, _) => Ok(ty.clone()),
@@ -450,7 +468,7 @@ impl Compiler {
                 s => Err(Self::semantic_error(expr.span, format!("符号 {:?} 不是变量、常量、静态变量、结构体", s))),
             },
             ExprKind::Generic { obj, params } => {
-                let params = params.iter().map(|param| self.symbols.get_type(param).unwrap_or_else(|_| param.clone())).collect();
+                let params = params.iter().map(|param| self.sym_tab.symbols.get_type(param).unwrap_or_else(|_| param.clone())).collect();
                 match self.infer_expr(obj)? {
                     Type::Symbol { id, .. } => Ok(Type::Symbol { id, params }),
                     _ => Ok(Type::Any),
@@ -502,10 +520,10 @@ impl Compiler {
                     } else if let Type::List(elem_ty) = left_ty {
                         (*elem_ty).clone()
                     } else {
-                        let left_ty = self.symbols.get_type(&left_ty)?;
+                        let left_ty = self.sym_tab.symbols.get_type(&left_ty)?;
                         let right_ty = if right.is_value() || right.is_const() {
                             let right_value = if let ExprKind::Const(c) = &right.kind {
-                                match self.consts.get_index(*c) {
+                                match self.sym_tab.consts.get_index(*c) {
                                     Some((_, v)) => v.clone(),
                                     None => right.clone().value()?,
                                 }
@@ -516,7 +534,7 @@ impl Compiler {
                                 if left_ty.is_any() {
                                     return Ok(Type::Any);
                                 }
-                                if let Ok(field) = self.symbols.get_field(&left_ty, right_value.as_str()) {
+                                if let Ok(field) = self.sym_tab.symbols.get_field(&left_ty, right_value.as_str()) {
                                     return if let Type::Fn { ret, .. } = field.1 { Ok(ret.as_ref().clone()) } else { Ok(field.1.clone()) };
                                 }
                             } else if let Type::Struct { fields, .. } = &left_ty
@@ -532,8 +550,8 @@ impl Compiler {
                             if left_ty.is_any() {
                                 return Ok(Type::Any);
                             }
-                            let (_, s) = self.symbols.get_field(&left_ty, "get_idx")?;
-                            let fn_ty = self.symbols.get_type(&s)?;
+                            let (_, s) = self.sym_tab.symbols.get_field(&left_ty, "get_idx")?;
+                            let fn_ty = self.sym_tab.symbols.get_type(&s)?;
                             return if let Type::Fn { ret, .. } = &fn_ty { Ok(ret.as_ref().clone()) } else { Ok(fn_ty) };
                         }
                         if left_ty.is_any() {
@@ -544,6 +562,7 @@ impl Compiler {
                 } else {
                     let left_ty = self.infer_expr(left)?;
                     let right_ty = self.infer_expr(right)?;
+                    Self::check_arith_types(op, &left_ty, &right_ty, expr.span)?;
                     if op == &BinaryOp::Assign {
                         if !left_ty.is_any() && right_ty.is_any() { left_ty } else { right_ty }
                     } else if op.is_assign() && !left_ty.is_any() && right_ty.is_any() {
@@ -559,12 +578,12 @@ impl Compiler {
                 if let ExprKind::Assoc { ty, name } = &obj.kind {
                     let base_name = match ty {
                         Type::Ident { name, .. } => name.clone(),
-                        Type::Symbol { id, .. } => self.symbols.get_symbol(*id)?.0.clone(),
+                        Type::Symbol { id, .. } => self.sym_tab.symbols.get_symbol(*id)?.0.clone(),
                         _ => return Ok(Type::Any),
                     };
-                    let id = self.symbols.get_id(&format!("{}::{}", base_name, name))?;
+                    let id = self.sym_tab.symbols.get_id(&format!("{}::{}", base_name, name))?;
                     let generic_args = match ty {
-                        Type::Ident { params, .. } | Type::Symbol { params, .. } => params.iter().map(|param| self.symbols.get_type(param).unwrap_or_else(|_| param.clone())).collect::<Vec<_>>(),
+                        Type::Ident { params, .. } | Type::Symbol { params, .. } => params.iter().map(|param| self.sym_tab.symbols.get_type(param).unwrap_or_else(|_| param.clone())).collect::<Vec<_>>(),
                         _ => Vec::new(),
                     };
                     let mut args = Vec::new();
@@ -582,7 +601,7 @@ impl Compiler {
                     let Type::Symbol { id, .. } = self.infer_expr(obj)? else {
                         return Ok(Type::Any);
                     };
-                    let generic_args = generic_args.iter().map(|param| self.symbols.get_type(param).unwrap_or_else(|_| param.clone())).collect::<Vec<_>>();
+                    let generic_args = generic_args.iter().map(|param| self.sym_tab.symbols.get_type(param).unwrap_or_else(|_| param.clone())).collect::<Vec<_>>();
                     let mut args = Vec::new();
                     for p in params {
                         args.push(self.infer_expr(p)?);
@@ -591,17 +610,17 @@ impl Compiler {
                 } else if let ExprKind::TypedMethod { obj: target, ty, name } = &obj.kind {
                     let base_name = match ty {
                         Type::Ident { name, .. } => name.clone(),
-                        Type::Symbol { id, .. } => self.symbols.get_symbol(*id)?.0.clone(),
+                        Type::Symbol { id, .. } => self.sym_tab.symbols.get_symbol(*id)?.0.clone(),
                         _ => return Ok(Type::Any),
                     };
-                    let id = self.symbols.get_id(&format!("{}::{}", base_name, name))?;
+                    let id = self.sym_tab.symbols.get_id(&format!("{}::{}", base_name, name))?;
                     let mut args = vec![self.infer_expr(target)?];
                     for p in params {
                         args.push(self.infer_expr(p)?);
                     }
                     self.infer_fn(id, &args)
                 } else if let ExprKind::Id(id, obj_expr) = &obj.kind {
-                    let method = self.symbols.get_symbol(*id).ok().and_then(|(name, _)| name.rsplit_once("::").map(|(_, method)| method.to_string()));
+                    let method = self.sym_tab.symbols.get_symbol(*id).ok().and_then(|(name, _)| name.rsplit_once("::").map(|(_, method)| method.to_string()));
                     if let Some(target) = obj_expr
                         && let Some(method) = method
                     {
@@ -618,9 +637,9 @@ impl Compiler {
                     }
                     self.infer_fn(*id, &args)
                 } else if let ExprKind::Ident(name) = &obj.kind {
-                    for idx in (self.top()..self.names.len()).rev() {
-                        if self.names[idx].eq(name) && idx < self.tys.len() {
-                            return if let Type::Symbol { id, .. } = &self.tys[idx] {
+                    for idx in (self.top()..self.sym_tab.names.len()).rev() {
+                        if self.sym_tab.names[idx].eq(name) && idx < self.sym_tab.tys.len() {
+                            return if let Type::Symbol { id, .. } = &self.sym_tab.tys[idx] {
                                 let id = *id;
                                 let mut args = Vec::new();
                                 for p in params {
@@ -632,10 +651,10 @@ impl Compiler {
                             };
                         }
                     }
-                    let Ok(id) = self.symbols.get_id(name) else {
+                    let Ok(id) = self.sym_tab.symbols.get_id(name) else {
                         return Ok(Type::Any);
                     };
-                    if !self.symbols.get_symbol(id)?.1.is_fn() {
+                    if !self.sym_tab.symbols.get_symbol(id)?.1.is_fn() {
                         return Err(Self::semantic_error(obj.span, format!("符号 {} 不是函数", name)));
                     }
                     let mut args = Vec::new();
@@ -656,8 +675,8 @@ impl Compiler {
                         let fn_ty = match self.get_field(&ty, method) {
                             Ok((_, fn_ty)) => fn_ty,
                             Err(_) => {
-                                let id = self.symbols.get_id(method)?;
-                                if self.symbols.get_symbol(id)?.1.is_fn() {
+                                let id = self.sym_tab.symbols.get_id(method)?;
+                                if self.sym_tab.symbols.get_symbol(id)?.1.is_fn() {
                                     Type::Symbol { id, params: Vec::new() }
                                 } else {
                                     return Err(Self::semantic_error(obj.span, format!("符号 {method} 不是函数")));
@@ -678,8 +697,8 @@ impl Compiler {
                     }
                 } else if let ExprKind::Var(idx) = &obj.kind {
                     let idx = self.top() + (*idx as usize);
-                    if idx < self.tys.len()
-                        && let Type::Symbol { id, .. } = self.tys[idx]
+                    if idx < self.sym_tab.tys.len()
+                        && let Type::Symbol { id, .. } = self.sym_tab.tys[idx]
                     {
                         let mut args = Vec::new();
                         for p in params {
@@ -695,11 +714,11 @@ impl Compiler {
                     Ok(Type::Any)
                 }
             }
-            ExprKind::Typed { ty, .. } => self.symbols.get_type(ty),
+            ExprKind::Typed { ty, .. } => self.sym_tab.symbols.get_type(ty),
             ExprKind::Stmt(stmt) => self.infer_stmt(stmt),
             ExprKind::Repeat { value, len } => {
                 let value_ty = self.infer_expr(value)?;
-                let len = self.symbols.get_type(len).unwrap_or_else(|_| len.clone());
+                let len = self.sym_tab.symbols.get_type(len).unwrap_or_else(|_| len.clone());
                 if let Type::ConstInt(len) = len {
                     let len = u32::try_from(len).map_err(|_| Self::semantic_error(expr.span, "重复数组长度必须是非负 u32"))?;
                     Ok(Type::Array(std::rc::Rc::new(value_ty), len))
@@ -733,7 +752,7 @@ impl Compiler {
             if !ty.is_any() {
                 fn_tys.push(ty.clone());
             } else if let Some(arg_ty) = arg_tys.get(i) {
-                fn_tys.push(self.symbols.get_type(arg_ty)?);
+                fn_tys.push(self.sym_tab.symbols.get_type(arg_ty)?);
             } else {
                 fn_tys.push(Type::Any);
             }
@@ -750,9 +769,9 @@ impl Compiler {
     }
 
     fn local_type_hint_at(&self, pos: usize) -> Option<Type> {
-        let ty = self.tys.get(pos)?;
+        let ty = self.sym_tab.tys.get(pos)?;
         match ty {
-            Type::List(_) => self.list_elem_states.get(pos).cloned().flatten().and_then(|state| {
+            Type::List(_) => self.type_ctx.list_elem_states.get(pos).cloned().flatten().and_then(|state| {
                 if let ListElemState::Known(elem_ty) = state
                     && Self::is_optimizable_list_elem_ty(&elem_ty)
                 {
@@ -767,11 +786,11 @@ impl Compiler {
     }
 
     fn collect_local_type_hints(&self) -> Vec<Option<Type>> {
-        (self.top()..self.tys.len()).map(|pos| self.local_type_hint_at(pos)).collect()
+        (self.top()..self.sym_tab.tys.len()).map(|pos| self.local_type_hint_at(pos)).collect()
     }
 
     fn set_local_type_hints(&mut self, id: u32, generic_args: &[Type], fn_tys: &[Type], hints: Vec<Option<Type>>) {
-        let items = self.local_type_hints.entry(id).or_default();
+        let items = self.type_ctx.local_type_hints.entry(id).or_default();
         if let Some(item) = items.iter_mut().find(|item| item.0 == generic_args && item.1 == fn_tys) {
             item.2 = hints;
         } else {
@@ -780,7 +799,7 @@ impl Compiler {
     }
 
     pub fn inferred_local_type_hints(&self, id: u32, generic_args: &[Type], fn_tys: &[Type]) -> Vec<Option<Type>> {
-        self.local_type_hints.get(&id).and_then(|items| items.iter().find(|item| item.0 == generic_args && item.1 == fn_tys)).map(|item| item.2.clone()).unwrap_or_default()
+        self.type_ctx.local_type_hints.get(&id).and_then(|items| items.iter().find(|item| item.0 == generic_args && item.1 == fn_tys)).map(|item| item.2.clone()).unwrap_or_default()
     }
 
     pub fn infer_fn(&mut self, id: u32, arg_tys: &[Type]) -> Result<Type> {
@@ -790,10 +809,10 @@ impl Compiler {
     pub fn infer_fn_with_params(&mut self, id: u32, arg_tys: &[Type], generic_args: &[Type]) -> Result<Type> {
         // 病态(互)递归泛型推断会不断产生新实例化、绕过记忆化;到达深度上限即回退 Any,
         // 避免推断阶段栈溢出崩溃。
-        if self.infer_stack.len() > MAX_INFER_DEPTH {
+        if self.type_ctx.infer_stack.len() > MAX_INFER_DEPTH {
             return Ok(Type::Any);
         }
-        let (name, s) = self.symbols.get_symbol(id).map(|(n, s)| (n.clone(), s.clone()))?;
+        let (name, s) = self.sym_tab.symbols.get_symbol(id).map(|(n, s)| (n.clone(), s.clone()))?;
         if let Symbol::Fn { ty, args, generic_params, cap, body, .. } = s {
             if let Type::Fn { tys, ret: _ } = ty {
                 let resolved_generic_args = crate::resolve_generic_args_from_types(&generic_params, &tys, arg_tys, generic_args)?;
@@ -808,25 +827,25 @@ impl Compiler {
                     let mut compile_cap = cap.clone();
                     let saved_state = self.take_local_state();
                     if let Some((module, _)) = name.split_once("::") {
-                        self.symbols.push_module_scope(module.into());
+                        self.sym_tab.symbols.push_module_scope(module.into());
                     }
                     let compiled = self.compile_fn(&args, &mut compile_tys, body, &mut compile_cap);
                     if name.contains("::") {
-                        self.symbols.pop_module_scope();
+                        self.sym_tab.symbols.pop_module_scope();
                     }
                     self.restore_local_state(saved_state);
                     Stmt::new(StmtKind::Block(compiled?), Span::default())
                 };
-                if let Some(fns) = self.fns.get_mut(&id) {
+                if let Some(fns) = self.type_ctx.fns.get_mut(&id) {
                     for f in fns.iter() {
                         if f.0 == generic_args && f.1 == fn_tys {
                             return match &f.2 {
-                                FnInferRet::Done(ret_ty) => self.symbols.get_type(ret_ty),
-                                FnInferRet::Pending(seed) => seed.as_ref().map(|ty| self.symbols.get_type(ty)).unwrap_or_else(|| {
+                                FnInferRet::Done(ret_ty) => self.sym_tab.symbols.get_type(ret_ty),
+                                FnInferRet::Pending(seed) => seed.as_ref().map(|ty| self.sym_tab.symbols.get_type(ty)).unwrap_or_else(|| {
                                     // 递归自调用且种子为空：尝试从函数体 base case 查找返回类型
-                                    if self.infer_stack.iter().any(|(sid, sargs, _)| *sid == id && sargs == generic_args) {
+                                    if self.type_ctx.infer_stack.iter().any(|(sid, sargs, _)| *sid == id && sargs == generic_args) {
                                         if let Some(base_ty) = self.try_find_base_return_ty(&body) {
-                                            return self.symbols.get_type(&base_ty);
+                                            return self.sym_tab.symbols.get_type(&base_ty);
                                         }
                                     }
                                     Ok(Type::Any)
@@ -836,12 +855,12 @@ impl Compiler {
                     }
                     fns.push((generic_args.to_vec(), fn_tys.clone(), FnInferRet::Pending(None)));
                 } else {
-                    self.fns.insert(id, vec![(generic_args.to_vec(), fn_tys.clone(), FnInferRet::Pending(None))]);
+                    self.type_ctx.fns.insert(id, vec![(generic_args.to_vec(), fn_tys.clone(), FnInferRet::Pending(None))]);
                 }
                 // 递归函数：预扫描 base case 返回类型作为种子
                 if self.pending_return_seed(id, generic_args, &fn_tys).is_none() {
                     if let Some(base_ty) = self.try_find_base_return_ty_with_scope(&body, id, &name, &args, &fn_tys) {
-                        if let Some(fns) = self.fns.get_mut(&id) {
+                        if let Some(fns) = self.type_ctx.fns.get_mut(&id) {
                             if let Some(item) = fns.iter_mut().find(|item| item.0 == generic_args && item.1 == fn_tys)
                                 && let FnInferRet::Pending(seed) = &mut item.2
                                 && seed.is_none()
@@ -856,7 +875,7 @@ impl Compiler {
                 for _ in 0..4 {
                     let before_seed = self.pending_return_seed(id, generic_args, &fn_tys);
                     let saved_state = self.take_local_state();
-                    self.frames.push(0);
+                    self.sym_tab.frames.push(0);
                     for (arg, ty) in args.iter().zip(fn_tys.iter()) {
                         self.add_name(arg.clone());
                         self.add_ty(ty.clone());
@@ -870,16 +889,17 @@ impl Compiler {
                             self.add_ty(Type::Any);
                         }
                     }
-                    self.infer_stack.push((id, generic_args.to_vec(), fn_tys.clone()));
+                    self.type_ctx.infer_stack.push((id, generic_args.to_vec(), fn_tys.clone()));
                     let pass_ret_ty = self.infer_return_type(&body).map(|ty| ty.unwrap_or(Type::Void));
-                    self.infer_stack.pop();
+                    self.type_ctx.infer_stack.pop();
                     let pass_local_type_hints = self.collect_local_type_hints();
                     self.restore_local_state(saved_state);
                     let pass_ret_ty = match pass_ret_ty {
-                        Ok(pass_ret_ty) => self.symbols.get_type(&pass_ret_ty).unwrap_or(pass_ret_ty),
+                        Ok(pass_ret_ty) => self.sym_tab.symbols.get_type(&pass_ret_ty).unwrap_or(pass_ret_ty),
                         Err(err) => {
                             log::error!("infer_fn {} failed: {:?}", name, err);
                             let should_remove = self
+                                .type_ctx
                                 .fns
                                 .get_mut(&id)
                                 .map(|fns| {
@@ -888,7 +908,7 @@ impl Compiler {
                                 })
                                 .unwrap_or(false);
                             if should_remove {
-                                self.fns.remove(&id);
+                                self.type_ctx.fns.remove(&id);
                             }
                             return Err(err);
                         }
@@ -906,12 +926,12 @@ impl Compiler {
                     }
                 }
                 let ret_ty = ret_ty.unwrap_or(Type::Any);
-                self.fns.get_mut(&id).map(|f| {
+                self.type_ctx.fns.get_mut(&id).map(|f| {
                     f.iter_mut().find(|item| item.0 == generic_args && item.1 == fn_tys).map(|item| item.2 = FnInferRet::Done(ret_ty.clone()));
                 });
                 self.set_local_type_hints(id, generic_args, &fn_tys, local_type_hints);
                 if generic_args.is_empty()
-                    && let Some((_, Symbol::Fn { ty: Type::Fn { ret, .. }, .. })) = self.symbols.get_symbol_mut(id)
+                    && let Some((_, Symbol::Fn { ty: Type::Fn { ret, .. }, .. })) = self.sym_tab.symbols.get_symbol_mut(id)
                     && ret.is_any()
                 {
                     *ret = std::rc::Rc::new(ret_ty.clone());

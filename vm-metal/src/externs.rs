@@ -21,21 +21,21 @@ pub(crate) fn register_externs(compiler: &mut Compiler, externs: impl IntoIterat
         let add_atomic_add_alias = ext.full_name.as_str() == "spirv::atomic_add" && matches!(kind, ExternalFnKind::Builtin(BuiltinFn::AtomicAdd));
         let id = if let Some((module, name)) = ext.full_name.split_once("::") {
             if modules.insert(module.to_string()) {
-                compiler.symbols.add_module(module.into());
+                compiler.sym_tab.symbols.add_module(module.into());
             }
-            compiler.symbols.add_to_module(module, name.into(), native.clone())?
+            compiler.sym_tab.symbols.add_to_module(module, name.into(), native.clone())?
         } else {
             if modules.insert("__extern".to_string()) {
-                compiler.symbols.add_module("__extern".into());
+                compiler.sym_tab.symbols.add_module("__extern".into());
             }
             compiler.add_symbol(&ext.full_name, native.clone())
         };
         registered.insert(id, kind.clone());
         if add_atomic_add_alias {
             if modules.insert("__extern".to_string()) {
-                compiler.symbols.add_module("__extern".into());
+                compiler.sym_tab.symbols.add_module("__extern".into());
             }
-            let alias_id = compiler.symbols.add_to_module("__extern", "atomic_add".into(), native)?;
+            let alias_id = compiler.sym_tab.symbols.add_to_module("__extern", "atomic_add".into(), native)?;
             registered.insert(alias_id, kind);
         }
     }

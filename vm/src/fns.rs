@@ -79,7 +79,7 @@ impl JITRunTime {
         self.fns.insert(id, FnVariant::Inline { fn_ptr: f.into(), arg_tys: args });
         if let Some((def, method)) = name.split_once("::") {
             let def_id = self.get_id(def)?;
-            if let Some((_, define)) = self.compiler.symbols.get_symbol_mut(def_id) {
+            if let Some((_, define)) = self.compiler.sym_tab.symbols.get_symbol_mut(def_id) {
                 if let Symbol::Struct(Type::Struct { params, fields }, _) = define {
                     fields.push((method.into(), Type::Symbol { id, params: params.clone() }));
                 }
@@ -265,21 +265,21 @@ impl JITRunTime {
     }
 
     pub(crate) fn gen_fn_with_capture_tys(&mut self, ctx: Option<&BuildContext>, id: u32, arg_tys: &[Type], generic_args: &[Type], capture_tys: Option<&[Type]>) -> Result<FnInfo> {
-        let mut arg_tys: Vec<Type> = arg_tys.iter().map(|ty| self.compiler.symbols.get_type(ty).unwrap()).collect();
+        let mut arg_tys: Vec<Type> = arg_tys.iter().map(|ty| self.compiler.sym_tab.symbols.get_type(ty).unwrap()).collect();
         if capture_tys.is_none()
             && generic_args.is_empty()
             && let Ok(info) = self.get_fn(id, &arg_tys)
         {
             return Ok(info);
         }
-        let (name, s) = self.compiler.symbols.get_symbol(id).map(|(n, s)| (n.clone(), s.clone()))?;
+        let (name, s) = self.compiler.sym_tab.symbols.get_symbol(id).map(|(n, s)| (n.clone(), s.clone()))?;
         if let Symbol::Fn { ty, args, generic_params, cap, body, is_pub: _ } = s.clone() {
             if let Type::Fn { tys: decl_tys, ret: _ } = ty {
                 let resolved_generic_args = resolve_generic_args_from_types(&generic_params, &decl_tys, &arg_tys, generic_args)?;
                 let generic_args = resolved_generic_args.as_slice();
                 let decl_tys = if generic_params.is_empty() { decl_tys } else { decl_tys.iter().map(|ty| substitute_type(ty, &generic_params, generic_args)).collect() };
                 while arg_tys.len() < decl_tys.len() {
-                    arg_tys.push(self.compiler.symbols.get_type(&decl_tys[arg_tys.len()]).unwrap_or(Type::Any));
+                    arg_tys.push(self.compiler.sym_tab.symbols.get_type(&decl_tys[arg_tys.len()]).unwrap_or(Type::Any));
                 }
                 let ret_ty = self.compiler.infer_fn_with_params(id, &arg_tys, generic_args)?;
                 let local_type_hints = self.compiler.inferred_local_type_hints(id, generic_args, &arg_tys);
@@ -304,11 +304,11 @@ impl JITRunTime {
                     let substituted = substitute_stmt(body.as_ref(), &generic_params, generic_args);
                     let saved_state = self.compiler.take_local_state();
                     if let Some((module, _)) = name.split_once("::") {
-                        self.compiler.symbols.push_module_scope(module.into());
+                        self.compiler.sym_tab.symbols.push_module_scope(module.into());
                     }
                     let compiled_body = self.compiler.compile_fn(&args, &mut compile_tys, substituted, &mut compile_cap);
                     if name.contains("::") {
-                        self.compiler.symbols.pop_module_scope();
+                        self.compiler.sym_tab.symbols.pop_module_scope();
                     }
                     self.compiler.restore_local_state(saved_state);
                     Stmt::new(StmtKind::Block(compiled_body?), Span::default())

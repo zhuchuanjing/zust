@@ -26,6 +26,10 @@ extern "C" fn root_dir(name: *const Dynamic) -> *const Dynamic {
     unsafe { alloc_dynamic(root::dir((*name).as_str()).unwrap_or(Dynamic::Null)) }
 }
 
+extern "C" fn root_keys(name: *const Dynamic) -> *const Dynamic {
+    unsafe { alloc_dynamic(root::keys((*name).as_str()).unwrap_or(Dynamic::Null)) }
+}
+
 extern "C" fn root_send(name: *const Dynamic, value: *const Dynamic) -> *const Dynamic {
     unsafe {
         let ret = root::send_msg(&(*name).as_str(), (*value).clone()).unwrap_or(Dynamic::Null);
@@ -143,6 +147,7 @@ pub const ROOT_NATIVE: &[(&str, &[Type], Type, *const u8)] = &[
     ("add_map", &[Type::Any], Type::Bool, root_add_map as *const u8),
     ("add", &[Type::Any, Type::Any], Type::Bool, root_add as *const u8),
     ("dir", &[Type::Any], Type::Any, root_dir as *const u8),
+    ("keys", &[Type::Any], Type::Any, root_keys as *const u8),
     ("remove", &[Type::Any], Type::Any, root_remove as *const u8),
     ("contains", &[Type::Any], Type::Bool, root_contains as *const u8),
     ("send", &[Type::Any, Type::Any], Type::Any, root_send as *const u8),

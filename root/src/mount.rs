@@ -432,7 +432,7 @@ impl<T: std::fmt::Debug + MsgPack + MsgUnpack + Default + Send> Mount<T> {
             Self::Memory(m) => m.read_sync(name, |_, v| v.keys()).flatten().ok_or(anyhow!("get_key {} 失败", name)),
             Self::Redis { client, rl: _ } => {
                 let mut conn = client.get_connection()?;
-                let keys: Vec<String> = conn.hkeys(name).unwrap_or(Vec::new());
+                let keys: Vec<String> = conn.hkeys(name)?;
                 Ok(keys.into_iter().map(|k| k.into()).collect())
             }
             Self::Fjall { values, .. } => fjall_map_keys(values, name),
@@ -785,6 +785,8 @@ mod tests {
             let (mount, name) = root.get_mount("fjall/test/map").unwrap();
             mount.add_map(name);
             mount.insert(name, "answer", 42.into());
+            mount.insert(name, "0", "first".into());
+            mount.insert(name, "1", "second".into());
         }
 
         {
@@ -800,6 +802,9 @@ mod tests {
             assert_eq!(mount.get_idx(name, 0, |v| v.as_int()).unwrap(), Some(7));
             let (mount, name) = root.get_mount("fjall/test/map").unwrap();
             assert_eq!(mount.get_key(name, "answer", |v| v.as_int()).unwrap(), Some(42));
+            let mut keys = mount.keys(name).unwrap();
+            keys.sort();
+            assert_eq!(keys, vec![SmolStr::new("0"), SmolStr::new("1"), SmolStr::new("answer")]);
         }
 
         let _ = std::fs::remove_dir_all(data_dir);

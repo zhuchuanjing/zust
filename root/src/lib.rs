@@ -441,6 +441,11 @@ pub fn dir(name: &str) -> Result<Dynamic> {
     m.dir(name).map(|names| if matches!(m, Mount::Redis { .. }) { names.into_iter().map(|n| format!("{}/{}", mount_name, n).into()).collect::<Vec<SmolStr>>().into() } else { names.into() })
 }
 
+pub fn keys(name: &str) -> Result<Dynamic> {
+    let (m, name) = get_mount(name)?;
+    m.keys(name).map(Into::into)
+}
+
 pub fn contains(name: &str) -> bool {
     if let Ok((m, name)) = get_mount(name) { m.contains(name) } else { false }
 }
@@ -780,6 +785,19 @@ mod tests {
         }
 
         assert_eq!(get_key(&path, "n").unwrap().as_int(), Some(THREADS * ITERS));
+    }
+
+    #[test]
+    fn keys_returns_memory_map_keys() {
+        let path = format!("local/test/keys/{}", uuid::Uuid::new_v4());
+        add_map(&path).unwrap();
+        insert(&path, "0", "zero".into()).unwrap();
+        insert(&path, "1", "one".into()).unwrap();
+
+        let key_list = keys(&path).unwrap();
+        let mut keys = (0..key_list.len()).map(|idx| key_list.get_idx(idx).unwrap().as_str().to_string()).collect::<Vec<_>>();
+        keys.sort();
+        assert_eq!(keys, vec!["0".to_string(), "1".to_string()]);
     }
 
     #[test]

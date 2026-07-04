@@ -474,6 +474,7 @@ root::remove(path) -> any
 root::get(path)
 root::dir(path) -> [string]
 root::len(path)
+root::keys(path) -> [string]
 
 // 列表
 root::push(path, v)
@@ -702,6 +703,7 @@ v.iter()  it.next()
 
 // root
 root::add(p, v)        root::get(p)         root::insert(p, k, v)
+root::keys(p)          root::dir(p)         root::len(p)
 root::update(p, f)     root::update_key(p, k, f)        // 原子 RMW
 root::send(p, msg)
 

@@ -1965,6 +1965,30 @@ mod tests {
     }
 
     #[test]
+    fn root_keys_returns_map_key_list() -> anyhow::Result<()> {
+        let vm = Vm::with_all()?;
+        assert_eq!(vm.infer("root::keys", &[Type::Any])?, Type::Any);
+        vm.import_code(
+            "vm_root_keys",
+            br#"
+            pub fn run() {
+                root::add_map("local/test/vm_root_keys");
+                root::insert("local/test/vm_root_keys", "0", "zero");
+                root::insert("local/test/vm_root_keys", "1", "one");
+                root::keys("local/test/vm_root_keys").len()
+            }
+            "#
+            .to_vec(),
+        )?;
+
+        let compiled = vm.get_fn("vm_root_keys::run", &[])?;
+        assert_eq!(compiled.ret_ty(), &Type::I32);
+        let run: extern "C" fn() -> i32 = unsafe { std::mem::transmute(compiled.ptr()) };
+        assert_eq!(run(), 2);
+        Ok(())
+    }
+
+    #[test]
     fn std_log_accepts_any_and_returns_void() -> anyhow::Result<()> {
         let vm = Vm::with_all()?;
         vm.import_code(

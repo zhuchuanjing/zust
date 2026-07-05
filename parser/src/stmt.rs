@@ -525,7 +525,10 @@ impl Parser {
     pub fn stmt(&mut self, is_pub: bool) -> Result<Stmt> {
         self.check_fatal()?;
         self.whitespace()?;
-        self.spans.push(self.pos);
+        // RAII 守卫:无论 stmt 内部走哪个分支(包括 import / let / fn
+        // 等 `?` 提前返回),`spans` 都会被清理,错误消息 [`error_stmt`] 不会读到
+        // 残留的旧 span。
+        let _span_guard = self.with_stmt_span();
         let start = self.current_pos();
         // 函数体内不允许 fn / struct / impl / const / static 顶层声明。
         // 编译器对这些位置直接 panic，这里前置到 parser，让错误落到用户可见的地方。
@@ -686,13 +689,12 @@ impl Parser {
                 if self.looks_like_empty_dict() {
                     self.dict()?
                 } else if let Ok(block) = try_parse!(self, self.block()) {
-                    let _ = self.spans.pop();
+                    // 块是顶层 stmt(无分号结尾),原 spans 守卫仍在,函数末尾 drop 时清理。
                     return Ok(block);
                 } else if let Ok(dict) = try_parse!(self, self.dict()) {
                     dict
                 } else {
                     let block = self.block()?;
-                    let _ = self.spans.pop();
                     return Ok(block);
                 }
             } else {
@@ -710,7 +712,7 @@ impl Parser {
                 return Err(anyhow!("未结束的表达式"));
             }
         };
-        let _ = self.spans.pop();
+        // _span_guard 在函数末尾 drop,自动弹出 spans 栈帧。
         Ok(stmt)
     }
 }

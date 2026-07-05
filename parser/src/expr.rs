@@ -407,7 +407,12 @@ impl Parser {
     }
 
     fn is_shorthand_field_name(name: &str) -> bool {
-        name.as_bytes().first().is_some_and(|ch| ch.is_ascii_alphabetic() || *ch == b'_')
+        // 修复:支持 Unicode 首字符。原先只看首字节是否是 ASCII 字母或下划线,
+        // 中文等合法 Unicode ident 不能用作 dict 简写 (`{ 中文key }` 被当成 block)。
+        // ident 的合法性由 `Parser::ident()` 整体保证,这里只要保证"非空且首字符
+        // 是合法的 ident 首字符"即可。用 `chars().next()` 取第一个字符,而不是
+        // 直接看首字节。
+        name.chars().next().is_some_and(|ch| ch == '_' || ch.is_alphabetic())
     }
 
     pub(crate) fn looks_like_dict(&mut self) -> bool {

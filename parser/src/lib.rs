@@ -64,6 +64,37 @@ pub struct Parser {
     fatal: bool,  //递归过深等不可恢复错误;置位后所有解析入口立即失败,避免回溯重试导致死循环
 }
 
+/// [`Parser::spans`] 的 RAII 守卫。
+///
+/// 由 [`Parser::with_stmt_span`] 创建。Drop 时无论如何(包括错误冒泡)都会
+/// 弹出一个栈帧,保证 spans 不会跨 stmt 累积。
+///
+/// 设计要点:`parser` 字段不持有 `&mut Parser`(那会阻塞 stmt 内部其他
+/// `&mut self` 调用),而是用 `*mut Parser` 配合 `unsafe` 在 drop 时调用 `pop`。
+/// `stmt()` 是唯一调用点,且调用顺序是:`push` → 内部全部 `&mut self` 操作
+/// → drop 时再 `pop`,保证 pop 永远发生在最后一次 `&mut self` 之后。
+struct SpanGuard {
+    parser: *mut Parser,
+}
+
+// SAFETY:`SpanGuard` 只在单线程的解析器栈里使用,`stmt()` 是同步代码,
+// `parser` 在 drop 之前不会被其他代码路径释放。Drop 只调用 `Vec::pop`,
+// 不读 `Parser` 的任何其他字段。
+unsafe impl Send for SpanGuard {}
+unsafe impl Sync for SpanGuard {}
+
+impl Drop for SpanGuard {
+    fn drop(&mut self) {
+        // SAFETY:`parser` 来自 `with_stmt_span` 的入参,生命周期与 guard 一致;
+        // stmt() 退出时 guard 才 drop,期间无其他借用。
+        unsafe {
+            if !(*self.parser).spans.is_empty() {
+                (*self.parser).spans.pop();
+            }
+        }
+    }
+}
+
 /// 解析递归深度上限。超过即返回 [`ParserErr::TooDeep`],把"栈溢出崩溃"降级为
 /// 普通解析错误。
 ///
@@ -180,6 +211,23 @@ impl SpannedParseError {
 impl Parser {
     pub fn new(buf: Vec<u8>) -> Self {
         Self { pos: 0, buf, spans: Vec::new(), decl_scopes: vec![BTreeSet::new()], scope_depths: ScopeDepths::default(), match_counter: 0, fatal: false }
+    }
+
+    /// RAII 守卫:在构造时把当前 `pos` 推入 `spans`,在 drop 时弹出。
+    ///
+    /// 设计动机:`spans` 栈之前是手动 `push` + `pop`,但 `stmt()` 内部有十多个
+    /// `?` 提前返回路径(import / let / fn …),任何一条错误路径走完时都
+    /// 不会清理 `spans`,导致下次错误消息的 [`error_stmt`] 把上一个 stmt 的
+    /// 内容误当成当前错误的上下文 —— 错误定位严重漂移。
+    ///
+    /// 用 RAII guard:无论函数是 `Ok` 还是 `Err` 返回,`Drop` 总会清理栈帧,
+    /// 把 `spans.last()` 始终精确指向"当前正在解析的 stmt"。
+    ///
+    /// 实现细节:guard 持有 `*mut Parser` 而不是 `&mut Parser`,这样不阻塞
+    /// stmt 内部其他 `&mut self` 调用(否则 borrow checker 会失败)。
+    fn with_stmt_span(&mut self) -> SpanGuard {
+        self.spans.push(self.pos);
+        SpanGuard { parser: self as *mut Parser }
     }
 
     /// 进入一层递归:自增深度并校验上限。配合 [`Parser::exit_depth`] 使用。
@@ -318,7 +366,13 @@ impl Parser {
             self.pos += 1;
             Ok(())
         } else {
-            Err(SpannedParseError::new(ParserErr::at(format!("期望字符 {} 实际字符 {}", ch as char, self.buf.get(self.pos as usize).cloned().unwrap_or(0) as char), self.pos), self.pos).into())
+            // 修复:EOF 时 `buf.get(self.pos)` 返回 None,原代码用 `unwrap_or(0)`
+            // 把字符报成 `\0`(控制字符),误导用户。改为显式判断 EOF,报"已到文件末尾"。
+            let actual_desc = match self.buf.get(self.pos) {
+                Some(byte) => format!("实际字符 {}", *byte as char),
+                None => "已到文件末尾".to_string(),
+            };
+            Err(SpannedParseError::new(ParserErr::at(format!("期望字符 {} {}", ch as char, actual_desc), self.pos), self.pos).into())
         }
     }
 
@@ -628,23 +682,44 @@ impl Parser {
     pub fn text(&mut self) -> Result<SmolStr> {
         if self.get()? == b'r' && [b'#', b'"'].contains(&self.ahead()?) {
             self.pos += 1;
-            let mut end = String::from("\"");
-            while self.buf[self.pos] == b'#' {
-                end.push('#');
+            // 收集 `#` 前缀:`r#####` 是 Rust 风格的原始字符串语法。原先
+            // 漏掉 `self.pos < self.buf.len()` 边界检查,会在 `r##` /
+            // `r#####` 后跟 EOF(没有匹配的 `"`)时越过 buf 末尾 panic。
+            // 用 `lookahead == b'#'` 判断继续/停止,免去直接下标的越界。
+            let mut hash_count: usize = 0;
+            while self.pos < self.buf.len() && self.buf[self.pos] == b'#' {
+                hash_count += 1;
                 self.pos += 1;
             }
+            // `r#"(abc)` 形式 — 若下一个字符不是 `"`,直接报错。不强行构造 end,
+            // 因为后面若抛错,builder 也用不到 end,避免再触发"start>stop" panic。
             if self.get()? != b'"' {
                 return Err(ParserErr::at("非法的原始字符串", self.current_pos()).into());
             }
             self.pos += 1;
+            // 收尾的 `#...#"` 序列必须与前缀数量一致才算闭合。注意顺序:
+            // 闭合是 `"` 在前、N 个 `#` 在后(`r#"..."#` 的右边是 `"#`),
+            // 不是 `#"#`(前者才是 Rust/曾用方案的形态)。
+            let mut end: Vec<u8> = Vec::with_capacity(hash_count + 1);
+            end.push(b'"');
+            for _ in 0..hash_count {
+                end.push(b'#');
+            }
             let start_pos = self.pos;
             while self.pos < self.buf.len() {
-                if self.just(&end).is_ok() {
+                if self.pos + end.len() <= self.buf.len() && self.buf[self.pos..self.pos + end.len()].eq(&end) {
                     break;
                 }
                 self.pos += 1;
             }
-            Ok(self.get_str(start_pos, self.pos - end.len()))
+            // 走到末尾仍未闭合 — 报"未关闭字符串"而不是悄悄 panic。
+            if self.pos + end.len() > self.buf.len() {
+                return Err(ParserErr::at("未关闭字符串", self.current_pos()).into());
+            }
+            // 这里一定有 `self.pos <= start_pos`(闭合,内层可能就直接相等)。
+            let stop = self.pos;
+            self.pos += end.len();
+            Ok(self.get_str(start_pos, stop))
         } else {
             self.string()
         }
@@ -1097,6 +1172,39 @@ mod tests {
         assert!(err.to_string().contains("函数体内不能定义"), "got: {err}");
     }
 
+    /// 修复回归:`r#` / `r####` 后续 EOF 不再越界 panic,只返回 Err。
+    /// 修复前会在 `text()` 收集 `#` 前缀时直接 `self.buf[self.pos]` 越界。
+    #[test]
+    fn raw_string_with_only_hashes_does_not_panic_at_eof() {
+        for input in [b"r#" as &[u8], b"r##", b"r###", b"r########", b"r#\"", b"r#\"unterminated"] {
+            let mut p = Parser::new(input.to_vec());
+            // 不应 panic;Ok 或 Err 均可接受。
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| p.text()));
+            assert!(result.is_ok(), "raw-string parser panicked on input {:?}", input);
+        }
+    }
+
+    #[test]
+    fn raw_string_unterminated_returns_error_not_panic() {
+        // `r#"abc` 缺闭合 → 应当返回 Err 而不是 panic。
+        let mut p = Parser::new(b"r#\"abc".to_vec());
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| p.text()));
+        assert!(result.is_ok(), "raw-string unterminated input should not panic");
+        let err = result.unwrap().expect_err("unterminated raw string should error");
+        assert!(err.to_string().contains("未关闭") || err.to_string().contains("unclosed"), "got: {err}");
+    }
+
+    #[test]
+    fn raw_string_simple_still_parses() {
+        // 保证正常路径没被破坏:`r"abc"` / `r#"a"#` / `r##"b"##` 都能解析。
+        let mut p = Parser::new(b"r\"abc\"".to_vec());
+        assert_eq!(p.text().unwrap().as_str(), "abc");
+        let mut p = Parser::new(b"r#\"a\"#".to_vec());
+        assert_eq!(p.text().unwrap().as_str(), "a");
+        let mut p = Parser::new(b"r##\"b\"##".to_vec());
+        assert_eq!(p.text().unwrap().as_str(), "b");
+    }
+
     #[test]
     fn hex_escape_at_end_of_string_preserves_byte() {
         let mut p = Parser::new(br#""abc\x41""#.to_vec());
@@ -1151,6 +1259,35 @@ mod tests {
         parse_all("fn outer() { let f = |x: i32| { x + 1 }; f(1) }").unwrap();
     }
 
+    /// 修复 Bug 4 回归测试:Unicode 首字符的 ident 在 dict 简写里也能识别。
+    /// 修复前 `is_shorthand_field_name` 只看首字节是否为 ASCII 字母,
+    /// 中文 key 用 `{ 中文: 1 }` 形式能 dict 化(因为有 `:` 而非 shorthand),
+    /// 但 `{ 中文key }` shorthand 会被错误识别。
+    #[test]
+    fn dict_shorthand_accepts_unicode_first_char() {
+        // 简写形式:`{ 中文key }` 必须解析成 `{ "中文key": "中文key" }`,而不是当成块。
+        let stmts = parse_all("fn f() { let d = { 中文key }; d }").expect("unicode shorthand should parse");
+        assert_eq!(stmts.len(), 1);
+    }
+
+    /// 修复 spans 累积回归测试:stmt 内部 `?` 提前返回时必须清理 spans 栈。
+    /// 修复前:`spans` 是手动 push/pop,任何 `?` 冒泡都漏 pop,跨 stmt
+    /// 反复调用会让 spans 栈深度单调增长。该 bug 在 LSP/multi-error 报告
+    /// 或在 stmt 自己直接递归调用 `Parser::stmt` 的工具场景下尤其敏感。
+    #[test]
+    fn stmt_spans_cleaned_up_after_partial_failure() {
+        let mut p = Parser::new(b"fn f() { 1".to_vec());
+        // 第一个 stmt 失败(缺 `}`)。spans 应当被 RAII 守卫清空。
+        let _ = p.stmt(false).expect_err("first stmt should fail (unclosed brace)");
+        assert!(p.spans.is_empty(), "第一个 stmt 失败后 spans 应被清空。got: {:?}", p.spans);
+
+        // 模拟"忽略第一个错误继续解析" — 反复失败 N 次,spans 应保持空。
+        for _ in 0..5 {
+            let _ = p.stmt(false);
+            assert!(p.spans.is_empty(), "spans 应保持空(没有累积)。got: {:?}", p.spans);
+        }
+    }
+
     #[test]
     fn rejects_const_inside_impl_body() {
         let err = parse_all("struct S {}\nimpl S { const K = 1 }").unwrap_err();
@@ -1161,6 +1298,28 @@ mod tests {
     #[test]
     fn allows_fn_inside_impl_body() {
         parse_all("struct S {}\nimpl S { pub fn m(self: S) { 1 } }").unwrap();
+    }
+
+    /// 修复 Bug 3 回归测试:`take` 在 EOF 处不应报"实际字符 `\0`",
+    /// 而应报"已到文件末尾"。
+    #[test]
+    fn take_at_eof_reports_clean_eof_message() {
+        let mut p = Parser::new(b"fn f(".to_vec());
+        // 把 pos 推到 EOF
+        p.whitespace().unwrap();
+        while p.current_pos() < p.buf.len() {
+            // consume any leftover
+            p.whitespace().unwrap();
+            break;
+        }
+        // 直接到末尾:`fn f(` 解析到 `(` 之后,`f` 后续需要 args,会调用 take 期望 `)`,但当前是 EOF。
+        let mut p = Parser::new(b"fn f(".to_vec());
+        // 跳到末尾直接调用 take。
+        p.pos = p.buf.len();
+        let err = p.take(b')').expect_err("take at EOF should error");
+        let msg = err.downcast_ref::<crate::ParserErr>().map(|e| e.message().to_string()).unwrap_or_else(|| format!("{err:#}"));
+        assert!(msg.contains("已到文件末尾") || msg.contains("末尾"), "expected EOF message, got: {msg}");
+        assert!(!msg.contains(' '), "should not contain NUL char, got: {msg}");
     }
 
     #[test]

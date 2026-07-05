@@ -672,24 +672,89 @@ mod tests {
             .expect("trailing whitespace should be allowed");
         let _ = std::fs::remove_file(&tmp);
     }
+
+    /// Bug 2 回归测试:用显式 `known_generics` 集合判断未解析泛型,
+    /// 而不是看首字母大小写。`Vec`、`Id`、`BigFloat` 等业务大写名不会被误判;
+    /// 多字母 / 小写字母的合法泛型名(`T`、`Item`、`elem`、`Result`)也都能识别。
+    #[test]
+    fn generic_param_detection_uses_known_set_xyz() {
+        use dynamic::Type;
+        use smol_str::SmolStr;
+
+        // 已知集合包含多字母 (`Item`)、单大写字母 (`N`)、小写字母 (`elem`)。
+        let known: Vec<Type> = vec![
+            Type::Ident { name: SmolStr::from("Item"), params: Vec::new() },
+            Type::Ident { name: SmolStr::from("N"), params: Vec::new() },
+            Type::Ident { name: SmolStr::from("elem"), params: Vec::new() },
+        ];
+
+        // 已知集合中的名字 — 单大写 / 多字母 / 小写 都被识别为泛型。
+        assert!(super::has_unresolved_generic_param(
+            &Type::Ident { name: SmolStr::from("N"), params: Vec::new() }, &known));
+        assert!(super::has_unresolved_generic_param(
+            &Type::Ident { name: SmolStr::from("Item"), params: Vec::new() }, &known));
+        assert!(super::has_unresolved_generic_param(
+            &Type::Ident { name: SmolStr::from("elem"), params: Vec::new() }, &known));
+
+        // 已知集合外的名字 — 即使首字母大写也不算泛型。
+        assert!(!super::has_unresolved_generic_param(
+            &Type::Ident { name: SmolStr::from("Vec"), params: Vec::new() }, &known));
+        assert!(!super::has_unresolved_generic_param(
+            &Type::Ident { name: SmolStr::from("BigFloat"), params: Vec::new() }, &known));
+        assert!(!super::has_unresolved_generic_param(
+            &Type::Ident { name: SmolStr::from("Ok"), params: Vec::new() }, &known));
+        assert!(!super::has_unresolved_generic_param(
+            &Type::Ident { name: SmolStr::from("Result"), params: Vec::new() }, &known));
+
+        // 嵌套:`Result<T, E>` 之类 — 内层 params 也用同一已知集合判断。
+        let nested = Type::Ident {
+            name: SmolStr::from("Result"),
+            params: vec![
+                Type::Ident { name: SmolStr::from("T"), params: Vec::new() },
+                Type::Ident { name: SmolStr::from("E"), params: Vec::new() },
+            ],
+        };
+        assert!(!super::has_unresolved_generic_param(&nested, &known),
+            "Result 不在 known_generics 里,即使 T/E 在也不应判为未解析");
+
+        // 同名 + 已知集合命中,嵌套泛型 OK。
+        let ok_nested = Type::Ident {
+            name: SmolStr::from("Vec"),
+            params: vec![
+                Type::Ident { name: SmolStr::from("N"), params: Vec::new() },
+            ],
+        };
+        assert!(super::has_unresolved_generic_param(&ok_nested, &known),
+            "Vec{{N}},N 在 known_generics 里 → 应当识别为含未解析泛型");
+    }
 }
 
-fn has_unresolved_generic_param(ty: &Type) -> bool {
+/// 启发式地判断类型里是否存在"尚未实例化"的泛型参数。
+///
+/// **参数 `known_generics`**:调用方传进来的"已知泛型参数名集合"(对应当前
+/// `fn<T, U>` / `struct S<N>` / `impl Foo<Item>` 中声明的 `T/U/N/Item` 等)。
+/// 类型里出现的 ident 名只有在这个集合里才算泛型 —— 这样:
+/// - 用户自定义类型名(`Vec`、`Ok`、`Id`、`BigFloat`)不会被误判;
+/// - 多字母 / 小写字母泛型(`<T, Item, elem>`)也都正常识别。
+///
+/// 调用方必须能拿到泛型上下文。如果真拿不到,建议补到能拿到为止 —— 旧的
+/// "首字母大写就是泛型"启发式不靠谱。
+fn has_unresolved_generic_param(ty: &Type, known_generics: &[Type]) -> bool {
     match ty {
         Type::Ident { name, params } => {
             if params.is_empty() {
-                name.chars().next().map(|ch| ch.is_ascii_uppercase()).unwrap_or(false)
+                known_generics.iter().any(|g| matches!(g, Type::Ident { name: g_name, params } if params.is_empty() && g_name == name))
             } else {
-                params.iter().any(has_unresolved_generic_param)
+                params.iter().any(|p| has_unresolved_generic_param(p, known_generics))
             }
         }
-        Type::Struct { params, fields } => params.iter().any(has_unresolved_generic_param) || fields.iter().any(|(_, ty)| has_unresolved_generic_param(ty)),
-        Type::Tuple(items) => items.iter().any(has_unresolved_generic_param),
-        Type::List(elem) | Type::Vec(elem, _) | Type::Array(elem, _) => has_unresolved_generic_param(elem),
-        Type::ArrayParam(elem, len) => has_unresolved_generic_param(elem) || has_unresolved_generic_param(len),
-        Type::Fn { tys, ret } => tys.iter().any(has_unresolved_generic_param) || has_unresolved_generic_param(ret),
-        Type::Symbol { params, .. } => params.iter().any(has_unresolved_generic_param),
-        Type::ConstBinary { left, right, .. } => has_unresolved_generic_param(left) || has_unresolved_generic_param(right),
+        Type::Struct { params, fields } => params.iter().any(|p| has_unresolved_generic_param(p, known_generics)) || fields.iter().any(|(_, ty)| has_unresolved_generic_param(ty, known_generics)),
+        Type::Tuple(items) => items.iter().any(|item| has_unresolved_generic_param(item, known_generics)),
+        Type::List(elem) | Type::Vec(elem, _) | Type::Array(elem, _) => has_unresolved_generic_param(elem, known_generics),
+        Type::ArrayParam(elem, len) => has_unresolved_generic_param(elem, known_generics) || has_unresolved_generic_param(len, known_generics),
+        Type::Fn { tys, ret } => tys.iter().any(|ty| has_unresolved_generic_param(ty, known_generics)) || has_unresolved_generic_param(ret, known_generics),
+        Type::Symbol { params, .. } => params.iter().any(|p| has_unresolved_generic_param(p, known_generics)),
+        Type::ConstBinary { left, right, .. } => has_unresolved_generic_param(left, known_generics) || has_unresolved_generic_param(right, known_generics),
         _ => false,
     }
 }
@@ -1459,11 +1524,15 @@ impl Compiler {
                         for f in fns {
                             if let StmtKind::Fn { name: fn_name, generic_params: fn_generic_params, args, body, is_pub } = f.kind {
                                 let (ty, args) = Type::from_args(args);
-                                let mut generic_params = if has_unresolved_generic_param(&target) {
-                                    match &target {
-                                        Type::Ident { params, .. } => params.clone(),
-                                        _ => Vec::new(),
-                                    }
+                                // impl 目标(`impl BigFloat<N>`)的 params 是已知泛型集合,
+                                // 直接用它来判断"impl 目标是否仍是未实例化的泛型",而不是
+                                // 用首字母启发式。
+                                let target_generics: Vec<Type> = match &target {
+                                    Type::Ident { params, .. } => params.clone(),
+                                    _ => Vec::new(),
+                                };
+                                let mut generic_params = if !target_generics.is_empty() && has_unresolved_generic_param(&target, &target_generics) {
+                                    target_generics.clone()
                                 } else {
                                     Vec::new()
                                 };
@@ -1492,7 +1561,7 @@ impl Compiler {
             log::debug!("compile symbol {:?}[{}]", name, id);
             if let Some((_, Symbol::Fn { ty, generic_params, .. })) = self.sym_tab.symbols.get_symbol(id).ok() {
                 let resolved_ty = self.sym_tab.symbols.get_type(ty).unwrap_or_else(|_| ty.clone());
-                if has_unresolved_generic_param(&resolved_ty) || !generic_params.is_empty() {
+                if has_unresolved_generic_param(&resolved_ty, generic_params) || !generic_params.is_empty() {
                     continue;
                 }
             }

@@ -1,6 +1,6 @@
 [package]
 name = "zust-parser"
-version = "0.9.24"
+version = "0.9.25"
 edition = "2024"
 rust-version = "1.85"
 description = "Lexer and parser for the Zust scripting language."
@@ -14,7 +14,7 @@ categories = ["compilers", "parser-implementations"]
 name = "parser"
 
 [dependencies]
-dynamic = { package = "zust-dynamic", version = "0.9.19", path = "../dynamic" }
+dynamic = { package = "zust-dynamic", version = "0.9.20", path = "../dynamic" }
 anyhow = "1.0.102"
 thiserror = "2.0.18"
 smol_str = "0.3.6"

@@ -407,6 +407,31 @@ pub(crate) extern "C" fn callback_new(fn_ptr: i64, ret_ty: i64, explicit_arg_len
     alloc_dynamic(Dynamic::custom(ZustCallback::new_with_arg_len(fn_ptr as usize, ret_ty, explicit_arg_len, captures)))
 }
 
+pub(crate) extern "C" fn callback_call(callback: *const Dynamic, args: *const Dynamic) -> *const Dynamic {
+    if callback.is_null() {
+        return alloc_dynamic(Dynamic::Null);
+    }
+    let Some(callback) = (unsafe { &*callback }).as_custom::<ZustCallback>().cloned() else {
+        return alloc_dynamic(Dynamic::Null);
+    };
+    let args = if args.is_null() {
+        Vec::new()
+    } else {
+        match unsafe { &*args } {
+            Dynamic::List(values) => values.read().to_vec(),
+            Dynamic::Null => Vec::new(),
+            value => vec![value.clone()],
+        }
+    };
+    match callback.call(args) {
+        Ok(value) => alloc_dynamic(value),
+        Err(err) => {
+            log::error!("callback call failed: {err:?}");
+            alloc_dynamic(Dynamic::Null)
+        }
+    }
+}
+
 fn spawn_run_ptr(fn_ptr: usize, ret_ty: Type, args: Dynamic) -> Result<()> {
     let args = spawn_args(args);
     if args.len() > 16 {

@@ -114,6 +114,7 @@ impl JITRunTime {
         self.native_symbols.write().insert("__vm_strcat_i64".to_string(), native::strcat_i64 as *const () as usize);
         self.native_symbols.write().insert("__vm_strcat_assign".to_string(), native::strcat_assign as *const () as usize);
         self.native_symbols.write().insert("__vm_callback_new".to_string(), native::callback_new as *const () as usize);
+        self.native_symbols.write().insert("__vm_callback_call".to_string(), native::callback_call as *const () as usize);
         self.native_symbols.write().insert("__vm_spawn_ptr".to_string(), native::spawn_ptr as *const () as usize);
         self.native_symbols.write().insert("__vm_struct_from_ptr".to_string(), native::struct_from_ptr as *const () as usize);
         self.native_symbols.write().insert("__vm_array_from_ptr".to_string(), native::array_from_ptr as *const () as usize);
@@ -147,6 +148,9 @@ impl JITRunTime {
 
         let callback_new_sig = self.get_sig(&[Type::I64, Type::I64, Type::I64, Type::Any], Type::Any)?;
         self.builtin_fns.register(BuiltinFn::CallbackNew, self.module.declare_function("__vm_callback_new", cranelift_module::Linkage::Import, &callback_new_sig)?);
+
+        let callback_call_sig = self.get_sig(&[Type::Any, Type::Any], Type::Any)?;
+        self.builtin_fns.register(BuiltinFn::CallbackCall, self.module.declare_function("__vm_callback_call", cranelift_module::Linkage::Import, &callback_call_sig)?);
 
         let spawn_ptr_sig = self.get_sig(&[Type::I64, Type::I64, Type::Any], Type::Bool)?;
         self.builtin_fns.register(BuiltinFn::SpawnPtr, self.module.declare_function("__vm_spawn_ptr", cranelift_module::Linkage::Import, &spawn_ptr_sig)?);
@@ -2081,6 +2085,45 @@ mod tests {
         assert_eq!(compiled.ret_ty(), &Type::I32);
         let with_arg: extern "C" fn() -> i32 = unsafe { std::mem::transmute(compiled.ptr()) };
         assert_eq!(with_arg(), 3);
+        Ok(())
+    }
+
+    #[test]
+    fn returned_closure_can_be_called() -> anyhow::Result<()> {
+        let vm = Vm::with_all()?;
+        vm.import_code(
+            "vm_returned_closure_call",
+            br#"
+            pub fn make_adder() {
+                |value: i64| { value + 1i64 }
+            }
+
+            pub fn make_offset_adder(offset: i64) {
+                |value: i64| { value + offset }
+            }
+
+            pub fn run() {
+                make_adder()(41i64)
+            }
+
+            pub fn run_captured() {
+                make_offset_adder(2i64)(40i64)
+            }
+            "#
+            .to_vec(),
+        )?;
+
+        let compiled = vm.get_fn("vm_returned_closure_call::run", &[])?;
+        assert_eq!(compiled.ret_ty(), &Type::Any);
+        let run: extern "C" fn() -> *const Dynamic = unsafe { std::mem::transmute(compiled.ptr()) };
+        let result = unsafe { &*run() };
+        assert_eq!(result.as_int(), Some(42));
+
+        let compiled = vm.get_fn("vm_returned_closure_call::run_captured", &[])?;
+        assert_eq!(compiled.ret_ty(), &Type::Any);
+        let run_captured: extern "C" fn() -> *const Dynamic = unsafe { std::mem::transmute(compiled.ptr()) };
+        let result = unsafe { &*run_captured() };
+        assert_eq!(result.as_int(), Some(42));
         Ok(())
     }
 

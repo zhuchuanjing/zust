@@ -30,6 +30,7 @@ pub enum BuiltinFn {
     StrcatI64,
     StrcatAssign,
     CallbackNew,
+    CallbackCall,
     SpawnPtr,
     StructFromPtr,
     ArrayFromPtr,
@@ -52,6 +53,7 @@ impl BuiltinFn {
             Self::StrcatI64 => "__vm_strcat_i64",
             Self::StrcatAssign => "__vm_strcat_assign",
             Self::CallbackNew => "__vm_callback_new",
+            Self::CallbackCall => "__vm_callback_call",
             Self::SpawnPtr => "__vm_spawn_ptr",
             Self::StructFromPtr => "__vm_struct_from_ptr",
             Self::ArrayFromPtr => "__vm_array_from_ptr",
@@ -73,6 +75,7 @@ impl BuiltinFn {
             Self::StrcatI64 => "VM strcat i64 runtime is not registered",
             Self::StrcatAssign => "VM strcat assign runtime is not registered",
             Self::CallbackNew => "VM callback runtime is not registered",
+            Self::CallbackCall => "VM callback call runtime is not registered",
             Self::SpawnPtr => "VM spawn ptr runtime is not registered",
             Self::StructFromPtr => "VM struct Dynamic runtime is not registered",
             Self::ArrayFromPtr => "VM array Dynamic runtime is not registered",
@@ -1275,6 +1278,26 @@ impl JITRunTime {
         Ok((ctx.builder.inst_results(call_inst)[0], Type::Any).into())
     }
 
+    fn call_dynamic_callback(&mut self, ctx: &mut BuildContext, callback: (Value, Type), params: &Vec<Expr>) -> Result<LocalVar> {
+        if !callback.1.is_any() && !callback.1.is_fn() {
+            anyhow::bail!("call target is not a callback: {:?}", callback.1);
+        }
+        let mut args = Vec::with_capacity(params.len());
+        for param in params {
+            let value = self.eval(ctx, param)?;
+            let value = match value {
+                LocalVar::Closure { id, captures } => self.callback_value(ctx, id, captures)?.get(ctx).ok_or_else(|| anyhow!("callback 参数没有值: {:?}", param))?,
+                value => value.get(ctx).ok_or_else(|| anyhow!("callback 参数表达式没有值: {:?}", param))?,
+            };
+            args.push(value);
+        }
+        let args = self.dynamic_list_from_values(ctx, args)?;
+        let callback_call = self.builtin_fns.get_or_err(BuiltinFn::CallbackCall)?;
+        let callback_call_ref = self.get_fn_ref(ctx, callback_call);
+        let call_inst = ctx.builder.ins().call(callback_call_ref, &[callback.0, args.0]);
+        Ok((ctx.builder.inst_results(call_inst)[0], Type::Any).into())
+    }
+
     fn spawn_closure(&mut self, ctx: &mut BuildContext, id: u32, captures: Vec<(Value, Type)>, args_expr: &Expr) -> Result<LocalVar> {
         if !captures.is_empty() {
             return Err(anyhow!("spawn closure does not support captures yet"));
@@ -1299,34 +1322,81 @@ impl JITRunTime {
         Ok((ctx.builder.inst_results(call_inst)[0], Type::Bool).into())
     }
 
-    fn inline_expr_weight(expr: &Expr) -> usize {
-        match &expr.kind {
-            ExprKind::Typed { value, .. } | ExprKind::Unary { value, .. } => 1 + Self::inline_expr_weight(value),
-            ExprKind::Binary { left, right, .. } => 1 + Self::inline_expr_weight(left) + Self::inline_expr_weight(right),
-            ExprKind::Generic { obj, .. } => 1 + Self::inline_expr_weight(obj),
-            ExprKind::Tuple(items) | ExprKind::List(items) => 1 + items.iter().map(Self::inline_expr_weight).sum::<usize>(),
-            ExprKind::Repeat { value, .. } => 1 + Self::inline_expr_weight(value),
-            ExprKind::Dict(items) => 1 + items.iter().map(|(_, value)| Self::inline_expr_weight(value)).sum::<usize>(),
-            ExprKind::Range { start, stop, .. } => 1 + Self::inline_expr_weight(start) + Self::inline_expr_weight(stop),
-            ExprKind::Call { obj, params } => 1 + Self::inline_expr_weight(obj) + params.iter().map(Self::inline_expr_weight).sum::<usize>(),
-            ExprKind::Stmt(_) | ExprKind::Closure { .. } => usize::MAX,
-            _ => 1,
+    fn inline_call_obj_weight(&self, obj: &Expr) -> Option<usize> {
+        match &obj.kind {
+            ExprKind::Id(_, None) | ExprKind::AssocId { .. } => Some(0),
+            ExprKind::Id(_, Some(receiver)) => self.inline_expr_weight(receiver),
+            _ => self.inline_expr_weight(obj),
         }
     }
 
-    fn inline_stmt_weight(stmt: &Stmt) -> usize {
+    fn inline_expr_weight(&self, expr: &Expr) -> Option<usize> {
+        match &expr.kind {
+            ExprKind::Typed { value, .. } | ExprKind::Unary { value, .. } => self.inline_expr_weight(value)?.checked_add(1),
+            ExprKind::Binary { left, right, .. } => {
+                let weight = 1usize.checked_add(self.inline_expr_weight(left)?)?;
+                weight.checked_add(self.inline_expr_weight(right)?)
+            }
+            ExprKind::Generic { obj, .. } => self.inline_expr_weight(obj)?.checked_add(1),
+            ExprKind::Tuple(items) | ExprKind::List(items) => self.inline_expr_items_weight(items),
+            ExprKind::Repeat { value, .. } => self.inline_expr_weight(value)?.checked_add(1),
+            ExprKind::Dict(items) => {
+                let mut weight = 1usize;
+                for (_, value) in items {
+                    weight = weight.checked_add(self.inline_expr_weight(value)?)?;
+                }
+                Some(weight)
+            }
+            ExprKind::Range { start, stop, .. } => {
+                let weight = 1usize.checked_add(self.inline_expr_weight(start)?)?;
+                weight.checked_add(self.inline_expr_weight(stop)?)
+            }
+            ExprKind::Call { obj, params } => {
+                let mut weight = 1usize.checked_add(self.inline_call_obj_weight(obj)?)?;
+                for param in params {
+                    weight = weight.checked_add(self.inline_expr_weight(param)?)?;
+                }
+                Some(weight)
+            }
+            ExprKind::Stmt(_) | ExprKind::Closure { .. } | ExprKind::Id(_, _) | ExprKind::AssocId { .. } => None,
+            _ => Some(1),
+        }
+    }
+
+    fn inline_expr_items_weight<'a>(&self, items: impl IntoIterator<Item = &'a Expr>) -> Option<usize> {
+        let mut weight = 1usize;
+        for item in items {
+            weight = weight.checked_add(self.inline_expr_weight(item)?)?;
+        }
+        Some(weight)
+    }
+
+    fn inline_stmt_weight(&self, stmt: &Stmt) -> Option<usize> {
         match &stmt.kind {
-            StmtKind::Expr(expr, _) | StmtKind::Return(Some(expr)) => 1 + Self::inline_expr_weight(expr),
-            StmtKind::Block(stmts) => 1 + stmts.iter().map(Self::inline_stmt_weight).sum::<usize>(),
-            StmtKind::If { cond, then_body, else_body } => 1 + Self::inline_expr_weight(cond) + Self::inline_stmt_weight(then_body) + else_body.as_deref().map(Self::inline_stmt_weight).unwrap_or(0),
+            StmtKind::Expr(expr, _) | StmtKind::Return(Some(expr)) => self.inline_expr_weight(expr)?.checked_add(1),
+            StmtKind::Block(stmts) => {
+                let mut weight = 1usize;
+                for stmt in stmts {
+                    weight = weight.checked_add(self.inline_stmt_weight(stmt)?)?;
+                }
+                Some(weight)
+            }
+            StmtKind::If { cond, then_body, else_body } => {
+                let mut weight = 1usize.checked_add(self.inline_expr_weight(cond)?)?;
+                weight = weight.checked_add(self.inline_stmt_weight(then_body)?)?;
+                if let Some(else_body) = else_body {
+                    weight = weight.checked_add(self.inline_stmt_weight(else_body)?)?;
+                }
+                Some(weight)
+            }
             StmtKind::While { body, .. } | StmtKind::Loop(body) | StmtKind::For { body, .. } => {
                 if Self::inline_stmt_contains_return(body) {
-                    usize::MAX
+                    None
                 } else {
-                    16 + Self::inline_stmt_weight(body)
+                    self.inline_stmt_weight(body)?.checked_add(16)
                 }
             }
-            _ => usize::MAX,
+            _ => None,
         }
     }
 
@@ -1382,16 +1452,6 @@ impl JITRunTime {
             return ret_ty.clone();
         };
         if first.is_any() || return_tys.iter().any(|ty| ty != first) { ret_ty.clone() } else { first.clone() }
-    }
-
-    fn can_inline_stmt(stmt: &Stmt) -> bool {
-        match &stmt.kind {
-            StmtKind::Expr(expr, _) | StmtKind::Return(Some(expr)) => Self::inline_expr_weight(expr) != usize::MAX,
-            StmtKind::Block(stmts) => stmts.iter().all(Self::can_inline_stmt),
-            StmtKind::If { cond, then_body, else_body } => Self::inline_expr_weight(cond) != usize::MAX && Self::can_inline_stmt(then_body) && else_body.as_deref().map(Self::can_inline_stmt).unwrap_or(true),
-            StmtKind::While { body, .. } | StmtKind::Loop(body) | StmtKind::For { body, .. } => !Self::inline_stmt_contains_return(body),
-            _ => false,
-        }
     }
 
     fn gen_inline_return(&mut self, ctx: &mut BuildContext, ret_ty: &Type, exit_block: Block, value: Option<&Expr>) -> Result<()> {
@@ -1482,10 +1542,12 @@ impl JITRunTime {
             return Ok(None);
         }
         let body = body.as_ref().clone();
-        if !Self::can_inline_stmt(&body) || !Self::inline_stmt_returns_value(&body) {
+        if !Self::inline_stmt_returns_value(&body) {
             return Ok(None);
         };
-        let weight = Self::inline_stmt_weight(&body);
+        let Some(weight) = self.inline_stmt_weight(&body) else {
+            return Ok(None);
+        };
         if weight > 64 || weight > self.inline_budget {
             return Ok(None);
         }
@@ -1775,7 +1837,13 @@ impl JITRunTime {
                         if let LocalVar::Closure { id, captures } = val {
                             return self.call_fn_with_capture_values(ctx, id, &[], None, params, Some(captures));
                         }
-                        anyhow::bail!("暂未实现: {:?}", val)
+                        let val_debug = format!("{:?}", val);
+                        if let Some(callback) = val.get(ctx)
+                            && (callback.1.is_any() || callback.1.is_fn())
+                        {
+                            return self.call_dynamic_callback(ctx, callback, params);
+                        }
+                        anyhow::bail!("暂未实现: {}", val_debug)
                     }
                 }
             }
@@ -1900,7 +1968,10 @@ impl JITRunTime {
             StmtKind::Return(expr) => {
                 if let Some(expr) = expr {
                     let value = self.eval(ctx, expr)?;
-                    let value = value.get(ctx);
+                    let value = match value {
+                        LocalVar::Closure { id, captures } => self.callback_value(ctx, id, captures)?.get(ctx),
+                        value => value.get(ctx),
+                    };
                     self.return_value(ctx, value)?;
                 } else {
                     self.return_value(ctx, None)?;
@@ -2144,5 +2215,25 @@ impl JITRunTime {
             }
         }
         Ok(false)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn expr(kind: ExprKind) -> Expr {
+        Expr::new(kind, Span::default())
+    }
+
+    #[test]
+    fn inline_weight_rejects_symbol_id_values_but_allows_call_targets() {
+        let vm = JITRunTime::new(|_| {});
+        let id_value = expr(ExprKind::Id(1, None));
+
+        assert_eq!(vm.inline_expr_weight(&id_value), None);
+
+        let call = expr(ExprKind::Call { obj: Box::new(id_value), params: vec![expr(ExprKind::Value(Dynamic::from(1i64)))] });
+        assert_eq!(vm.inline_expr_weight(&call), Some(2));
     }
 }

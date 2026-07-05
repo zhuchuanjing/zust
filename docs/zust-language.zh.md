@@ -472,7 +472,7 @@ root::remove(path) -> any
 
 // 查询
 root::get(path)
-root::dir(path) -> [string]
+root::dir(path) -> [string]        // 当前目录下一级子项名,不递归
 root::len(path)
 root::keys(path) -> [string]
 

@@ -190,14 +190,14 @@ impl<T: std::fmt::Debug + MsgPack + MsgUnpack + Default + Send> Mount<T> {
         let prefix = if name.is_empty() || name.ends_with('/') { name.to_string() } else { format!("{name}/") };
         if let Self::Redis { client, rl: _ } = self {
             let mut conn = client.get_connection()?;
-            return Ok(Self::dir_entries_from_children(&prefix, directory::children(&mut conn, name)?));
+            return directory::children(&mut conn, name);
         }
 
         let raw = self.dir_raw(&prefix)?;
         Ok(Self::dir_entries_from_raw(&prefix, raw))
     }
 
-    fn dir_entries_from_children(prefix: &str, children: Vec<SmolStr>) -> Vec<SmolStr> {
+    fn dir_raw_entries_from_children(prefix: &str, children: Vec<SmolStr>) -> Vec<SmolStr> {
         children.into_iter().map(|child| if prefix.is_empty() { child } else { format!("{prefix}{child}").into() }).collect()
     }
 
@@ -211,7 +211,7 @@ impl<T: std::fmt::Debug + MsgPack + MsgUnpack + Default + Send> Mount<T> {
             let end = rest.find('/').unwrap_or(rest.len());
             let entry = &rest[..end];
             if !entry.is_empty() && seen.insert(entry.to_string()) {
-                names.push(format!("{prefix}{entry}").into());
+                names.push(entry.into());
             }
         }
         names
@@ -231,7 +231,7 @@ impl<T: std::fmt::Debug + MsgPack + MsgUnpack + Default + Send> Mount<T> {
             Self::Redis { client, rl: _ } => {
                 let mut conn = client.get_connection()?;
                 let prefix = if name.is_empty() || name.ends_with('/') { name.to_string() } else { format!("{name}/") };
-                names.append(&mut Self::dir_entries_from_children(&prefix, directory::children(&mut conn, name)?));
+                names.append(&mut Self::dir_raw_entries_from_children(&prefix, directory::children(&mut conn, name)?));
             }
             Self::Fjall { values, .. } => {
                 names.append(&mut fjall_paths_with_prefix(values, name)?);
@@ -754,7 +754,7 @@ mod tests {
         let mut entries = mount.dir(name).unwrap();
         entries.sort();
 
-        assert_eq!(entries, vec![SmolStr::new("test/dir/a"), SmolStr::new("test/dir/sub")]);
+        assert_eq!(entries, vec![SmolStr::new("a"), SmolStr::new("sub")]);
     }
 
     #[test]
@@ -764,7 +764,7 @@ mod tests {
         assert!(mount.add(name, 1.into()));
 
         let (mount, name) = root.get_mount("local/test/slash/").unwrap();
-        assert_eq!(mount.dir(name).unwrap(), vec![SmolStr::new("test/slash/a")]);
+        assert_eq!(mount.dir(name).unwrap(), vec![SmolStr::new("a")]);
     }
 
     #[test]
@@ -797,7 +797,7 @@ mod tests {
             let (mount, name) = root.get_mount("fjall/test").unwrap();
             let mut entries = mount.dir(name).unwrap();
             entries.sort();
-            assert_eq!(entries, vec![SmolStr::new("test/kv"), SmolStr::new("test/list"), SmolStr::new("test/map")]);
+            assert_eq!(entries, vec![SmolStr::new("kv"), SmolStr::new("list"), SmolStr::new("map")]);
             let (mount, name) = root.get_mount("fjall/test/list").unwrap();
             assert_eq!(mount.get_idx(name, 0, |v| v.as_int()).unwrap(), Some(7));
             let (mount, name) = root.get_mount("fjall/test/map").unwrap();

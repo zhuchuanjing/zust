@@ -436,9 +436,8 @@ pub fn get(name: &str) -> Result<Dynamic> {
 }
 
 pub fn dir(name: &str) -> Result<Dynamic> {
-    let mount_name = name.split_once('/').map(|(n, _)| n).unwrap_or(name);
     let (m, name) = get_mount(name)?;
-    m.dir(name).map(|names| if matches!(m, Mount::Redis { .. }) { names.into_iter().map(|n| format!("{}/{}", mount_name, n).into()).collect::<Vec<SmolStr>>().into() } else { names.into() })
+    m.dir(name).map(Into::into)
 }
 
 pub fn keys(name: &str) -> Result<Dynamic> {
@@ -798,6 +797,18 @@ mod tests {
         let mut keys = (0..key_list.len()).map(|idx| key_list.get_idx(idx).unwrap().as_str().to_string()).collect::<Vec<_>>();
         keys.sort();
         assert_eq!(keys, vec!["0".to_string(), "1".to_string()]);
+    }
+
+    #[test]
+    fn dir_returns_immediate_child_names() {
+        let path = format!("local/test/public_dir/{}", uuid::Uuid::new_v4());
+        add_value(&format!("{path}/a"), 1_i64).unwrap();
+        add_value(&format!("{path}/sub/item"), 2_i64).unwrap();
+
+        let entries = dir(&path).unwrap();
+        let mut entries = (0..entries.len()).map(|idx| entries.get_idx(idx).unwrap().as_str().to_string()).collect::<Vec<_>>();
+        entries.sort();
+        assert_eq!(entries, vec!["a".to_string(), "sub".to_string()]);
     }
 
     #[test]

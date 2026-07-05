@@ -1501,6 +1501,7 @@ mod tests {
             pub fn static_string_methods(text: string) {
                 let parts = text.split(",");
                 text.starts_with("alpha")
+                    && text.ends_with("beta")
                     && text.is_string()
                     && !text.is_null()
                     && parts.len() == 2
@@ -1511,6 +1512,7 @@ mod tests {
             pub fn any_string_methods(value) {
                 let parts = value.split(",");
                 value.starts_with("alpha")
+                    && value.ends_with("beta")
                     && value.is_string()
                     && !value.is_null()
                     && parts.len() == 2

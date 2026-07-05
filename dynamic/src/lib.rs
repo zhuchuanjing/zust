@@ -1324,6 +1324,16 @@ impl Dynamic {
         }
     }
 
+    pub fn ends_with(&self, suffix: &str) -> bool {
+        if let Self::String(s) = self {
+            s.ends_with(suffix)
+        } else if let Self::StringBuf(s) = self {
+            s.ends_with(suffix)
+        } else {
+            false
+        }
+    }
+
     pub fn get_dynamic(&self, key: &str) -> Option<Dynamic> {
         if let Self::Map(map) = self {
             map.read().get(key).cloned()

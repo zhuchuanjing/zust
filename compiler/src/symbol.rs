@@ -170,7 +170,7 @@ impl SymbolTable {
                     return Ok((idx, field_ty.clone()));
                 }
                 match name {
-                    "is_map" | "is_list" | "is_string" | "is_null" | "contains" | "starts_with" => return Ok((usize::MAX, Type::Bool)),
+                    "is_map" | "is_list" | "is_string" | "is_null" | "contains" | "starts_with" | "ends_with" => return Ok((usize::MAX, Type::Bool)),
                     "len" => return Ok((usize::MAX, Type::I32)),
                     _ => return Ok((usize::MAX, Type::Any)),
                 }
@@ -180,7 +180,7 @@ impl SymbolTable {
             }
             Type::Str => {
                 let any_method = match name {
-                    "len" | "contains" | "split" | "starts_with" | "is_string" | "is_null" => format!("Any::{}", name),
+                    "len" | "contains" | "split" | "starts_with" | "ends_with" | "is_string" | "is_null" => format!("Any::{}", name),
                     _ => return Err(anyhow!("未发现 symbol {:?} {}", ty, name)),
                 };
                 return Ok((usize::MAX, Type::Symbol { id: self.get_id(&any_method)?, params: Vec::new() }));

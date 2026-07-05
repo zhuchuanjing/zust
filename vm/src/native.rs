@@ -950,6 +950,15 @@ extern "C" fn starts_with(addr: *const Dynamic, prefix: *const Dynamic) -> bool 
     }
 }
 
+extern "C" fn ends_with(addr: *const Dynamic, suffix: *const Dynamic) -> bool {
+    if addr.is_null() || suffix.is_null() {
+        false
+    } else {
+        let suffix: &str = unsafe { &*suffix }.as_str();
+        unsafe { (*addr).ends_with(suffix) }
+    }
+}
+
 extern "C" fn get_idx(addr: *const Dynamic, idx: i64) -> *const Dynamic {
     if addr.is_null() { any_null() } else { alloc_dynamic(unsafe { (*addr).get_idx(idx as usize).unwrap_or(Dynamic::Null) }) }
 }
@@ -1397,7 +1406,7 @@ pub const STD: [(&str, &[Type], Type, *const u8); 6] = [
     ("rand", &[Type::Any, Type::Any], Type::Any, random as *const u8),
 ];
 
-pub const ANY: [(&str, &[Type], Type, *const u8); 78] = [
+pub const ANY: [(&str, &[Type], Type, *const u8); 79] = [
     ("Any::null", &[], Type::Any, any_null as *const u8),
     ("Any::is_map", &[Type::Any], Type::Bool, any_is_map as *const u8),
     ("Any::is_list", &[Type::Any], Type::Bool, any_is_list as *const u8),
@@ -1457,6 +1466,7 @@ pub const ANY: [(&str, &[Type], Type, *const u8); 78] = [
     ("Any::slice", &[Type::Any, Type::I64, Type::Any, Type::Bool], Type::Any, slice as *const u8),
     ("Any::contains", &[Type::Any, Type::Any], Type::Bool, contains as *const u8),
     ("Any::starts_with", &[Type::Any, Type::Any], Type::Bool, starts_with as *const u8),
+    ("Any::ends_with", &[Type::Any, Type::Any], Type::Bool, ends_with as *const u8),
     ("Any::get", &[Type::Any, Type::Any], Type::Any, get_key as *const u8),
     ("Any::get_key", &[Type::Any, Type::Any], Type::Any, get_key as *const u8),
     ("Any::del_key", &[Type::Any, Type::Any], Type::Any, del_key as *const u8),

@@ -8,7 +8,7 @@ use anyhow::{Result, anyhow};
 use super::sync_await;
 use crate::directory;
 use crate::node::Node;
-use fjall::{KeyspaceCreateOptions, OptimisticTxDatabase, OptimisticTxKeyspace};
+use fjall::{KeyspaceCreateOptions, OptimisticTxDatabase, OptimisticTxKeyspace, PersistMode};
 use redis::AsyncCommands;
 use redis::Commands;
 use std::sync::Arc;
@@ -22,6 +22,7 @@ pub enum Mount<T> {
         rl: LockManager,
     },
     Fjall {
+        db: OptimisticTxDatabase,
         values: OptimisticTxKeyspace,
         write_lock: Arc<std::sync::Mutex<()>>,
     },
@@ -43,7 +44,7 @@ impl<T: std::fmt::Debug + MsgPack + MsgUnpack + Default + Send> Mount<T> {
     pub fn fjall(data_dir: &str) -> Result<Self> {
         let db = OptimisticTxDatabase::builder(data_dir).open()?;
         let values = db.keyspace("root", KeyspaceCreateOptions::default)?;
-        Ok(Self::Fjall { values, write_lock: Arc::new(std::sync::Mutex::new(())) })
+        Ok(Self::Fjall { db, values, write_lock: Arc::new(std::sync::Mutex::new(())) })
     }
 
     pub fn add(&self, name: &str, value: T) -> bool {
@@ -60,13 +61,16 @@ impl<T: std::fmt::Debug + MsgPack + MsgUnpack + Default + Send> Mount<T> {
                 };
                 conn.set::<&str, Vec<u8>, ()>(name, buf).is_ok() && directory::add_path(&mut conn, name).is_ok()
             }
-            Self::Fjall { values, write_lock } => {
+            Self::Fjall { db, values, write_lock } => {
                 let mut buf = Vec::new();
                 value.encode(&mut buf);
                 let Ok(_guard) = write_lock.lock() else {
                     return false;
                 };
-                fjall_clear_node(values, name).is_ok() && values.insert(fjall_object_key(name), buf).is_ok()
+                if fjall_clear_node(values, name).is_err() || values.insert(fjall_object_key(name), buf).is_err() {
+                    return false;
+                }
+                fjall_persist(db).is_ok()
             }
         }
     }
@@ -112,11 +116,12 @@ impl<T: std::fmt::Debug + MsgPack + MsgUnpack + Default + Send> Mount<T> {
                     }
                 })
             }
-            Self::Fjall { values, write_lock } => {
+            Self::Fjall { db, values, write_lock } => {
                 let _guard = write_lock.lock().map_err(|e| anyhow!("无法获取 fjall 写锁: {}", e))?;
                 let mut v = fjall_get_object::<T>(values, name)?;
                 let r = f(&mut v);
                 fjall_insert_object(values, name, &v)?;
+                fjall_persist(db)?;
                 Ok(r)
             }
         }
@@ -176,23 +181,27 @@ impl<T: std::fmt::Debug + MsgPack + MsgUnpack + Default + Send> Mount<T> {
                     }
                 })
             }
-            Self::Fjall { values, write_lock } => {
+            Self::Fjall { db, values, write_lock } => {
                 let _guard = write_lock.lock().map_err(|e| anyhow!("无法获取 fjall 写锁: {}", e))?;
                 let mut v = fjall_get_map_item::<T>(values, name, key)?;
                 let r = f(&mut v);
                 fjall_insert_map_item(values, name, key, &v)?;
+                fjall_persist(db)?;
                 Ok(r)
             }
         }
     }
 
     pub fn dir(&self, name: &str) -> Result<Vec<SmolStr>> {
-        let prefix = if name.is_empty() || name.ends_with('/') { name.to_string() } else { format!("{name}/") };
         if let Self::Redis { client, rl: _ } = self {
             let mut conn = client.get_connection()?;
             return directory::children(&mut conn, name);
         }
+        if let Self::Fjall { values, .. } = self {
+            return fjall_dir(values, name);
+        }
 
+        let prefix = if name.is_empty() || name.ends_with('/') { name.to_string() } else { format!("{name}/") };
         let raw = self.dir_raw(&prefix)?;
         Ok(Self::dir_entries_from_raw(&prefix, raw))
     }
@@ -274,9 +283,10 @@ impl<T: std::fmt::Debug + MsgPack + MsgUnpack + Default + Send> Mount<T> {
                 }
                 Ok(v)
             }
-            Self::Fjall { values, .. } => {
+            Self::Fjall { db, values, .. } => {
                 let v = fjall_get_object(values, name)?;
                 values.remove(fjall_object_key(name))?;
+                fjall_persist(db)?;
                 Ok(v)
             }
         }
@@ -288,9 +298,11 @@ impl<T: std::fmt::Debug + MsgPack + MsgUnpack + Default + Send> Mount<T> {
                 m.upsert_sync(name.into(), Node::<T>::list());
             } // 强制插入 肯定成功
             Self::Redis { client: _, rl: _ } => {}
-            Self::Fjall { values, write_lock } => {
+            Self::Fjall { db, values, write_lock } => {
                 if let Ok(_guard) = write_lock.lock() {
-                    let _ = fjall_clear_node(values, name).and_then(|_| fjall_set_node_type(values, name, FjallNodeType::List));
+                    let _ = fjall_clear_node(values, name)
+                        .and_then(|_| fjall_set_node_type(values, name, FjallNodeType::List))
+                        .and_then(|_| fjall_persist(db));
                 }
             }
         }
@@ -302,9 +314,11 @@ impl<T: std::fmt::Debug + MsgPack + MsgUnpack + Default + Send> Mount<T> {
                 m.upsert_sync(name.into(), Node::<T>::map());
             } // 强制插入 肯定成功
             Self::Redis { client: _, rl: _ } => {}
-            Self::Fjall { values, write_lock } => {
+            Self::Fjall { db, values, write_lock } => {
                 if let Ok(_guard) = write_lock.lock() {
-                    let _ = fjall_clear_node(values, name).and_then(|_| fjall_set_node_type(values, name, FjallNodeType::Map));
+                    let _ = fjall_clear_node(values, name)
+                        .and_then(|_| fjall_set_node_type(values, name, FjallNodeType::Map))
+                        .and_then(|_| fjall_persist(db));
                 }
             }
         }
@@ -321,7 +335,7 @@ impl<T: std::fmt::Debug + MsgPack + MsgUnpack + Default + Send> Mount<T> {
                 directory::add_path(&mut conn, name)?;
                 Ok(len)
             }
-            Self::Fjall { values, write_lock } => {
+            Self::Fjall { db, values, write_lock } => {
                 let _guard = write_lock.lock().map_err(|e| anyhow!("无法获取 fjall 写锁: {}", e))?;
                 match fjall_node_type(values, name)? {
                     Some(FjallNodeType::List) => {}
@@ -330,6 +344,7 @@ impl<T: std::fmt::Debug + MsgPack + MsgUnpack + Default + Send> Mount<T> {
                 }
                 let idx = fjall_next_list_idx(values, name)?;
                 fjall_insert_list_item(values, name, idx, &value)?;
+                fjall_persist(db)?;
                 Ok(idx)
             }
         }
@@ -357,11 +372,12 @@ impl<T: std::fmt::Debug + MsgPack + MsgUnpack + Default + Send> Mount<T> {
                 let (mut v, _) = T::decode(buf.as_slice())?;
                 Ok(f(&mut v))
             }
-            Self::Fjall { values, write_lock } => {
+            Self::Fjall { db, values, write_lock } => {
                 let _guard = write_lock.lock().map_err(|e| anyhow!("无法获取 fjall 写锁: {}", e))?;
                 let mut v = fjall_get_list_item::<T>(values, name, idx)?;
                 let r = f(&mut v);
                 fjall_insert_list_item(values, name, idx, &v)?;
+                fjall_persist(db)?;
                 Ok(r)
             }
         }
@@ -377,11 +393,12 @@ impl<T: std::fmt::Debug + MsgPack + MsgUnpack + Default + Send> Mount<T> {
                 let _: () = conn.lset(name, idx as isize, Vec::new())?;
                 Ok(v)
             }
-            Self::Fjall { values, .. } => {
+            Self::Fjall { db, values, .. } => {
                 let key = fjall_list_item_key(name, idx);
                 let buf = values.get(&key)?.ok_or(anyhow!("remove_idx {} 失败", name))?;
                 let (v, _) = T::decode(buf.as_ref())?;
                 values.remove(key)?;
+                fjall_persist(db)?;
                 Ok(v)
             }
         }
@@ -400,7 +417,7 @@ impl<T: std::fmt::Debug + MsgPack + MsgUnpack + Default + Send> Mount<T> {
                 }
                 None
             }
-            Self::Fjall { values, write_lock } => {
+            Self::Fjall { db, values, write_lock } => {
                 let _guard = write_lock.lock().ok()?;
                 match fjall_node_type(values, name).ok()? {
                     Some(FjallNodeType::Map) => {}
@@ -409,6 +426,7 @@ impl<T: std::fmt::Debug + MsgPack + MsgUnpack + Default + Send> Mount<T> {
                 }
                 let old = fjall_get_map_item(values, name, key).ok();
                 fjall_insert_map_item(values, name, key, &value).ok()?;
+                fjall_persist(db).ok()?;
                 old
             }
         }
@@ -452,11 +470,12 @@ impl<T: std::fmt::Debug + MsgPack + MsgUnpack + Default + Send> Mount<T> {
                 }
                 Ok(v)
             }
-            Self::Fjall { values, .. } => {
+            Self::Fjall { db, values, .. } => {
                 let item_key = fjall_map_item_key(name, key);
                 let buf = values.get(&item_key)?.ok_or(anyhow!("remove_key {} 失败", name))?;
                 let (v, _) = T::decode(buf.as_ref())?;
                 values.remove(item_key)?;
+                fjall_persist(db)?;
                 Ok(v)
             }
         }
@@ -522,6 +541,18 @@ fn fjall_map_item_key(name: &str, key: &str) -> Vec<u8> {
     item_key
 }
 
+fn fjall_prefix_end(prefix: &[u8]) -> Option<Vec<u8>> {
+    let mut end = prefix.to_vec();
+    for idx in (0..end.len()).rev() {
+        if end[idx] < 255 {
+            end[idx] += 1;
+            end.truncate(idx + 1);
+            return Some(end);
+        }
+    }
+    None
+}
+
 fn fjall_decode_value<T: MsgUnpack>(buf: &[u8]) -> Result<T> {
     T::decode(buf).map(|(value, _)| value)
 }
@@ -530,6 +561,10 @@ fn fjall_encode_value<T: MsgPack>(value: &T) -> Vec<u8> {
     let mut buf = Vec::new();
     value.encode(&mut buf);
     buf
+}
+
+fn fjall_persist(db: &OptimisticTxDatabase) -> Result<()> {
+    Ok(db.persist(PersistMode::SyncAll)?)
 }
 
 fn fjall_get_object<T: MsgUnpack>(values: &OptimisticTxKeyspace, name: &str) -> Result<T> {
@@ -638,6 +673,68 @@ fn fjall_paths_for_key_prefix(values: &OptimisticTxKeyspace, key_prefix: u8, pat
     Ok(names)
 }
 
+fn fjall_dir(values: &OptimisticTxKeyspace, name: &str) -> Result<Vec<SmolStr>> {
+    let path_prefix = if name.is_empty() || name.ends_with('/') { name.to_string() } else { format!("{name}/") };
+    let mut names = Vec::new();
+    names.extend(fjall_dir_for_key_prefix(values, FJALL_OBJECT_PREFIX, &path_prefix)?);
+    names.extend(fjall_dir_for_key_prefix(values, FJALL_TYPE_PREFIX, &path_prefix)?);
+    names.sort();
+    names.dedup();
+    Ok(names)
+}
+
+fn fjall_dir_for_key_prefix(values: &OptimisticTxKeyspace, key_prefix: u8, path_prefix: &str) -> Result<Vec<SmolStr>> {
+    use std::ops::Bound::{Excluded, Included, Unbounded};
+
+    let scan_start = fjall_key(key_prefix, path_prefix);
+    let scan_end = fjall_prefix_end(&scan_start);
+    let mut start = scan_start;
+    let mut names = Vec::new();
+
+    loop {
+        if scan_end.as_ref().is_some_and(|end| start >= *end) {
+            break;
+        }
+
+        let end = scan_end.as_deref().map(Excluded).unwrap_or(Unbounded);
+        let iter = values.inner().range::<&[u8], _>((Included(start.as_slice()), end));
+        let mut restart_at = None;
+
+        for item in iter {
+            let key = item.key()?;
+            let Some(path) = key.get(2..) else {
+                continue;
+            };
+            let Ok(path) = std::str::from_utf8(path) else {
+                continue;
+            };
+            let Some(rest) = path.strip_prefix(path_prefix) else {
+                continue;
+            };
+            let Some(end) = rest.find('/') else {
+                if !rest.is_empty() {
+                    names.push(rest.into());
+                }
+                continue;
+            };
+
+            let entry = &rest[..end];
+            if !entry.is_empty() {
+                names.push(entry.into());
+                restart_at = fjall_prefix_end(&fjall_key(key_prefix, &format!("{path_prefix}{entry}/")));
+                break;
+            }
+        }
+
+        let Some(next_start) = restart_at else {
+            break;
+        };
+        start = next_start;
+    }
+
+    Ok(names)
+}
+
 fn fjall_map_keys(values: &OptimisticTxKeyspace, name: &str) -> Result<Vec<SmolStr>> {
     let prefix = fjall_map_prefix(name);
     let mut keys = Vec::new();
@@ -675,7 +772,7 @@ impl<T> Clone for Mount<T> {
         match self {
             Self::Memory(m) => Self::Memory(m.clone()),
             Self::Redis { client, rl } => Self::Redis { client: client.clone(), rl: rl.clone() },
-            Self::Fjall { values, write_lock } => Self::Fjall { values: values.clone(), write_lock: write_lock.clone() },
+            Self::Fjall { db, values, write_lock } => Self::Fjall { db: db.clone(), values: values.clone(), write_lock: write_lock.clone() },
         }
     }
 }
@@ -806,6 +903,34 @@ mod tests {
             keys.sort();
             assert_eq!(keys, vec![SmolStr::new("0"), SmolStr::new("1"), SmolStr::new("answer")]);
         }
+
+        let _ = std::fs::remove_dir_all(data_dir);
+    }
+
+    #[test]
+    fn fjall_dir_skips_deep_children_without_missing_siblings() {
+        let data_dir = std::env::temp_dir().join(format!("zust-root-fjall-dir-{}", uuid::Uuid::new_v4()));
+        let data_dir_str = data_dir.to_str().unwrap();
+        let root = Root::<Dynamic>::new();
+        assert!(root.mount_fjall("fjall", data_dir_str).unwrap());
+
+        for path in [
+            "fjall/root/a/deep/one",
+            "fjall/root/a/deep/two",
+            "fjall/root/a-/leaf",
+            "fjall/root/a./leaf",
+            "fjall/root/a0/leaf",
+            "fjall/root/b",
+        ] {
+            let (mount, name) = root.get_mount(path).unwrap();
+            assert!(mount.add(name, 1.into()));
+        }
+
+        let (mount, name) = root.get_mount("fjall/root").unwrap();
+        let mut entries = mount.dir(name).unwrap();
+        entries.sort();
+
+        assert_eq!(entries, vec![SmolStr::new("a"), SmolStr::new("a-"), SmolStr::new("a."), SmolStr::new("a0"), SmolStr::new("b")]);
 
         let _ = std::fs::remove_dir_all(data_dir);
     }

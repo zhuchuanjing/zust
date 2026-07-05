@@ -461,7 +461,7 @@ Any::logic(a, op_id, b) -> bool
 ```rust
 // 挂载
 root::mount(name, kind)                 // memory / redis 等
-root::mount_fjall(data_dir)
+root::mount_fjall(name, data_dir)
 
 // 节点构造
 root::add_list(path) -> bool

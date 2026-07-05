@@ -58,9 +58,9 @@ extern "C" fn root_mount(name: *const Dynamic, url: *const Dynamic) {
     }
 }
 
-extern "C" fn root_mount_fjall(data_dir: *const Dynamic) {
+extern "C" fn root_mount_fjall(name: *const Dynamic, data_dir: *const Dynamic) {
     unsafe {
-        let _ = root::mount_fjall(&(*data_dir).as_str());
+        let _ = root::mount_fjall(&(*name).as_str(), &(*data_dir).as_str());
     }
 }
 
@@ -142,7 +142,7 @@ extern "C" fn root_update_key(name: *const Dynamic, key: *const Dynamic, callbac
 
 pub const ROOT_NATIVE: &[(&str, &[Type], Type, *const u8)] = &[
     ("mount", &[Type::Any, Type::Any], Type::Void, root_mount as *const u8),
-    ("mount_fjall", &[Type::Any], Type::Void, root_mount_fjall as *const u8),
+    ("mount_fjall", &[Type::Any, Type::Any], Type::Void, root_mount_fjall as *const u8),
     ("add_list", &[Type::Any], Type::Bool, root_add_list as *const u8),
     ("add_map", &[Type::Any], Type::Bool, root_add_map as *const u8),
     ("add", &[Type::Any, Type::Any], Type::Bool, root_add as *const u8),

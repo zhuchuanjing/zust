@@ -1989,6 +1989,25 @@ mod tests {
     }
 
     #[test]
+    fn root_mount_fjall_accepts_mount_name() -> anyhow::Result<()> {
+        let vm = Vm::with_all()?;
+        assert_eq!(vm.infer("root::mount_fjall", &[Type::Any, Type::Any])?, Type::Void);
+        vm.import_code(
+            "vm_root_mount_fjall_named",
+            br#"
+            pub fn run(name, data_dir) {
+                root::mount_fjall(name, data_dir);
+            }
+            "#
+            .to_vec(),
+        )?;
+
+        let compiled = vm.get_fn("vm_root_mount_fjall_named::run", &[Type::Any, Type::Any])?;
+        assert!(compiled.ret_ty().is_void());
+        Ok(())
+    }
+
+    #[test]
     fn std_log_accepts_any_and_returns_void() -> anyhow::Result<()> {
         let vm = Vm::with_all()?;
         vm.import_code(

@@ -392,8 +392,8 @@ pub fn mount_redis(name: &str, url: &str) -> Result<bool> {
     ROOT.mount_redis(name, url)
 }
 
-pub fn mount_fjall(data_dir: &str) -> Result<bool> {
-    ROOT.mount_fjall("fjall", data_dir)
+pub fn mount_fjall(name: &str, data_dir: &str) -> Result<bool> {
+    ROOT.mount_fjall(name, data_dir)
 }
 
 pub fn get_mount<'a>(name: &'a str) -> Result<(Mount<Object>, &'a str)> {
@@ -809,6 +809,20 @@ mod tests {
         let mut entries = (0..entries.len()).map(|idx| entries.get_idx(idx).unwrap().as_str().to_string()).collect::<Vec<_>>();
         entries.sort();
         assert_eq!(entries, vec!["a".to_string(), "sub".to_string()]);
+    }
+
+    #[test]
+    fn mount_fjall_uses_explicit_mount_name() {
+        let data_dir = std::env::temp_dir().join(format!("zust-root-fjall-named-{}", uuid::Uuid::new_v4()));
+        let data_dir_str = data_dir.to_str().unwrap();
+        let mount_name = format!("fjall_{}", uuid::Uuid::new_v4().simple());
+
+        assert!(mount_fjall(&mount_name, data_dir_str).unwrap());
+        add_value(&format!("{mount_name}/item"), 9_i64).unwrap();
+        assert_eq!(get(&format!("{mount_name}/item")).unwrap().as_int(), Some(9));
+        assert!(!contains("fjall/item"));
+
+        let _ = std::fs::remove_dir_all(data_dir);
     }
 
     #[test]

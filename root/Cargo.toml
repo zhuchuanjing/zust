@@ -1,6 +1,6 @@
 [package]
 name = "zust-root"
-version = "0.9.19"
+version = "0.9.20"
 edition = "2024"
 rust-version = "1.85"
 description = "Addressable object tree and storage abstractions for Zust runtime integrations."
@@ -32,7 +32,7 @@ axum = {version = "0.8.9", features = ["ws"]}
 futures-util = "0.3.32"
 
 tokio = {version = "1.52.3", features = ["full"]}
-fjall = "3.1.4"
+fjall = "3.1.6"
 rustc-hash = "2.1.2"
 rayon = "1.12.0"
 anndists = "0.1.5"

@@ -125,6 +125,14 @@ fn build_client(options: &Dynamic) -> Result<reqwest::Client> {
     if let Some(timeout_ms) = options.get_dynamic("timeout_ms").and_then(|timeout| timeout.as_int()) {
         builder = builder.timeout(Duration::from_millis(timeout_ms.max(0) as u64));
     }
+    // proxy 支持：options["proxy"] = "socks5://127.0.0.1:1080" 或 "http://..."。
+    // reqwest 的 socks feature 已在 Cargo.toml 启用，否则 socks5:// 在编译期不存在。
+    // Proxy::all 覆盖 http 和 https，对单一出口代理场景足够。
+    if let Some(proxy) = options.get_dynamic("proxy").map(|v| v.as_str().to_string()) {
+        if !proxy.is_empty() {
+            builder = builder.proxy(reqwest::Proxy::all(&proxy)?);
+        }
+    }
     Ok(builder.build()?)
 }
 

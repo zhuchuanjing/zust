@@ -29,6 +29,7 @@ mod llm_module;
 mod oss_module;
 mod root_module;
 mod time_module;
+mod math_module;
 pub use gpu_layout::{GpuFieldLayout, GpuStructLayout};
 pub use parking_lot::RwLock;
 
@@ -303,6 +304,13 @@ impl JITRunTime {
         add_native_module_fns(self, "time", &time_module::TIME_NATIVE)
     }
 
+    pub fn add_math(&mut self) -> Result<()> {
+        if self.compiler.sym_tab.symbols.get_id("math::sin").is_ok() {
+            return Ok(());
+        }
+        add_native_module_fns(self, "math", &math_module::MATH_NATIVE)
+    }
+
     #[cfg(feature = "http")]
     pub fn add_http(&mut self) -> Result<()> {
         if self.compiler.sym_tab.symbols.get_id("http::request").is_ok() {
@@ -334,6 +342,7 @@ impl JITRunTime {
         self.add_vec()?;
         self.add_root()?;
         self.add_time()?;
+        self.add_math()?;
         #[cfg(feature = "llm")]
         self.add_llm()?;
         #[cfg(feature = "candle")]
@@ -686,6 +695,131 @@ mod tests {
         assert_eq!(compiled.ret_ty(), &Type::Void);
         let run: extern "C" fn() = unsafe { std::mem::transmute(compiled.ptr()) };
         run();
+        Ok(())
+    }
+
+    #[test]
+    fn any_trim_replace_chains_like_mlit_price_parsing() -> anyhow::Result<()> {
+        // 覆盖 MLIT 价格字段的清洗链路:" 1,760,000 " → 1760000
+        let vm = Vm::with_all()?;
+        vm.import_code(
+            "vm_any_trim_replace",
+            br#"
+            pub fn clean_price(text) {
+                let stripped = text.trim().replace(",", "");
+                stripped as i64
+            }
+            "#
+            .to_vec(),
+        )?;
+        let compiled = vm.get_fn("vm_any_trim_replace::clean_price", &[Type::Any])?;
+        let clean_price: extern "C" fn(*const Dynamic) -> i64 = unsafe { std::mem::transmute(compiled.ptr()) };
+        let text = Dynamic::from(" 1,760,000 ");
+        assert_eq!(clean_price(&text), 1760000);
+        Ok(())
+    }
+
+    #[test]
+    fn any_to_lower_and_to_upper_round_trip() -> anyhow::Result<()> {
+        let vm = Vm::with_all()?;
+        vm.import_code(
+            "vm_any_case",
+            br#"
+            pub fn lower(text) { text.to_lower() }
+            pub fn upper(text) { text.to_upper() }
+            "#
+            .to_vec(),
+        )?;
+        let compiled = vm.get_fn("vm_any_case::lower", &[Type::Any])?;
+        let lower: extern "C" fn(*const Dynamic) -> *const Dynamic = unsafe { std::mem::transmute(compiled.ptr()) };
+        assert_eq!(unsafe { (&*lower(&Dynamic::from("AbCア炎"))) }.as_str(), "abcア炎");
+        let compiled = vm.get_fn("vm_any_case::upper", &[Type::Any])?;
+        let upper: extern "C" fn(*const Dynamic) -> *const Dynamic = unsafe { std::mem::transmute(compiled.ptr()) };
+        assert_eq!(unsafe { (&*upper(&Dynamic::from("AbC"))) }.as_str(), "ABC");
+        Ok(())
+    }
+
+    #[test]
+    fn any_find_returns_minus_one_when_substring_absent() -> anyhow::Result<()> {
+        let vm = Vm::with_all()?;
+        vm.import_code(
+            "vm_any_find",
+            br#"
+            pub fn find_comma(text) { text.find(",") }
+            "#
+            .to_vec(),
+        )?;
+        let compiled = vm.get_fn("vm_any_find::find_comma", &[Type::Any])?;
+        let find_comma: extern "C" fn(*const Dynamic) -> i64 = unsafe { std::mem::transmute(compiled.ptr()) };
+        assert_eq!(find_comma(&Dynamic::from("a,b")), 1);
+        assert_eq!(find_comma(&Dynamic::from("abc")), -1);
+        Ok(())
+    }
+
+    #[test]
+    fn any_substring_clamps_out_of_range_indices() -> anyhow::Result<()> {
+        let vm = Vm::with_all()?;
+        vm.import_code(
+            "vm_any_substring",
+            br#"
+            pub fn head(text) { text.substring(0, 100) }
+            pub fn middle(text) { text.substring(1, 3) }
+            "#
+            .to_vec(),
+        )?;
+        let compiled = vm.get_fn("vm_any_substring::head", &[Type::Any])?;
+        let head: extern "C" fn(*const Dynamic) -> *const Dynamic = unsafe { std::mem::transmute(compiled.ptr()) };
+        assert_eq!(unsafe { (&*head(&Dynamic::from("hello"))) }.as_str(), "hello");
+        let compiled = vm.get_fn("vm_any_substring::middle", &[Type::Any])?;
+        let middle: extern "C" fn(*const Dynamic) -> *const Dynamic = unsafe { std::mem::transmute(compiled.ptr()) };
+        assert_eq!(unsafe { (&*middle(&Dynamic::from("hello"))) }.as_str(), "el");
+        Ok(())
+    }
+
+    #[test]
+    fn math_sin_cos_and_pi_work_in_radians() -> anyhow::Result<()> {
+        let vm = Vm::with_all()?;
+        vm.import_code(
+            "vm_math_trig",
+            br#"
+            pub fn sin_zero() { math::sin(0.0f64) }
+            pub fn atan2_pi() { math::atan2(0.0f64, -1.0f64) }
+            pub fn pi_value() { math::pi() }
+            "#
+            .to_vec(),
+        )?;
+        let compiled = vm.get_fn("vm_math_trig::sin_zero", &[])?;
+        let sin_zero: extern "C" fn() -> f64 = unsafe { std::mem::transmute(compiled.ptr()) };
+        assert!((sin_zero()).abs() < 1e-12);
+
+        let compiled = vm.get_fn("vm_math_trig::atan2_pi", &[])?;
+        let atan2_pi: extern "C" fn() -> f64 = unsafe { std::mem::transmute(compiled.ptr()) };
+        let compiled = vm.get_fn("vm_math_trig::pi_value", &[])?;
+        let pi_value: extern "C" fn() -> f64 = unsafe { std::mem::transmute(compiled.ptr()) };
+        assert!((atan2_pi() - pi_value()).abs() < 1e-12);
+        Ok(())
+    }
+
+    #[test]
+    fn math_floor_ceil_pow_max_min_basics() -> anyhow::Result<()> {
+        let vm = Vm::with_all()?;
+        vm.import_code(
+            "vm_math_basic",
+            br#"
+            pub fn floor_it() { math::floor(3.7f64) as i64 }
+            pub fn ceil_it() { math::ceil(3.2f64) as i64 }
+            pub fn pow_it() { math::pow(2.0f64, 10.0f64) as i64 }
+            pub fn max_it() { math::max(3.0f64, 5.0f64) as i64 }
+            pub fn min_it() { math::min(3.0f64, 5.0f64) as i64 }
+            "#
+            .to_vec(),
+        )?;
+        for (fname, expected) in [("floor_it", 3i64), ("ceil_it", 4), ("pow_it", 1024), ("max_it", 5), ("min_it", 3)] {
+            let full = format!("vm_math_basic::{fname}");
+            let compiled = vm.get_fn(&full, &[])?;
+            let f: extern "C" fn() -> i64 = unsafe { std::mem::transmute(compiled.ptr()) };
+            assert_eq!(f(), expected, "{fname}");
+        }
         Ok(())
     }
 

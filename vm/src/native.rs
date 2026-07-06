@@ -984,6 +984,79 @@ extern "C" fn ends_with(addr: *const Dynamic, suffix: *const Dynamic) -> bool {
     }
 }
 
+// Any::trim / to_lower / to_upper / replace / find / substring —— 字符串清洗常用操作。
+// 与 starts_with / ends_with 一样,非字符串类型(数字/列表/map)按 as_str() 的
+// 兜底语义(返回 "" )处理,调用方拿到空串不会 panic。
+
+extern "C" fn any_trim(addr: *const Dynamic) -> *const Dynamic {
+    if addr.is_null() {
+        return alloc_dynamic(Dynamic::from(""));
+    }
+    alloc_dynamic(Dynamic::from(unsafe { (&*addr).as_str().trim().to_string() }))
+}
+
+extern "C" fn any_to_lower(addr: *const Dynamic) -> *const Dynamic {
+    if addr.is_null() {
+        return alloc_dynamic(Dynamic::from(""));
+    }
+    alloc_dynamic(Dynamic::from(unsafe { (&*addr).as_str().to_lowercase() }))
+}
+
+extern "C" fn any_to_upper(addr: *const Dynamic) -> *const Dynamic {
+    if addr.is_null() {
+        return alloc_dynamic(Dynamic::from(""));
+    }
+    alloc_dynamic(Dynamic::from(unsafe { (&*addr).as_str().to_uppercase() }))
+}
+
+extern "C" fn any_replace(addr: *const Dynamic, from: *const Dynamic, to: *const Dynamic) -> *const Dynamic {
+    if addr.is_null() || from.is_null() || to.is_null() {
+        return alloc_dynamic(Dynamic::from(""));
+    }
+    let from = unsafe { (&*from).as_str() };
+    let to = unsafe { (&*to).as_str() };
+    // from 为空时 str::replace 会做奇怪的事(每个字符边界都插入 to),这里直接返回原串,
+    // 跟大多数脚本语言的 replace 语义不一致但能避免意外膨胀。
+    if from.is_empty() {
+        return alloc_dynamic(unsafe { (&*addr).clone() });
+    }
+    alloc_dynamic(Dynamic::from(unsafe { (&*addr).as_str().replace(from, to) }))
+}
+
+extern "C" fn any_find(addr: *const Dynamic, sub: *const Dynamic) -> i64 {
+    if addr.is_null() || sub.is_null() {
+        return -1;
+    }
+    let text = unsafe { (&*addr).as_str() };
+    let sub = unsafe { (&*sub).as_str() };
+    // 返回字节偏移(不是字符偏移)。对 ASCII 文本等价,对多字节文本调用方需要自己再
+    // 用 substring 切。找不到返回 -1(而不是 Option),与 zust 其它 find 类操作一致。
+    match text.find(sub) {
+        Some(byte_idx) => byte_idx as i64,
+        None => -1,
+    }
+}
+
+extern "C" fn any_substring(addr: *const Dynamic, start: i64, stop: *const Dynamic) -> *const Dynamic {
+    if addr.is_null() {
+        return alloc_dynamic(Dynamic::from(""));
+    }
+    let text = unsafe { (&*addr).as_str() };
+    let char_count = text.chars().count() as i64;
+    // start/stop 都按字符索引(不是字节),负值或越界 clamp 到 [0, len]。
+    // stop=null 表示取到末尾,与 Any::slice 的 stop 语义对齐。
+    let start = start.clamp(0, char_count) as usize;
+    let stop = if stop.is_null() {
+        char_count
+    } else {
+        let raw = unsafe { &*stop };
+        if raw.is_null() { char_count } else { raw.as_int().unwrap_or(char_count) }
+    };
+    let stop = stop.clamp(start as i64, char_count) as usize;
+    let result: String = text.chars().skip(start).take(stop - start).collect();
+    alloc_dynamic(Dynamic::from(result))
+}
+
 extern "C" fn get_idx(addr: *const Dynamic, idx: i64) -> *const Dynamic {
     if addr.is_null() { any_null() } else { alloc_dynamic(unsafe { (*addr).get_idx(idx as usize).unwrap_or(Dynamic::Null) }) }
 }
@@ -1431,7 +1504,7 @@ pub const STD: [(&str, &[Type], Type, *const u8); 6] = [
     ("rand", &[Type::Any, Type::Any], Type::Any, random as *const u8),
 ];
 
-pub const ANY: [(&str, &[Type], Type, *const u8); 79] = [
+pub const ANY: [(&str, &[Type], Type, *const u8); 85] = [
     ("Any::null", &[], Type::Any, any_null as *const u8),
     ("Any::is_map", &[Type::Any], Type::Bool, any_is_map as *const u8),
     ("Any::is_list", &[Type::Any], Type::Bool, any_is_list as *const u8),
@@ -1492,6 +1565,12 @@ pub const ANY: [(&str, &[Type], Type, *const u8); 79] = [
     ("Any::contains", &[Type::Any, Type::Any], Type::Bool, contains as *const u8),
     ("Any::starts_with", &[Type::Any, Type::Any], Type::Bool, starts_with as *const u8),
     ("Any::ends_with", &[Type::Any, Type::Any], Type::Bool, ends_with as *const u8),
+    ("Any::trim", &[Type::Any], Type::Any, any_trim as *const u8),
+    ("Any::to_lower", &[Type::Any], Type::Any, any_to_lower as *const u8),
+    ("Any::to_upper", &[Type::Any], Type::Any, any_to_upper as *const u8),
+    ("Any::replace", &[Type::Any, Type::Any, Type::Any], Type::Any, any_replace as *const u8),
+    ("Any::find", &[Type::Any, Type::Any], Type::I64, any_find as *const u8),
+    ("Any::substring", &[Type::Any, Type::I64, Type::Any], Type::Any, any_substring as *const u8),
     ("Any::get", &[Type::Any, Type::Any], Type::Any, get_key as *const u8),
     ("Any::get_key", &[Type::Any, Type::Any], Type::Any, get_key as *const u8),
     ("Any::del_key", &[Type::Any, Type::Any], Type::Any, del_key as *const u8),

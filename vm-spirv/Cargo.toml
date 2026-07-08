@@ -1,6 +1,6 @@
 [package]
 name = "zust-vm-spirv"
-version = "0.9.11"
+version = "0.9.12"
 edition = "2024"
 rust-version = "1.85"
 description = "SPIR-V code generation backend for the Zust scripting language."

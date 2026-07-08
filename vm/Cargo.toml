@@ -1,6 +1,6 @@
 [package]
 name = "zust-vm"
-version = "0.9.99"
+version = "0.9.100"
 edition = "2024"
 rust-version = "1.85"
 description = "Cranelift JIT runtime for executing Zust modules."
@@ -27,13 +27,13 @@ metal = ["gpu", "vm-metal/runtime"]
 
 [dependencies]
 log = "0.4.29"
-dynamic = { package = "zust-dynamic", version = "0.9.21", path = "../dynamic" }
-parser = { package = "zust-parser", version = "0.9.25", path = "../parser" }
-compiler = { package = "zust-compiler", version = "0.9.45", path = "../compiler" }
-root = { package = "zust-root", version = "0.9.20", path = "../root" }
-llm = { package = "zust-llm", version = "0.9.20", path = "../llm", optional = true }
-vm-spirv = { package = "zust-vm-spirv", version = "0.9.11", path = "../vm-spirv", optional = true }
-vulkan = { package = "zust-vulkan", version = "0.9.5", path = "../vulkan", optional = true }
+dynamic = { package = "zust-dynamic", version = "0.9.22", path = "../dynamic" }
+parser = { package = "zust-parser", version = "0.9.26", path = "../parser" }
+compiler = { package = "zust-compiler", version = "0.9.46", path = "../compiler" }
+root = { package = "zust-root", version = "0.9.21", path = "../root" }
+llm = { package = "zust-llm", version = "0.9.21", path = "../llm", optional = true }
+vm-spirv = { package = "zust-vm-spirv", version = "0.9.12", path = "../vm-spirv", optional = true }
+vulkan = { package = "zust-vulkan", version = "0.9.6", path = "../vulkan", optional = true }
 
 anyhow = "1.0.102"
 thiserror = "2.0.18"
@@ -59,7 +59,7 @@ sqlx-postgres = { version = "0.8.6", default-features = false, features = ["any"
 parking_lot = "0.12.3"
 
 [target.'cfg(target_os = "macos")'.dependencies]
-vm-metal = { package = "zust-vm-metal", version = "0.9.12", path = "../vm-metal", default-features = false, optional = true }
+vm-metal = { package = "zust-vm-metal", version = "0.9.13", path = "../vm-metal", default-features = false, optional = true }
 
 [dev-dependencies]
 num-bigint = "0.4.6"

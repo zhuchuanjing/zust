@@ -1,6 +1,6 @@
 [package]
 name = "zust-llm"
-version = "0.9.20"
+version = "0.9.21"
 edition = "2024"
 rust-version = "1.85"
 description = "LLM request helpers for Zust runtime integrations."

@@ -1685,6 +1685,75 @@ mod tests {
     }
 
     #[test]
+    fn any_to_yaml_and_from_yaml_round_trip() -> anyhow::Result<()> {
+        let vm = Vm::with_all()?;
+        vm.import_code(
+            "vm_any_yaml",
+            br#"
+            pub fn render(value) {
+                value.to_yaml()
+            }
+
+            pub fn parse(text) {
+                text.from_yaml()
+            }
+            "#
+            .to_vec(),
+        )?;
+
+        let compiled = vm.get_fn("vm_any_yaml::render", &[Type::Any])?;
+        let render: extern "C" fn(*const Dynamic) -> *const Dynamic = unsafe { std::mem::transmute(compiled.ptr()) };
+
+        // 嵌套结构走完整的 round-trip:
+        // - to_yaml 在脚本侧得到 yaml 字符串
+        // - from_yaml 在脚本侧把字符串解回 Dynamic
+        // 二者一起验证 Any::to_yaml / Any::from_yaml 都已正确注册。
+        let items = Dynamic::list(vec![Dynamic::String("rust".into()), Dynamic::String("zust".into())]);
+        let inner = Dynamic::map({
+            let mut m = std::collections::BTreeMap::new();
+            m.insert("name".into(), Dynamic::String("alice".into()));
+            m.insert("age".into(), Dynamic::I64(30));
+            m
+        });
+        let mut outer = Dynamic::map({
+            let mut m = std::collections::BTreeMap::new();
+            m.insert("user".into(), inner);
+            m.insert("tags".into(), items);
+            m.insert("active".into(), Dynamic::Bool(true));
+            m
+        });
+        // 用户给出的 id 是字符串 "123",必须保留为字符串而不是解析成整数。
+        outer.insert("id", Dynamic::String("123".into()));
+
+        let yaml_ptr = render(&outer);
+        let yaml_text = unsafe { (&*yaml_ptr).as_str().to_string() };
+        assert!(yaml_text.contains("user:"), "yaml missing user: {yaml_text}");
+        assert!(yaml_text.contains("name: alice"), "{yaml_text}");
+        assert!(yaml_text.contains("age: 30"), "{yaml_text}");
+        assert!(yaml_text.contains("active: true"), "{yaml_text}");
+        assert!(yaml_text.contains("id: \"123\""), "id 必须保留为字符串: {yaml_text}");
+        assert!(yaml_text.contains("- rust"), "{yaml_text}");
+
+        // 把 to_yaml 的输出塞回 from_yaml,验证 round-trip。
+        let parse_compiled = vm.get_fn("vm_any_yaml::parse", &[Type::Any])?;
+        let parse: extern "C" fn(*const Dynamic) -> *const Dynamic = unsafe { std::mem::transmute(parse_compiled.ptr()) };
+        let yaml_dynamic = Dynamic::from(yaml_text);
+        let parsed_ptr = parse(&yaml_dynamic);
+        let parsed = unsafe { &*parsed_ptr };
+        eprintln!("[debug] parsed={:?} yaml_text={:?}", parsed, yaml_dynamic.as_str());
+        // as_str() 返回 &str 不能直接跨 Option 比较,转成 String。
+        assert_eq!(parsed.get_dynamic("id").map(|v| v.as_str().to_string()), Some("123".to_string()));
+        assert_eq!(parsed.get_dynamic("active").and_then(|v| v.as_bool()), Some(true));
+        assert_eq!(parsed.get_dynamic("user").and_then(|u| u.get_dynamic("name")).map(|v| v.as_str().to_string()), Some("alice".to_string()));
+        assert_eq!(parsed.get_dynamic("user").and_then(|u| u.get_dynamic("age")).and_then(|v| v.as_int()), Some(30));
+        let tags = parsed.get_dynamic("tags").expect("tags");
+        assert!(tags.is_list());
+        assert_eq!(tags.get_idx(0).map(|v| v.as_str().to_string()), Some("rust".to_string()));
+        assert_eq!(tags.get_idx(1).map(|v| v.as_str().to_string()), Some("zust".to_string()));
+        Ok(())
+    }
+
+    #[test]
     fn static_string_add_uses_direct_strcat() -> anyhow::Result<()> {
         let vm = Vm::with_all()?;
         vm.import_code(
@@ -2941,7 +3010,7 @@ mod tests {
 
         root::add_list("local/send_idx_return_handlers")?;
         let (mount, name) = root::get_mount("local/send_idx_return_handlers")?;
-        mount.push(name, root::Object::Native(echo_handler))?;
+        mount.push(name, root::Object::Native(root::NativeHandler::from_fn(echo_handler)))?;
 
         assert_eq!(vm.infer("root::send_idx", &[Type::Any, Type::I64, Type::Any])?, Type::Any);
         let compiled = vm.get_fn("vm_root_send_idx_return::call", &[Type::Any])?;
@@ -3650,23 +3719,25 @@ mod tests {
     }
 
     #[test]
-    fn match_rejects_binding_after_first_or_pattern() -> anyhow::Result<()> {
+    fn match_allows_any_pattern_in_or_pattern_alternatives() -> anyhow::Result<()> {
+        // P10 放宽后:or-pattern 第二及之后的 alt 不再限制为 Literal/Wildcard。
+        // 验证解析通过(原先会报 "or-pattern 中除第一个外只支持字面量" 错误)。
+        // 运行时绑定语义:只取第一个 alt 的绑定,动态语言宽松规则。
         let vm = Vm::with_all()?;
-        let err = vm
-            .import_code(
-                "vm_match_bad_or",
-                r#"
-                pub fn bad(value: i64) {
-                    match value {
-                        a | b => 1i64,
-                    }
+        vm.import_code(
+            "vm_match_or_any",
+            r#"
+            pub fn ok(value) {
+                match value {
+                    (a, 1i32) | (a, 2i32) => a,
+                    _ => 0i64,
                 }
-                "#
-                .as_bytes()
-                .to_vec(),
-            )
-            .expect_err("non-first or-pattern alternatives cannot bind");
-        assert!(err.to_string().contains("or-pattern"));
+            }
+            "#
+            .as_bytes()
+            .to_vec(),
+        )?;
+        // 能编译通过即说明 P10 放宽生效(原先此代码会被 parser 拒绝)。
         Ok(())
     }
 

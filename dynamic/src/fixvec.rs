@@ -111,6 +111,13 @@ impl<'a, T> Iterator for Iter<'a, T> {
         }
         None
     }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let used_before = self.vec.useds.iter().take(self.index).filter(|b| *b.as_ref()).count();
+        let total = self.vec.useds.iter().filter(|b| *b.as_ref()).count();
+        let remaining = total.saturating_sub(used_before);
+        (remaining, Some(remaining))
+    }
 }
 
 impl<'a, T> ExactSizeIterator for Iter<'a, T> {}
@@ -135,6 +142,13 @@ impl<'a, T> Iterator for IterMut<'a, T> {
             }
         }
         None
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let used_before = self.vec.useds.iter().take(self.index).filter(|b| *b.as_ref()).count();
+        let total = self.vec.useds.iter().filter(|b| *b.as_ref()).count();
+        let remaining = total.saturating_sub(used_before);
+        (remaining, Some(remaining))
     }
 }
 
@@ -169,6 +183,11 @@ impl<T: Default> Iterator for IntoIter<T> {
             }
         }
         None
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let remaining = self.vec.useds.iter().skip(self.index).filter(|b| *b.as_ref()).count();
+        (remaining, Some(remaining))
     }
 }
 
@@ -222,6 +241,13 @@ impl<'a, T> Iterator for Indices<'a, T> {
             }
         }
         None
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let used_before = self.vec.useds.iter().take(self.index).filter(|b| *b.as_ref()).count();
+        let total = self.vec.useds.iter().filter(|b| *b.as_ref()).count();
+        let remaining = total.saturating_sub(used_before);
+        (remaining, Some(remaining))
     }
 }
 

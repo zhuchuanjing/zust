@@ -91,6 +91,9 @@ impl std::ops::Add for Type {
         } else if self.is_float() || rhs.is_float() {
             if self.is_f64() || rhs.is_f64() { Type::F64 } else { Type::F32 }
         } else if self.is_int() || rhs.is_int() {
+            // 混合有符号/无符号时按有符号提升,与运行时 ops.rs(checked_i64 路径)一致。
+            // 注意:这会让 u32+i32 -> i32(丢无符号),但运行时本来也走有符号路径,
+            // 保持类型推断与运行时行为一致比保留无符号性更重要。
             match self.width().max(rhs.width()) {
                 1 => Type::I8,
                 2 => Type::I16,
@@ -130,6 +133,7 @@ impl PartialEq for Type {
             | (Type::Str, Type::Str)
             | (Type::Map, Type::Map) => true,
             (Type::List(left), Type::List(right)) => left == right,
+            (Type::Tuple(left), Type::Tuple(right)) => left == right,
             (Type::Ident { name: name1, params: params1 }, Type::Ident { name: name2, params: params2 }) => name1 == name2 && params1 == params2,
             (Type::ConstInt(left), Type::ConstInt(right)) => left == right,
             (Type::ConstBinary { op: op1, left: left1, right: right1 }, Type::ConstBinary { op: op2, left: left2, right: right2 }) => op1 == op2 && left1 == left2 && right1 == right2,
@@ -218,6 +222,9 @@ impl Type {
     }
 
     pub fn compare_args(left: &[Type], right: &[Type]) -> Option<Vec<Type>> {
+        if left.len() != right.len() {
+            return None;
+        }
         let mut tys = Vec::new();
         for (left, right) in left.iter().zip(right.iter()) {
             if left == right || right.is_any() {

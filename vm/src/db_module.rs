@@ -134,11 +134,12 @@ async fn create_table(path: Dynamic, fields: Dynamic) -> Result<bool> {
     }
 
     let table = target.table.as_deref().ok_or_else(|| anyhow!("db::create 需要表路径，例如 local/db/user；完整路径是连接配置时不会推断表名"))?;
-    let sql = build_create_sql(table, &columns)?;
+    let kind = db_kind(&target.url)?;
+    let sql = build_create_sql(table, &columns, kind)?;
     let pool = pool_for(&target).await?;
     pool.execute(sql.as_str()).await?;
     for index in parse_indexes(&fields)? {
-        let sql = build_create_index_sql(table, &index)?;
+        let sql = build_create_index_sql(table, &index, kind)?;
         pool.execute(sql.as_str()).await?;
     }
     Ok(true)
@@ -147,7 +148,8 @@ async fn create_table(path: Dynamic, fields: Dynamic) -> Result<bool> {
 async fn drop_table(path: Dynamic) -> Result<bool> {
     let target = resolve_target(path.as_str())?;
     let table = target.table.as_deref().ok_or_else(|| anyhow!("db::drop 需要表路径，例如 local/db/user；完整路径是连接配置时不会推断表名"))?;
-    let table = quote_ident(table)?;
+    let kind = db_kind(&target.url)?;
+    let table = quote_ident(table, kind)?;
     let sql = format!("DROP TABLE IF EXISTS {table}");
     let pool = pool_for(&target).await?;
     pool.execute(sql.as_str()).await?;
@@ -409,13 +411,13 @@ fn parse_list_column(value: &Dynamic) -> Result<ColumnDef> {
     Err(anyhow!("list 字段需要 map、二元 list 或 \"name TYPE\" 字符串"))
 }
 
-fn build_create_sql(table: &str, columns: &[ColumnDef]) -> Result<String> {
-    let table = quote_ident(table)?;
-    let columns = columns.iter().map(|column| Ok(format!("{} {}", quote_ident(&column.name)?, checked_type(&column.ty)?))).collect::<Result<Vec<_>>>()?.join(", ");
+fn build_create_sql(table: &str, columns: &[ColumnDef], kind: DbKind) -> Result<String> {
+    let table = quote_ident(table, kind)?;
+    let columns = columns.iter().map(|column| Ok(format!("{} {}", quote_ident(&column.name, kind)?, checked_type(&column.ty)?))).collect::<Result<Vec<_>>>()?.join(", ");
     Ok(format!("CREATE TABLE IF NOT EXISTS {table} ({columns})"))
 }
 
-fn build_create_index_sql(table: &str, index: &IndexDef) -> Result<String> {
+fn build_create_index_sql(table: &str, index: &IndexDef, kind: DbKind) -> Result<String> {
     if index.columns.is_empty() {
         return Err(anyhow!("索引至少需要一个字段"));
     }
@@ -424,9 +426,9 @@ fn build_create_index_sql(table: &str, index: &IndexDef) -> Result<String> {
         None => format!("idx_{}_{}", sanitize_index_part(table), index.columns.iter().map(|column| sanitize_index_part(column)).collect::<Vec<_>>().join("_")),
     };
     let unique = if index.unique { "UNIQUE " } else { "" };
-    let table = quote_ident(table)?;
-    let index_name = quote_ident(&index_name)?;
-    let columns = index.columns.iter().map(|column| quote_ident(column)).collect::<Result<Vec<_>>>()?.join(", ");
+    let table = quote_ident(table, kind)?;
+    let index_name = quote_ident(&index_name, kind)?;
+    let columns = index.columns.iter().map(|column| quote_ident(column, kind)).collect::<Result<Vec<_>>>()?.join(", ");
     Ok(format!("CREATE {unique}INDEX IF NOT EXISTS {index_name} ON {table} ({columns})"))
 }
 
@@ -718,12 +720,17 @@ fn dynamic_string(value: &Dynamic, keys: &[&str]) -> Option<String> {
     keys.iter().find_map(|key| value.get_dynamic(key).filter(Dynamic::is_str).map(|value| value.as_str().to_string()))
 }
 
-fn quote_ident(name: &str) -> Result<String> {
+fn quote_ident(name: &str, kind: DbKind) -> Result<String> {
     let name = name.trim();
     if name.is_empty() || name.contains('\0') {
         return Err(anyhow!("非法 SQL 标识符: {name:?}"));
     }
-    Ok(format!("\"{}\"", name.replace('"', "\"\"")))
+    // MySQL 默认 sql_mode 不含 ANSI_QUOTES,双引号被当字符串字面量,必须用反引号;
+    // PostgreSQL/SQLite 用 ANSI 双引号。转义:MySQL 反引号用 `` 转义,PG 双引号用 "" 转义。
+    Ok(match kind {
+        DbKind::MySql => format!("`{}`", name.replace('`', "``")),
+        DbKind::Postgres => format!("\"{}\"", name.replace('"', "\"\"")),
+    })
 }
 
 fn checked_type(ty: &str) -> Result<&str> {
@@ -773,9 +780,21 @@ mod tests {
     #[test]
     fn builds_create_sql_from_dynamic_field_map() -> Result<()> {
         let columns = parse_columns(&map!("id"=> "BIGINT PRIMARY KEY", "name"=> "TEXT"))?;
-        let sql = build_create_sql("user", &columns)?;
+        let sql = build_create_sql("user", &columns, DbKind::Postgres)?;
 
         assert_eq!(sql, "CREATE TABLE IF NOT EXISTS \"user\" (\"id\" BIGINT PRIMARY KEY, \"name\" TEXT)");
+        Ok(())
+    }
+
+    #[test]
+    fn builds_create_sql_uses_backtick_for_mysql() -> Result<()> {
+        // MySQL 默认 sql_mode 不含 ANSI_QUOTES,必须用反引号引用标识符。
+        let columns = parse_columns(&map!("id"=> "BIGINT PRIMARY KEY", "name"=> "TEXT"))?;
+        let sql = build_create_sql("user", &columns, DbKind::MySql)?;
+
+        assert_eq!(sql, "CREATE TABLE IF NOT EXISTS `user` (`id` BIGINT PRIMARY KEY, `name` TEXT)");
+        // 反引号转义
+        assert_eq!(quote_ident("with`tick", DbKind::MySql)?, "`with``tick`");
         Ok(())
     }
 
@@ -796,9 +815,9 @@ mod tests {
 
         assert_eq!(columns.iter().map(|column| column.name.as_str()).collect::<Vec<_>>(), vec!["email", "id", "name"]);
         assert_eq!(indexes.len(), 3);
-        assert_eq!(build_create_index_sql("user", &indexes[0])?, "CREATE INDEX IF NOT EXISTS \"idx_user_name\" ON \"user\" (\"name\")");
-        assert_eq!(build_create_index_sql("user", &indexes[1])?, "CREATE INDEX IF NOT EXISTS \"idx_user_name_email\" ON \"user\" (\"name\", \"email\")");
-        assert_eq!(build_create_index_sql("user", &indexes[2])?, "CREATE UNIQUE INDEX IF NOT EXISTS \"uniq_user_email\" ON \"user\" (\"email\")");
+        assert_eq!(build_create_index_sql("user", &indexes[0], DbKind::Postgres)?, "CREATE INDEX IF NOT EXISTS \"idx_user_name\" ON \"user\" (\"name\")");
+        assert_eq!(build_create_index_sql("user", &indexes[1], DbKind::Postgres)?, "CREATE INDEX IF NOT EXISTS \"idx_user_name_email\" ON \"user\" (\"name\", \"email\")");
+        assert_eq!(build_create_index_sql("user", &indexes[2], DbKind::Postgres)?, "CREATE UNIQUE INDEX IF NOT EXISTS \"uniq_user_email\" ON \"user\" (\"email\")");
         Ok(())
     }
 

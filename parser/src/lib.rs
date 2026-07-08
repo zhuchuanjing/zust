@@ -149,6 +149,7 @@ macro_rules! try_parse {
         let save_pos = $self.pos; //保存当前 pos
         let save_decl_scopes = $self.decl_scopes.clone();
         let save_impl_depth = $self.scope_depths.impl_depth;
+        let save_match_counter = $self.match_counter;
         match $method {
             Ok(expr) => Ok(expr),
             // fatal(如递归过深)不可恢复:不回退 pos,直接上抛,避免外层换产生式重试导致死循环
@@ -157,6 +158,8 @@ macro_rules! try_parse {
                 $self.pos = save_pos;
                 $self.decl_scopes = save_decl_scopes;
                 $self.scope_depths.impl_depth = save_impl_depth;
+                // 回退 match_counter,避免失败路径推进了计数器导致后续 __m_scrut_N 跳号。
+                $self.match_counter = save_match_counter;
                 Err(e)
             }
         }
@@ -615,6 +618,10 @@ impl Parser {
             if self.buf[self.pos] == b'\\' {
                 //转义字符
                 self.pos += 1;
+                // 反斜杠后直接 EOF(如 "abc\):pos 已越界,报错而非 panic。
+                if self.pos >= self.buf.len() {
+                    return Err(ParserErr::at("未完成的转义序列", self.pos).into());
+                }
                 match self.buf[self.pos] {
                     b'n' => {
                         text_buf.push(b'\n');
@@ -738,8 +745,14 @@ impl Parser {
                 continue;
             }
             if self.buf.len() >= self.pos + name.len() && self.buf[self.pos..self.pos + name.len()].eq(name.as_bytes()) {
-                self.pos += name.len();
-                return Some(ty.clone());
+                // 校验后继字符不是 ident 字符,
+                // 避免 123i8x 匹配 i8 留下 x 导致后续解析错乱。
+                let after = self.pos + name.len();
+                let ok = after >= self.buf.len() || NOT_IDENT.contains(&self.buf[after]);
+                if ok {
+                    self.pos = after;
+                    return Some(ty.clone());
+                }
             }
         }
         self.pos = save;

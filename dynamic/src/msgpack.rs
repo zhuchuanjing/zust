@@ -174,7 +174,7 @@ impl MsgPack for Dynamic {
                 let length = raw.read().len();
                 if length < 16 {
                     buf.push(0x80 | length as u8);
-                } else if length <= 0x10000 {
+                } else if length < 0x10000 {
                     buf.push(0xde);
                     buf.write_u16::<BigEndian>(length as u16).unwrap();
                 } else {
@@ -191,7 +191,7 @@ impl MsgPack for Dynamic {
                 let length = keys.len();
                 if length < 16 {
                     buf.push(0x80 | length as u8);
-                } else if length <= 0x10000 {
+                } else if length < 0x10000 {
                     buf.push(0xde);
                     buf.write_u16::<BigEndian>(length as u16).unwrap();
                 } else {
@@ -261,6 +261,11 @@ fn vec_to_map(kvs: Vec<Dynamic>) -> Result<Dynamic> {
 }
 
 const TAG_LEN: [usize; 10] = [0, 1, 2, 2, 4, 4, 4, 8, 8, 8];
+
+/// ext 类型的元素宽度。tag 来自外部字节流,非法 tag 必须报错而非越界 panic。
+fn tag_len(tag: u8) -> Result<usize> {
+    TAG_LEN.get(tag as usize).copied().ok_or_else(|| anyhow!("非法 ext tag: 0x{:02X}", tag))
+}
 
 use bytemuck::pod_collect_to_vec;
 
@@ -344,7 +349,7 @@ impl MsgUnpack for Dynamic {
         if first_byte == 0xc5 {
             assert_err!(buf.len() < 3, anyhow!("no data"));
             let len = read_16(&buf[1..]) as usize;
-            assert_err!(buf.len() < 2 + len, anyhow!("no data"));
+            assert_err!(buf.len() < 3 + len, anyhow!("no data"));
             return Ok((Dynamic::from(&buf[3..3 + len]), 3 + len));
         }
 
@@ -359,7 +364,7 @@ impl MsgUnpack for Dynamic {
             assert_err!(buf.len() < 7, anyhow!("no data"));
             let len = read_8(&buf[1..]) as usize;
             let tag = read_8(&buf[2..]);
-            let byte_len = len * TAG_LEN[tag as usize];
+            let byte_len = len * tag_len(tag)?;
             return Ok((to_vec(&buf[3..3 + byte_len], tag)?, 3 + byte_len));
         }
 
@@ -367,7 +372,7 @@ impl MsgUnpack for Dynamic {
             assert_err!(buf.len() < 8, anyhow!("no data"));
             let len = read_16(&buf[1..]) as usize;
             let tag = read_8(&buf[3..]);
-            let byte_len = len * TAG_LEN[tag as usize];
+            let byte_len = len * tag_len(tag)?;
             return Ok((to_vec(&buf[4..4 + byte_len], tag)?, 4 + byte_len));
         }
 
@@ -375,7 +380,7 @@ impl MsgUnpack for Dynamic {
             assert_err!(buf.len() < 10, anyhow!("no data"));
             let len = read_32(&buf[1..]) as usize;
             let tag = read_8(&buf[5..]);
-            let byte_len = len * TAG_LEN[tag as usize];
+            let byte_len = len * tag_len(tag)?;
             return Ok((to_vec(&buf[6..6 + byte_len], tag)?, 6 + byte_len));
         }
 
@@ -437,13 +442,6 @@ impl MsgUnpack for Dynamic {
             let raw_value = read_32(&buf[1..]);
             let value = u32::cast_signed(raw_value) as i64;
             return Ok((Dynamic::from(value), 5));
-        }
-
-        if first_byte == 0xd3 {
-            assert_err!(buf.len() < 9, anyhow!("no data"));
-            let raw_value = read_64(&buf[1..]);
-            let value = u64::cast_signed(raw_value);
-            return Ok((Dynamic::from(value), 9));
         }
 
         if first_byte == 0xd4 {

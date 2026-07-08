@@ -367,6 +367,7 @@ Dynamic values expose common methods:
 
 - Constructors and type helpers: `Any::null()`, `is_map()`, `is_list()`, `is_string()`, `is_null()`, `clone()`.
 - Size and conversion helpers: `len()`, `keys()`, `to_string()`, `Any::from_i64(value)`, `Any::to_i64(value)`, `Any::from_bool(value)`, `Any::to_bool(value)`, `Any::from_f64(value)`, `Any::to_f64(value)`.
+- Serialization helpers: `to_yaml()`, `from_yaml()`. See the [Serialization](#serialization) section below.
 - List and string helpers: `push(value)`, `pop()`, `split(sep)`, `slice(start, stop, inclusive)`.
 - Map and index helpers: `get_idx(idx)`, `set_idx(idx, value)`, `get(key)`, `get_key(key)`, `set_key(key, value)`, `del_key(key)`, `contains(value)`, `starts_with(prefix)`.
 - Iteration helpers: `iter()`, `next()`.
@@ -389,6 +390,53 @@ let count = data.tags.len();
 let items = data.keys();       // get map keys
 let s = data.to_string();      // string representation
 let first = data.tags.get_idx(0);
+```
+
+### Serialization
+
+Dynamic values can be round-tripped through YAML, which is the structured
+format Zust exposes to the script layer. The output style is LLM-friendly:
+block format, plain strings where possible, multi-line strings as `|` literal
+block scalars, and **no anchors/aliases** (they confuse language models).
+
+- `value.to_yaml()` — render a `Dynamic` as a YAML string.
+- `text.from_yaml()` — parse a YAML string back into a `Dynamic`. Returns
+  `null` if the input cannot be parsed.
+
+YAML 1.2 scalar rules: integers, floats (`3.14`, `-1.5e3`), booleans
+(`true` / `false`), and `null` are recognized. Strings that look like
+numbers or reserved words (e.g. `"123"`, `"yes"`, `"true"`) are auto-quoted
+so they round-trip as strings instead of being misread. Block mappings
+(`key: value`), block sequences (`- item`), and compact block sequences
+(`- name: alice` followed by `  age: 30` on the next line) are all
+supported. Comments (`# …`) and blank lines are ignored on input.
+
+JSON, MessagePack, and Markdown are also available as Rust traits in the
+`dynamic` crate for native code, but only YAML is exposed as a script-level
+`Any` method today.
+
+```zust
+let data = {
+    user: {name: "alice", age: 30},
+    tags: ["rust", "zust"],
+    active: true,
+    id: "123"          // string, not integer — preserved by quoting
+};
+
+let yaml = data.to_yaml();
+print(yaml);
+// active: true
+// tags:
+//   - rust
+//   - zust
+// user:
+//   age: 30
+//   name: alice
+// id: "123"
+
+let back = yaml.from_yaml();
+assert(back.get("id").is_string());   // round-trips as string
+assert(back.get("user").get("age") == 30);
 ```
 
 ### `Vec`

@@ -162,19 +162,24 @@ impl Mul for Dynamic {
 impl Sub for Dynamic {
     type Output = Self;
     fn sub(self, rhs: Self) -> Self::Output {
-        if self.is_f64() || rhs.is_f64() {
-            return Dynamic::F64(self.as_float().unwrap() - rhs.as_float().unwrap());
-        } else if self.is_f32() || rhs.is_f32() {
-            return Dynamic::F32(self.as_float().unwrap() as f32 - rhs.as_float().unwrap() as f32);
+        if self.is_float() && rhs.is_float() {
+            if self.is_f64() || rhs.is_f64() {
+                return Dynamic::F64(self.as_float().unwrap() - rhs.as_float().unwrap());
+            } else if self.is_f32() || rhs.is_f32() {
+                return Dynamic::F32(self.as_float().unwrap() as f32 - rhs.as_float().unwrap() as f32);
+            }
         }
-        if self.is_int() || rhs.is_int() || self.is_uint() || rhs.is_uint() {
+        if self.is_int() || rhs.is_int() {
             let Some((left, right)) = checked_i64(&self, &rhs, "整数减法类型或范围错误") else {
                 return Dynamic::Null;
             };
             return left.checked_sub(right).map(Self::I64).unwrap_or_else(|| int_fault("整数减法溢出"));
         }
-        if self.is_list() && rhs.is_list() {
-            if self.len() == rhs.len() {}
+        if self.is_uint() || rhs.is_uint() {
+            let (Some(left), Some(right)) = (self.as_uint(), rhs.as_uint()) else {
+                return int_fault("无符号整数减法类型错误");
+            };
+            return left.checked_sub(right).map(Self::U64).unwrap_or_else(|| int_fault("无符号整数减法溢出"));
         }
         self
     }
@@ -183,12 +188,14 @@ impl Sub for Dynamic {
 impl Div for Dynamic {
     type Output = Self;
     fn div(self, rhs: Self) -> Self::Output {
-        if self.is_f64() || rhs.is_f64() {
-            return Dynamic::F64(self.as_float().unwrap() / rhs.as_float().unwrap());
-        } else if self.is_f32() || rhs.is_f32() {
-            return Dynamic::F32(self.as_float().unwrap() as f32 / rhs.as_float().unwrap() as f32);
+        if self.is_float() && rhs.is_float() {
+            if self.is_f64() || rhs.is_f64() {
+                return Dynamic::F64(self.as_float().unwrap() / rhs.as_float().unwrap());
+            } else if self.is_f32() || rhs.is_f32() {
+                return Dynamic::F32(self.as_float().unwrap() as f32 / rhs.as_float().unwrap() as f32);
+            }
         }
-        if self.is_int() || rhs.is_int() || self.is_uint() || rhs.is_uint() {
+        if self.is_int() || rhs.is_int() {
             let Some((left, right)) = checked_i64(&self, &rhs, "整数除法类型或范围错误") else {
                 return Dynamic::Null;
             };
@@ -200,6 +207,18 @@ impl Div for Dynamic {
                 }
             };
         }
+        if self.is_uint() || rhs.is_uint() {
+            let (Some(left), Some(right)) = (self.as_uint(), rhs.as_uint()) else {
+                return int_fault("无符号整数除法类型错误");
+            };
+            return match left.checked_div(right) {
+                Some(value) => Self::U64(value),
+                None => {
+                    crate::set_fault("无符号整数除零");
+                    Self::Null
+                }
+            };
+        }
         self
     }
 }
@@ -207,7 +226,7 @@ impl Div for Dynamic {
 impl Rem for Dynamic {
     type Output = Self;
     fn rem(self, rhs: Self) -> Self::Output {
-        if self.is_int() || rhs.is_int() || self.is_uint() || rhs.is_uint() {
+        if self.is_int() || rhs.is_int() {
             let Some((left, right)) = checked_i64(&self, &rhs, "整数取余类型或范围错误") else {
                 return Dynamic::Null;
             };
@@ -215,6 +234,18 @@ impl Rem for Dynamic {
                 Some(value) => Self::I64(value),
                 None => {
                     crate::set_fault("整数取余除零");
+                    Self::Null
+                }
+            };
+        }
+        if self.is_uint() || rhs.is_uint() {
+            let (Some(left), Some(right)) = (self.as_uint(), rhs.as_uint()) else {
+                return int_fault("无符号整数取余类型错误");
+            };
+            return match left.checked_rem(right) {
+                Some(value) => Self::U64(value),
+                None => {
+                    crate::set_fault("无符号整数取余除零");
                     Self::Null
                 }
             };

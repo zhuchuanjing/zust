@@ -358,6 +358,7 @@ spawn(|x, y| {
 
 - 构造和类型辅助：`Any::null()`、`is_map()`、`is_list()`、`is_string()`、`is_null()`、`clone()`。
 - 长度和转换辅助：`len()`、`keys()`、`to_string()`、`Any::from_i64(value)`、`Any::to_i64(value)`、`Any::from_bool(value)`、`Any::to_bool(value)`、`Any::from_f64(value)`、`Any::to_f64(value)`。
+- 序列化辅助：`to_yaml()`、`from_yaml()`，详见下方的 [序列化](#序列化) 一节。
 - List 和字符串辅助：`push(value)`、`pop()`、`split(sep)`、`slice(start, stop, inclusive)`。
 - Map 和索引辅助：`get_idx(idx)`、`set_idx(idx, value)`、`get(key)`、`get_key(key)`、`set_key(key, value)`、`del_key(key)`、`contains(value)`、`starts_with(prefix)`。
 - 迭代辅助：`iter()`、`next()`。
@@ -378,6 +379,50 @@ let count = data.tags.len();
 let items = data.keys();       // 获取 map 所有键
 let s = data.to_string();      // 字符串表示
 let first = data.tags.get_idx(0);
+```
+
+### 序列化
+
+动态值可以转成 YAML 字符串、再解析回来 —— 这是 Zust 暴露在脚本层的结构化
+序列化方式。输出风格针对 LLM 做了取舍：block 风格优先、字符串尽量裸出、
+多行字符串用 `|` literal block scalar 表示，**不输出 anchor / alias**（这两
+个东西语言模型经常搞错）。
+
+- `value.to_yaml()`：把 `Dynamic` 渲染成 YAML 字符串。
+- `text.from_yaml()`：把 YAML 字符串解析成 `Dynamic`，解析失败时返回 `null`。
+
+YAML 1.2 的标量规则：整数、浮点（`3.14`、`-1.5e3`）、布尔（`true` /
+`false`）、`null` 都能识别。形如数字或保留字（`"123"`、`"yes"`、`"true"`
+等）的字符串会自动加引号，round-trip 时仍是字符串而不是被误读成数值。
+支持 block mapping（`key: value`）、block sequence（`- item`）以及
+compact block sequence（`- name: alice` 后跟 `  age: 30` 续行）。注释
+（`# ...`）和空行在解析时会被忽略。
+
+JSON、MessagePack、Markdown 也在 `dynamic` crate 里有对应的 Rust trait，
+方便原生代码使用；脚本层目前只暴露了 YAML。
+
+```zust
+let data = {
+    user: {name: "alice", age: 30},
+    tags: ["rust", "zust"],
+    active: true,
+    id: "123"          // 注意是字符串,不是整数 —— 加引号后保留
+};
+
+let yaml = data.to_yaml();
+print(yaml);
+// active: true
+// tags:
+//   - rust
+//   - zust
+// user:
+//   age: 30
+//   name: alice
+// id: "123"
+
+let back = yaml.from_yaml();
+assert(back.get("id").is_string());   // round-trip 后仍是字符串
+assert(back.get("user").get("age") == 30);
 ```
 
 ### Vec 辅助类型

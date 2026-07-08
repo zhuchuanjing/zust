@@ -29,6 +29,13 @@ pub enum Mount<T> {
 }
 
 impl<T: std::fmt::Debug + MsgPack + MsgUnpack + Default + Send> Mount<T> {
+    /// usize 索引转 isize 供 Redis lindex/lset 使用。
+    /// idx > isize::MAX 时回绕成负数会被 Redis 当成"从末尾倒数",与 zust 的绝对索引语义冲突,
+    /// 报错而非静默错误索引。
+    fn redis_idx(idx: usize) -> Result<isize> {
+        isize::try_from(idx).map_err(|_| anyhow!("索引 {} 超出 isize 范围", idx))
+    }
+
     pub fn memory() -> Self {
         Self::Memory(Arc::new(HashMap::new()))
     }
@@ -101,8 +108,9 @@ impl<T: std::fmt::Debug + MsgPack + MsgUnpack + Default + Send> Mount<T> {
                 let client = client.clone();
                 sync_await!(async move {
                     loop {
-                        let time_out = random_range(0..1000); //等待随机时间
-                        if let Ok(lock) = rl.lock(name.as_str(), std::time::Duration::from_millis(time_out)).await {
+                        // TTL 必须覆盖一次完整 RMW(GET+decode+闭包+encode+SET),
+                        // 原先 0..999ms 可能短于一次 Redis 往返,导致锁提前过期丢更新。
+                        if let Ok(lock) = rl.lock(name.as_str(), std::time::Duration::from_millis(5000)).await {
                             let mut conn = client.get_multiplexed_async_connection().await?;
                             let mut buf: Vec<u8> = conn.get(name.as_str()).await?;
                             let (mut v, _) = T::decode(buf.as_slice())?;
@@ -113,6 +121,8 @@ impl<T: std::fmt::Debug + MsgPack + MsgUnpack + Default + Send> Mount<T> {
                             rl.unlock(&lock).await;
                             break Ok(r);
                         }
+                        // 锁被占用时退避,避免 CPU 100% 空转。
+                        tokio::time::sleep(std::time::Duration::from_millis(random_range(1..10))).await;
                     }
                 })
             }
@@ -165,9 +175,9 @@ impl<T: std::fmt::Debug + MsgPack + MsgUnpack + Default + Send> Mount<T> {
                 let client = client.clone();
                 sync_await!(async move {
                     loop {
-                        let time_out = random_range(0..1000); //等待随机时间
+                        // TTL 必须覆盖一次完整 RMW,原先 0..999ms 会丢更新(见 get_mut 注释)。
                         let lock_name = format!("{}::{}", name, key); //为这个 name 里面的 key 单独上锁
-                        if let Ok(lock) = rl.lock(lock_name.as_str(), std::time::Duration::from_millis(time_out)).await {
+                        if let Ok(lock) = rl.lock(lock_name.as_str(), std::time::Duration::from_millis(5000)).await {
                             let mut conn = client.get_multiplexed_async_connection().await?;
                             let mut buf: Vec<u8> = conn.hget(name.as_str(), key.as_str()).await?;
                             let (mut v, _) = T::decode(buf.as_slice())?;
@@ -178,6 +188,8 @@ impl<T: std::fmt::Debug + MsgPack + MsgUnpack + Default + Send> Mount<T> {
                             rl.unlock(&lock).await;
                             break Ok(r);
                         }
+                        // 锁被占用时退避,避免 CPU 100% 空转。
+                        tokio::time::sleep(std::time::Duration::from_millis(random_range(1..10))).await;
                     }
                 })
             }
@@ -229,6 +241,10 @@ impl<T: std::fmt::Debug + MsgPack + MsgUnpack + Default + Send> Mount<T> {
     pub fn dir_raw(&self, name: &str) -> Result<Vec<SmolStr>> {
         let mut names = Vec::new();
         match self {
+            // 性能:Memory 后端用 scc::HashMap(无序),dir_raw 只能 O(全表) starts_with 扫描。
+            // Redis 用 directory::children 索引,Fjall 用 prefix scan,都是有界的。
+            // http_module::dynamic_api_route 每请求递归调 dir,在 Memory 后端 + 大量节点时是热点。
+            // 根治需把 Memory 后端换成 BTreeMap 或维护前缀二级索引——属架构改动,暂不做。
             Self::Memory(m) => {
                 m.iter_sync(|key, _| {
                     if key.starts_with(name) {
@@ -272,7 +288,10 @@ impl<T: std::fmt::Debug + MsgPack + MsgUnpack + Default + Send> Mount<T> {
 
     pub fn remove(&self, name: &str) -> Result<T> {
         match self {
-            Self::Memory(m) => m.remove_sync(name).and_then(|(_, v)| v.into_object()).ok_or(anyhow!("{} 不存在", name)),
+            // into_object 对 List/Map 节点返回 None(只能取标量 Object),
+            // 但 Redis/Fjall 的 remove 按 name 直接删任意类型。三后端行为统一:
+            // List/Map 节点删除成功,返回 default(节点本身无标量值,default 表示"已删除")。
+            Self::Memory(m) => m.remove_sync(name).map(|(_, v)| v.into_object().unwrap_or_default()).ok_or(anyhow!("{} 不存在", name)),
             Self::Redis { client, rl: _ } => {
                 let mut conn = client.get_connection()?;
                 let buf: Vec<u8> = conn.get(name)?;
@@ -355,8 +374,11 @@ impl<T: std::fmt::Debug + MsgPack + MsgUnpack + Default + Send> Mount<T> {
             Self::Memory(m) => m.read_sync(name, |_, v| v.get_idx(idx, f)).flatten().ok_or(anyhow!("get_idx {} 失败", name)),
             Self::Redis { client, rl: _ } => {
                 let mut conn = client.get_connection()?;
-                let buf: Vec<u8> = conn.lindex(name, idx as isize)?;
-                let (v, _) = T::decode(buf.as_slice())?;
+                let buf: Vec<u8> = conn.lindex(name, Self::redis_idx(idx)?)?;
+                // remove_idx 用 lset 写空 Vec 保留槽位(sparse slot 设计)。
+                // 空槽 decode 失败时返回 default,与 remove_idx 和 Memory 后端行为一致,
+                // 而非中断调用方。
+                let (v, _) = T::decode(buf.as_slice()).unwrap_or_else(|_| (T::default(), 0));
                 Ok(f(&v))
             }
             Self::Fjall { values, .. } => fjall_get_list_item(values, name, idx).map(|v| f(&v)),
@@ -368,7 +390,7 @@ impl<T: std::fmt::Debug + MsgPack + MsgUnpack + Default + Send> Mount<T> {
             Self::Memory(m) => m.update_sync(name, |_, v| v.get_idx_mut(idx, f)).flatten().ok_or(anyhow!("get_idx {} 失败", name)),
             Self::Redis { client, rl: _ } => {
                 let mut conn = client.get_connection()?;
-                let buf: Vec<u8> = conn.lindex(name, idx as isize)?;
+                let buf: Vec<u8> = conn.lindex(name, Self::redis_idx(idx)?)?;
                 let (mut v, _) = T::decode(buf.as_slice())?;
                 Ok(f(&mut v))
             }
@@ -388,9 +410,10 @@ impl<T: std::fmt::Debug + MsgPack + MsgUnpack + Default + Send> Mount<T> {
             Self::Memory(m) => m.update_sync(name, |_, v| v.remove_idx(idx)).flatten().ok_or(anyhow!("remove_idx {} 失败", name)),
             Self::Redis { client, rl: _ } => {
                 let mut conn = client.get_connection()?;
-                let buf: Vec<u8> = conn.lindex(name, idx as isize)?;
+                let idx = Self::redis_idx(idx)?;
+                let buf: Vec<u8> = conn.lindex(name, idx)?;
                 let v = T::decode(buf.as_slice()).map(|(v, _)| v).unwrap_or(T::default());
-                let _: () = conn.lset(name, idx as isize, Vec::new())?;
+                let _: () = conn.lset(name, idx, Vec::new())?;
                 Ok(v)
             }
             Self::Fjall { db, values, .. } => {
@@ -447,7 +470,7 @@ impl<T: std::fmt::Debug + MsgPack + MsgUnpack + Default + Send> Mount<T> {
 
     pub fn keys(&self, name: &str) -> Result<Vec<SmolStr>> {
         match self {
-            Self::Memory(m) => m.read_sync(name, |_, v| v.keys()).flatten().ok_or(anyhow!("get_key {} 失败", name)),
+            Self::Memory(m) => m.read_sync(name, |_, v| v.keys()).flatten().ok_or(anyhow!("keys {} 失败", name)),
             Self::Redis { client, rl: _ } => {
                 let mut conn = client.get_connection()?;
                 let keys: Vec<String> = conn.hkeys(name)?;
@@ -564,7 +587,13 @@ fn fjall_encode_value<T: MsgPack>(value: &T) -> Vec<u8> {
 }
 
 fn fjall_persist(db: &OptimisticTxDatabase) -> Result<()> {
-    Ok(db.persist(PersistMode::SyncAll)?)
+    // fjall 官方明确:persist 只影响 durability(断电后是否丢数据),不影响 consistency。
+    // 即使不 flush,fjall 也是 crash-safe 的——进程崩溃不丢已写入数据。
+    // 原先用 SyncAll(fsync)对每个单 key 写入强制落盘,I/O 开销是内存写的 100-1000 倍,
+    // 而 fjall 文档(db.rs:332)明确:"Even without flushing data is crash-safe."
+    // 改用 Buffer:数据进 OS page cache,进程崩溃安全,仅断电可能丢 journal 末尾少量写入。
+    // 若需断电级 durability,应使用 Redis/PostgreSQL 而非单 key fsync。
+    Ok(db.persist(PersistMode::Buffer)?)
 }
 
 fn fjall_get_object<T: MsgUnpack>(values: &OptimisticTxKeyspace, name: &str) -> Result<T> {

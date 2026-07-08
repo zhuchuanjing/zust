@@ -1304,6 +1304,10 @@ impl Compiler {
         let path = path.as_ref();
         let canonical = std::fs::canonicalize(path).with_context(|| format!("failed to resolve import path {}", path.display()))?;
         if !self.io.importing_paths.insert(canonical.clone()) {
+            // 循环 import(A import B, B import A):第二进入返回空,避免无限递归。
+            // 注意:此时被跳过模块的符号尚未注册,调用方若引用它的符号会"符号未发现"。
+            // 循环依赖是反模式,正确做法是拆分公共依赖或用 lazy 引用。
+            log::warn!("检测到循环 import,跳过 {} 的重复加载", canonical.display());
             return Ok(Vec::new());
         }
         let code = std::fs::read(&canonical).with_context(|| format!("failed to read import path {}", canonical.display()))?;
@@ -1333,6 +1337,11 @@ impl Compiler {
                 continue;
             }
             let path = Path::new(path.as_str());
+            // 路径安全:拒绝 .. 段,防止 import "../../../etc/passwd" 式路径穿越。
+            // zust 脚本应只 import 模块目录内的文件;绝对路径也限制在可信根。
+            if path.components().any(|c| matches!(c, std::path::Component::ParentDir)) {
+                return Err(anyhow!("import 路径不能包含 '..': {}", path.display()));
+            }
             let resolved = if path.is_absolute() {
                 path.to_path_buf()
             } else if let Some(base_dir) = base_dir {

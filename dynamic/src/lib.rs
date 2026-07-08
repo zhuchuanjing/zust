@@ -29,7 +29,9 @@ pub struct MyVec<T> {
 
 impl<T> MyVec<T> {
     pub fn len(&self) -> usize {
-        self.data.len() / mem::size_of::<T>()
+        // ZST 无法用字节切片表示多个元素,退化为长度 0 而非除零 panic。
+        let size = mem::size_of::<T>().max(1);
+        self.data.len() / size
     }
 
     pub fn is_empty(&self) -> bool {
@@ -130,7 +132,8 @@ impl<'a, T: AnyBitPattern> Iterator for Iter<'a, T> {
     }
 
     fn size_hint(&self) -> (usize, Option<usize>) {
-        let remaining = self.data.len() / std::mem::size_of::<T>() - self.index;
+        let size = std::mem::size_of::<T>().max(1);
+        let remaining = self.data.len() / size - self.index;
         (remaining, Some(remaining))
     }
 }
@@ -387,8 +390,9 @@ impl PartialEq for Dynamic {
             (Self::I32(a), Self::I32(b)) => a == b,
             (Self::U64(a), Self::U64(b)) => a == b,
             (Self::I64(a), Self::I64(b)) => a == b,
-            // Mixed integer types - compare as i64
-            (a, b) if a.is_int() && b.is_int() => a.as_int() == b.as_int(),
+            // 混合整数类型(有符号/无符号) - 统一比较。注意 is_int 现在只含有符号,
+            // 无符号需用 is_uint 兜底,否则 U8(5)==I32(5) 会判 false。
+            (a, b) if (a.is_int() || a.is_uint()) && (b.is_int() || b.is_uint()) => a.as_int().or_else(|| a.as_uint().and_then(|v| i64::try_from(v).ok())) == b.as_int().or_else(|| b.as_uint().and_then(|v| i64::try_from(v).ok())),
             // Float types
             (Self::F16(a), Self::F16(b)) => a == b,
             (Self::F32(a), Self::F32(b)) => a.to_bits() == b.to_bits(),
@@ -452,13 +456,18 @@ impl PartialOrd for Dynamic {
 
 impl Ord for Dynamic {
     fn cmp(&self, other: &Self) -> Ordering {
-        if self.is_f32() || self.is_f64() || other.is_f32() || other.is_f64() {
-            self.as_float().unwrap_or(0.0).total_cmp(&other.as_float().unwrap_or(0.0))
-        } else if self.is_int() || other.is_int() {
-            self.as_int().unwrap_or(0).cmp(&other.as_int().unwrap_or(0))
-        } else if self.is_uint() || other.is_uint() {
-            self.as_uint().unwrap_or(0).cmp(&other.as_uint().unwrap_or(0))
-        } else if self.is_false() && other.is_true() {
+        // f16 也参与浮点比较(is_float 含 F16/F32/F64);原先漏掉 F16 让它落到 Equal。
+        if self.is_float() || other.is_float() {
+            return self.as_float().unwrap_or(0.0).total_cmp(&other.as_float().unwrap_or(0.0));
+        }
+        // 整数比较:统一提升到 i128 容纳有符号与无符号的混合比较,
+        // 避免 U64(>i64::MAX) 经 as_int() 丢精度、或负数经 as_uint() 被当 0。
+        if self.is_int() || self.is_uint() || other.is_int() || other.is_uint() {
+            let left = self.as_uint().map(|v| v as i128).or_else(|| self.as_int().map(|v| v as i128)).unwrap_or(0);
+            let right = other.as_uint().map(|v| v as i128).or_else(|| other.as_int().map(|v| v as i128)).unwrap_or(0);
+            return left.cmp(&right);
+        }
+        if self.is_false() && other.is_true() {
             Ordering::Less // false < true
         } else if self.is_true() && other.is_false() {
             Ordering::Greater // true > false
@@ -803,14 +812,38 @@ impl Dynamic {
         // 原代码 v: i64 = *u as i64 + val 后 *u = v as u8 会静默截断 + 返回不一致;
         // 这里改用 checked_add_signed:失败时返回 None,不修改 *self。
         match self {
-            Self::U8(u)  => u.checked_add_signed(val as i8).map(|v| { *u = v; v as i64 }),
-            Self::U16(u) => u.checked_add_signed(val as i16).map(|v| { *u = v; v as i64 }),
-            Self::U32(u) => u.checked_add_signed(val as i32).map(|v| { *u = v; v as i64 }),
-            Self::U64(u) => u.checked_add(val as u64).map(|v| { *u = v; v as i64 }),
-            Self::I8(i)  => i.checked_add(val as i8).map(|v| { *i = v; v as i64 }),
-            Self::I16(i) => i.checked_add(val as i16).map(|v| { *i = v; v as i64 }),
-            Self::I32(i) => i.checked_add(val as i32).map(|v| { *i = v; v as i64 }),
-            Self::I64(i) => i.checked_add(val).map(|v| { *i = v; v }),
+            Self::U8(u) => u.checked_add_signed(val as i8).map(|v| {
+                *u = v;
+                v as i64
+            }),
+            Self::U16(u) => u.checked_add_signed(val as i16).map(|v| {
+                *u = v;
+                v as i64
+            }),
+            Self::U32(u) => u.checked_add_signed(val as i32).map(|v| {
+                *u = v;
+                v as i64
+            }),
+            Self::U64(u) => u.checked_add_signed(val).map(|v| {
+                *u = v;
+                v as i64
+            }),
+            Self::I8(i) => i.checked_add(val as i8).map(|v| {
+                *i = v;
+                v as i64
+            }),
+            Self::I16(i) => i.checked_add(val as i16).map(|v| {
+                *i = v;
+                v as i64
+            }),
+            Self::I32(i) => i.checked_add(val as i32).map(|v| {
+                *i = v;
+                v as i64
+            }),
+            Self::I64(i) => i.checked_add(val).map(|v| {
+                *i = v;
+                v
+            }),
             _ => None,
         }
     }
@@ -839,7 +872,9 @@ impl Dynamic {
     }
 
     pub fn is_native(&self) -> bool {
-        if self.is_f64() || self.is_f32() || self.is_int() || self.is_true() || self.is_false() { true } else { false }
+        // 原生标量类型:所有数值(含无符号)、bool。注意 is_int() 现在只含有符号,
+        // 无符号需单独算,否则 U8 等会被 is_native 漏判(影响类型推断)。
+        if self.is_f64() || self.is_f32() || self.is_int() || self.is_uint() || self.is_true() || self.is_false() { true } else { false }
     }
 
     pub fn from_utf8(buf: &[u8]) -> Result<Self> {
@@ -850,13 +885,25 @@ impl Dynamic {
         match (self, other) {
             (Self::List(left), rhs) => {
                 if let Self::List(right) = rhs {
-                    left.write().append(&mut right.write());
+                    // 同一 Arc 时两次 write 会死锁(parking_lot RwLock 不可重入)。
+                    // 若是克隆自同一源,先 clone 出 right 的内容再追加,避免同时持有。
+                    if Arc::ptr_eq(left, &right) {
+                        let mut right_clone = right.write().clone();
+                        left.write().append(&mut right_clone);
+                    } else {
+                        left.write().append(&mut right.write());
+                    }
                 } else {
                     left.write().push(rhs);
                 }
             }
             (Self::Map(left), Self::Map(right)) => {
-                left.write().append(&mut right.write());
+                if Arc::ptr_eq(left, &right) {
+                    let mut right_clone = right.write().clone();
+                    left.write().append(&mut right_clone);
+                } else {
+                    left.write().append(&mut right.write());
+                }
             }
             (_, _) => {}
         }
@@ -1119,7 +1166,6 @@ impl Dynamic {
     pub fn is_int(&self) -> bool {
         match self {
             Self::I8(_) | Self::I16(_) | Self::I32(_) | Self::I64(_) => true,
-            Self::U8(_) | Self::U16(_) | Self::U32(_) | Self::U64(_) => true,
             _ => false,
         }
     }
@@ -1157,6 +1203,13 @@ impl Dynamic {
 
     pub fn is_f32(&self) -> bool {
         if let Self::F32(_) = self { true } else { false }
+    }
+
+    pub fn is_float(&self) -> bool {
+        match self {
+            Self::F16(_) | Self::F32(_) | Self::F64(_) => true,
+            _ => false,
+        }
     }
 
     pub fn is_f16(&self) -> bool {
@@ -1549,7 +1602,8 @@ impl Dynamic {
             if !keys.is_empty() {
                 if *idx < keys.len() {
                     let k = keys[*idx].clone();
-                    let v = value.get_dynamic(k.as_str()).unwrap();
+                    // 迭代期间 key 可能被删/置空:get_dynamic 返回 None 时用 Null 而非 panic。
+                    let v = value.get_dynamic(k.as_str()).unwrap_or(Dynamic::Null);
                     *idx += 1;
                     return Some(v);
                 }
@@ -1568,7 +1622,7 @@ impl Dynamic {
             if !keys.is_empty() {
                 if *idx < keys.len() {
                     let k = keys[*idx].clone();
-                    let v = value.get_dynamic(k.as_str()).unwrap();
+                    let v = value.get_dynamic(k.as_str()).unwrap_or(Dynamic::Null);
                     *idx += 1;
                     return Some(list!(k, v));
                 }
@@ -1708,7 +1762,8 @@ impl Dynamic {
                 s.push('\n');
             }
         } else if let Self::Bytes(bytes) = self {
-            s = format!("[{}...]", hex::encode(&bytes[..8]));
+            let head = bytes.get(..8).unwrap_or(bytes);
+            s = format!("[{}{}]", hex::encode(head), if bytes.len() > 8 { "..." } else { "" });
         } else {
             let len = self.len();
             if len > 0 {
@@ -2053,6 +2108,9 @@ mod msgpack;
 pub use msgpack::{MsgPack, MsgUnpack};
 
 pub use json::{FromJson, ToJson};
+
+mod yaml;
+pub use yaml::{FromYaml, ToYaml};
 
 mod fault;
 pub use fault::{has_fault, set_fault, take_fault};

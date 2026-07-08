@@ -390,14 +390,10 @@ impl Parser {
                 for pat in &pats[..1] {
                     self.declare_pattern_symbols(pat)?;
                 }
-                // 校验 or-pattern:第二及之后必须是 Literal(MVP 限制)
-                if pats.len() > 1 {
-                    for p in &pats[1..] {
-                        if !matches!(p.kind, PatternKind::Literal(_) | PatternKind::Wildcard) {
-                            return Err(anyhow!("or-pattern 中除第一个外只支持字面量 / 通配模式 (MVP 限制)"));
-                        }
-                    }
-                }
+                // or-pattern:第二及之后的 alt 现在支持任意 pattern(不再限制为 Literal/Wildcard)。
+                // 注意:绑定只取第一个 alt(collect_bindings(&pats[0])),
+                // 若其它 alt 匹配且 body 引用了第一个 alt 的变量,该变量未绑定(读默认/Null)。
+                // 动态语言语义下这是用户责任;Rust 要求 or-pattern 绑定一致,zust 更宽松。
                 // 可选 guard
                 self.whitespace()?;
                 let guard = if self.keyword("if").is_ok() {
@@ -609,7 +605,10 @@ impl Parser {
             let expr = if matches!(self.get(), Ok(b';' | b'}')) { None } else { Some(self.get_expr()?) };
             self.whitespace()?;
             if self.take(b';').is_err() && !matches!(self.get(), Ok(b'}')) {
-                self.until(b';')?;
+                // return 表达式后必须是 ; 或 }(语句/块结束)。
+                // 原先用 until(';') 会贪婪消费到下一个分号,可能吞掉合法代码
+                // (如 return (a, b), c 里的 , c)。改为报错,让用户明确语法问题。
+                return Err(anyhow!("return 后期望 ; 或 }}"));
             }
             Stmt::new(StmtKind::Return(expr), Span::new(start, self.current_pos()))
         } else if self.keyword("if").is_ok() {
@@ -683,6 +682,11 @@ impl Parser {
             let target = self.get_type()?;
             Stmt::new(StmtKind::Impl { target, body: Box::new(self.impl_body()?) }, Span::new(start, self.current_pos()))
         } else if self.keyword("pub").is_ok() {
+            // pub pub fn ... 应报错而非递归到深度限制。
+            // is_pub 为 true 说明已经处在一次 pub 递归中,再遇 pub 是重复修饰符。
+            if is_pub {
+                return Err(anyhow!("重复的 pub 修饰符"));
+            }
             self.stmt(true)?
         } else {
             let expr = if self.get()? == b'{' {

@@ -23,7 +23,7 @@ pub(crate) fn skip_white(buf: &[u8]) -> Result<usize> {
     if pos < buf.len() { Ok(pos) } else { Err(anyhow!("no more data")) }
 }
 
-const TOKEN: &[u8] = b"01234567890.-+truefalsenull"; //合法的数字和其他 json token
+const TOKEN: &[u8] = b"01234567890.-+eEtruefalsenull"; //合法的数字和其他 json token(含科学计数法 e/E)
 pub trait FromJson: Sized {
     fn from_json(buf: &[u8]) -> Result<(Self, usize)>;
     fn get_token(buf: &[u8]) -> Result<(&str, usize)> {
@@ -50,17 +50,42 @@ pub trait FromJson: Sized {
                     b'n' => vec.push(b'\n'),
                     b't' => vec.push(b'\t'),
                     b'u' => {
-                        let unicode_str = unsafe { std::str::from_utf8_unchecked(&buf[(pos + 1)..(pos + 5)]) };
-                        if let Ok(unicode) = u32::from_str_radix(unicode_str, 16) {
-                            if unicode < 0x80 {
-                                vec.push(unicode as u8);
-                            } else {
-                                if let Some(unicode_char) = char::from_u32(unicode) {
-                                    unicode_char.encode_utf8(&mut vec);
-                                }
-                            }
+                        if pos + 5 > buf.len() {
+                            return Err(anyhow!("不完整的 unicode"));
                         }
+                        let unicode_str = unsafe { std::str::from_utf8_unchecked(&buf[(pos + 1)..(pos + 5)]) };
+                        let Ok(unicode) = u32::from_str_radix(unicode_str, 16) else {
+                            return Err(anyhow!("非法 unicode 转义"));
+                        };
                         pos += 4;
+                        // JSON 规范:高代理(0xD800..=0xDBFF)后必须跟 \uXXXX 低代理
+                        // (0xDC00..=0xDFFF),组合成完整 code point;孤立代理丢弃。
+                        let code = if (0xD800..=0xDBFF).contains(&unicode)
+                            && buf.get(pos + 1..pos + 3) == Some(b"\\u")
+                            && pos + 7 <= buf.len()
+                        {
+                            let low_str = unsafe { std::str::from_utf8_unchecked(&buf[(pos + 3)..(pos + 7)]) };
+                            if let Ok(low) = u32::from_str_radix(low_str, 16)
+                                && (0xDC00..=0xDFFF).contains(&low)
+                            {
+                                let combined = 0x10000 + ((unicode - 0xD800) << 10) + (low - 0xDC00);
+                                pos += 6;
+                                combined
+                            } else {
+                                unicode
+                            }
+                        } else {
+                            unicode
+                        };
+                        if code < 0x80 {
+                            vec.push(code as u8);
+                        } else if let Some(ch) = char::from_u32(code) {
+                            // encode_utf8 需要固定大小缓冲区,不能直接传 &mut Vec<u8>
+                            // (Vec 借用的是当前长度 0 的切片,会 panic)。
+                            let mut buf = [0u8; 4];
+                            let s = ch.encode_utf8(&mut buf);
+                            vec.extend_from_slice(s.as_bytes());
+                        }
                     }
                     _ => {
                         return Err(anyhow!("unknow escape {}", buf[pos]));
@@ -138,12 +163,18 @@ impl FromJson for Dynamic {
                 Ok((Dynamic::from(false), size))
             } else if token == "null" {
                 Ok((Dynamic::Null, size))
-            } else if token.contains('.') {
+            } else if token.contains('.') || token.contains('e') || token.contains('E') {
                 let v = token.parse::<f64>()?;
                 Ok((Dynamic::from(v), size))
             } else {
-                let v = token.parse::<i64>()?;
-                Ok((Dynamic::from(v), size))
+                // 纯整数字面量;若失败(如溢出)退回 f64 而非直接报错。
+                match token.parse::<i64>() {
+                    Ok(v) => Ok((Dynamic::from(v), size)),
+                    Err(_) => {
+                        let v = token.parse::<f64>()?;
+                        Ok((Dynamic::from(v), size))
+                    }
+                }
             }
         }
     }
@@ -170,6 +201,19 @@ impl ToJson for &str {
             }
             b'\t' => {
                 vec.extend_from_slice(&[0x5c, 0x74]);
+                vec
+            }
+            0x08 => {
+                vec.extend_from_slice(&[0x5c, 0x62]); // \b
+                vec
+            }
+            0x0c => {
+                vec.extend_from_slice(&[0x5c, 0x66]); // \f
+                vec
+            }
+            c if *c < 0x20 => {
+                // 其它控制字符必须用 \uXXXX 转义(RFC 8259 §7),否则产生非法 JSON。
+                vec.extend_from_slice(format!("\\u{:04x}", c).as_bytes());
                 vec
             }
             _ => {

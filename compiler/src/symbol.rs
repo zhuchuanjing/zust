@@ -65,12 +65,14 @@ pub fn eval_const_int_type(ty: &Type) -> Option<i64> {
         Type::ConstBinary { op, left, right } => {
             let left = eval_const_int_type(left)?;
             let right = eval_const_int_type(right)?;
+            // 用 checked 算术:溢出时返回 None(放弃常量折叠,回退到 ArrayParam),
+            // 而非静默回绕成错误长度(如 i64::MAX+1 -> i64::MIN 可能落在合法 u32 范围)。
             match op {
-                ConstIntOp::Add => Some(left + right),
-                ConstIntOp::Sub => Some(left - right),
-                ConstIntOp::Mul => Some(left * right),
-                ConstIntOp::Div => (right != 0).then_some(left / right),
-                ConstIntOp::Mod => (right != 0).then_some(left % right),
+                ConstIntOp::Add => left.checked_add(right),
+                ConstIntOp::Sub => left.checked_sub(right),
+                ConstIntOp::Mul => left.checked_mul(right),
+                ConstIntOp::Div => (right != 0).then(|| left / right),
+                ConstIntOp::Mod => (right != 0).then(|| left % right),
             }
         }
         _ => None,

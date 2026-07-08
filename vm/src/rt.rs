@@ -885,7 +885,7 @@ impl JITRunTime {
                     self.call_for_side_effect(ctx, f, args)?;
                 }
             } else {
-                let right = self.eval(ctx, &right)?.get(ctx).unwrap();
+                let right = self.eval(ctx, &right)?.get(ctx).ok_or_else(|| self.compile_error(ctx, right.span, "赋值右侧表达式无值"))?;
                 if right.1.is_any() || right.1.is_str() {
                     let f = self.get_method(&left.1, "set_key")?;
                     let args = self.adjust_args(ctx, vec![left, right, value.clone()], f.arg_tys()?)?;
@@ -1648,7 +1648,7 @@ impl JITRunTime {
                 let mut args = self.adjust_args(ctx, args, want_tys)?;
                 if capture_values.is_none() {
                     for c in caps {
-                        args.push(ctx.get_var(*c as u32)?.get(ctx).unwrap().0);
+                        args.push(ctx.get_var(*c as u32)?.get(ctx).ok_or_else(|| anyhow!("闭包捕获的变量 {} 未初始化", c))?.0);
                     }
                 }
                 if ret.is_void() {
@@ -1682,7 +1682,7 @@ impl JITRunTime {
                 Ok(v)
             }
             ExprKind::Unary { op, value } => {
-                let v = self.eval(ctx, value)?.get(ctx).unwrap();
+                let v = self.eval(ctx, value)?.get(ctx).ok_or_else(|| self.compile_error(ctx, value.span, "一元运算符的操作数无值（可能是未初始化或非表达式）"))?;
                 if op == &UnaryOp::Not && v.1.is_any() {
                     let cond = self.bool_value(ctx, v)?;
                     let zero = ctx.builder.ins().iconst(types::I8, 0);
@@ -1923,7 +1923,7 @@ impl JITRunTime {
             let start_block = ctx.builder.create_block();
             ctx.builder.ins().jump(start_block, &[]);
             ctx.builder.switch_to_block(start_block);
-            let cond = self.eval(ctx, cond)?.get(ctx).unwrap();
+            let cond = self.eval(ctx, cond)?.get(ctx).ok_or_else(|| self.compile_error(ctx, cond.span, "while 条件无值（必须是可求值的表达式）"))?;
             let cond = self.bool_value(ctx, cond)?;
             let continue_block = if f.is_some() { ctx.builder.create_block() } else { start_block };
             ctx.builder.ins().brif(cond, loop_block, &[], end_block, &[]);
@@ -2102,7 +2102,7 @@ impl JITRunTime {
                         ctx.truncate_list_fast_paths(list_fast_path_len);
                     }
                 } else if let PatternKind::Var { idx, .. } = &pat.kind {
-                    let vt = self.eval(ctx, range)?.get(ctx).unwrap();
+                    let vt = self.eval(ctx, range)?.get(ctx).ok_or_else(|| self.compile_error(ctx, range.span, "for 循环的迭代对象无值"))?;
                     if let Type::List(_) = &vt.1 {
                         let len_fn = self.get_native_fn_cached("Any::len", &[Type::Any])?;
                         let len = self.call(ctx, len_fn, vec![vt.0])?;
@@ -2172,7 +2172,7 @@ impl JITRunTime {
                         )?;
                     }
                 } else if let PatternKind::Tuple(pats) = &pat.kind {
-                    let vt = self.eval(ctx, range)?.get(ctx).unwrap();
+                    let vt = self.eval(ctx, range)?.get(ctx).ok_or_else(|| self.compile_error(ctx, range.span, "for 循环的迭代对象无值"))?;
                     if vt.1.is_any() && pats.len() == 2 {
                         //暂时只处理 kv
                         let iter = self.call(ctx, self.get_method(&vt.1, "iter")?, vec![vt.0])?;

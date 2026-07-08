@@ -132,9 +132,14 @@ impl Parser {
             };
             let mut value = self.number()?;
             if negative {
+                // 支持所有有符号整数与浮点类型的负数字面量模式。
+                // 无符号类型(U8 等)取负无意义,落到 other 报错。
                 value = match value {
+                    Dynamic::I8(n) => Dynamic::I8(n.wrapping_neg()),
+                    Dynamic::I16(n) => Dynamic::I16(n.wrapping_neg()),
                     Dynamic::I32(n) => Dynamic::I32(-n),
                     Dynamic::I64(n) => Dynamic::I64(-n),
+                    Dynamic::F16(n) => Dynamic::F16(dynamic::f64_to_f16(-dynamic::f16_to_f64(n))),
                     Dynamic::F32(n) => Dynamic::F32(-n),
                     Dynamic::F64(n) => Dynamic::F64(-n),
                     other => return Err(anyhow!("不支持负数模式: {:?}", other)),

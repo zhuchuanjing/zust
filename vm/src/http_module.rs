@@ -845,13 +845,16 @@ async fn handle_socket(socket: WebSocket, token: String, session: Dynamic) {
         let mut senders = WS_SENDERS.lock().expect("ws sender registry poisoned");
         senders.remove(&idx_key);
     }
+    // 回收 local/ws 列表槽位(sparse slot 设计:remove_idx 不 pack,索引稳定),
+    // 避免长连接服务下 local/ws 列表随连接数单调增长泄漏内存。
+    let _ = root::remove_idx("local/ws", idx);
     writer.abort();
 }
 
 fn register_ws_sender() -> Result<usize> {
     ensure_ws_list()?;
     let (mount, name) = root::get_mount("local/ws")?;
-    mount.push(name, root::Object::Native(ws_send_native))
+    mount.push(name, root::Object::Native(root::NativeHandler::from_fn(ws_send_native)))
 }
 
 fn ensure_ws_list() -> Result<()> {
@@ -1005,7 +1008,7 @@ pub const HTTP_NATIVE: &[(&str, &[Type], Type, *const u8)] = &[
 ];
 
 pub fn add_root_handlers() -> Result<()> {
-    root::add("local/http/parse-multipart", root::Object::Native(parse_multipart_dynamic))?;
+    root::add("local/http/parse-multipart", root::Object::Native(root::NativeHandler::from_fn(parse_multipart_dynamic)))?;
     Ok(())
 }
 

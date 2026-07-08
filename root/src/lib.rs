@@ -7,7 +7,7 @@ pub use arrow::query::{Query, SearchDescriptionResult};
 pub use mount::{Mount, Root};
 
 use std::cell::RefCell;
-use std::sync::LazyLock;
+use std::sync::{Arc, LazyLock};
 
 use anyhow::{Result, anyhow};
 use dynamic::{Dynamic, MsgPack, MsgUnpack, Type};
@@ -32,10 +32,18 @@ where
     if tokio::runtime::Handle::try_current().is_ok() {
         let (tx, rx) = tokio::sync::oneshot::channel();
         tokio::task::spawn(async move {
+            // spawn 任务若 panic,tx 在 send 前被 drop,rx.await 会收到 Err,
+            // 由下面的 match 转成带上下文的 panic,而非裸 unwrap 丢失信息。
             let result = f().await;
             let _ = tx.send(result);
         });
-        tokio::task::block_in_place(|| tokio::runtime::Handle::current().block_on(async { rx.await.unwrap() }))
+        tokio::task::block_in_place(|| tokio::runtime::Handle::current().block_on(async {
+            match rx.await {
+                Ok(value) => value,
+                // rx 收到 Err 说明 tx 被 drop(spawn 任务 panic 或提前退出):带上下文 panic。
+                Err(_) => panic!("block_on_async: spawn 任务在发送结果前异常退出"),
+            }
+        }))
     } else {
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(f())
@@ -77,18 +85,61 @@ pub fn send<T: Send + 'static>(tx: &MsgSender<T>, msg: T) -> Result<()> {
 }
 
 pub fn call<T: Send + 'static>(tx: &MsgSender<T>, msg: T) -> Result<T> {
-    let (reply_tx, mut reply_rx) = mpsc::channel::<T>(1024);
+    let (reply_tx, reply_rx) = mpsc::channel::<T>(1024);
     tx.try_send((msg, Some(reply_tx))).map_err(|e| anyhow!("发送失败: {}", e))?;
-    reply_rx.try_recv().map_err(|e| anyhow!("接收回复失败: {}", e))
+    // 原先用 try_recv() 立即返回,但处理方在另一 task 里异步消费,根本没机会在
+    // try_send 和 try_recv 之间执行,导致几乎必然返回"接收回复失败"。
+    // 改为阻塞等待 reply:把 reply_rx move 进 async 块,复用 block_on_async 的
+    // block_in_place 机制等待回复。
+    sync_await!(async move {
+        let mut rx = reply_rx;
+        rx.recv().await
+    })
+    .ok_or_else(|| anyhow!("接收回复失败: channel 关闭"))
 }
 
 use tokio::task::JoinHandle;
 
 use crate::node::Node;
+
+/// ROOT 挂载的 native 处理函数。
+///
+/// 用 `Arc<dyn Fn>` 而非 `fn` 指针,这样既能挂无状态的顶层 `fn`,
+/// 也能挂带捕获环境的闭包(`Arc::new(move |msg| { ... 用到外部状态 ... })`)。
+/// newtype + 手动 Debug 让 `Object` 仍可派生 Debug(`Arc<dyn Fn>` 本身不实现 Debug)。
+#[derive(Clone)]
+pub struct NativeHandler(Arc<dyn Fn(Dynamic) -> Dynamic + Send + Sync>);
+
+impl NativeHandler {
+    /// 用顶层 `fn` 构造(零开销,等价于原先的 `fn` 指针)。
+    pub fn from_fn(f: fn(Dynamic) -> Dynamic) -> Self {
+        Self(Arc::new(f))
+    }
+
+    /// 用任意 `Fn` 闭包构造(可带捕获,需 `Send + Sync`)。
+    pub fn from_closure<F>(f: F) -> Self
+    where
+        F: Fn(Dynamic) -> Dynamic + Send + Sync + 'static,
+    {
+        Self(Arc::new(f))
+    }
+
+    /// 调用处理函数。
+    pub fn call(&self, msg: Dynamic) -> Dynamic {
+        (self.0)(msg)
+    }
+}
+
+impl std::fmt::Debug for NativeHandler {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("NativeHandler").finish_non_exhaustive()
+    }
+}
+
 #[derive(Debug)]
 pub enum Object {
     Value(Dynamic),                                           //基本的值
-    Native(fn(Dynamic) -> Dynamic),                           //函数处理对象
+    Native(NativeHandler),                                    //函数处理对象(支持 fn 与闭包)
     Func(i64, Type),                                          //裸指针
     Tx(MsgSender<Dynamic>, Dynamic),                          //包括 Tx 信息
     Task(JoinHandle<Result<()>>, Dynamic),                    //异步任务
@@ -138,7 +189,7 @@ impl MsgUnpack for Object {
 static ROOT: LazyLock<Root<Object>> = LazyLock::new(|| {
     let root = Root::<Object>::new();
     if let Ok((mount, name)) = root.get_mount("local/fight") {
-        mount.add(name, Object::Native(fight));
+        mount.add(name, Object::Native(NativeHandler::from_fn(fight)));
     }
     root
 });
@@ -147,9 +198,9 @@ thread_local! {
     static SEND_STACK: RefCell<Vec<String>> = RefCell::new(Vec::new());
 }
 
-fn builtin_native(name: &str) -> Option<fn(Dynamic) -> Dynamic> {
+fn builtin_native(name: &str) -> Option<NativeHandler> {
     match name {
-        "fight" | "native.fight" | "native::fight" => Some(fight),
+        "fight" | "native.fight" | "native::fight" => Some(NativeHandler::from_fn(fight)),
         _ => None,
     }
 }
@@ -411,8 +462,55 @@ pub fn add(name: &str, obj: Object) -> Result<bool> {
     Ok(added)
 }
 
-pub fn add_native(name: &str, native_name: &str) -> Result<bool> {
-    let Some(handler) = builtin_native(native_name) else {
+/// `add_native` 第二个参数的 trait 重载。
+///
+/// 既支持按内建名挂载(`add_native("local/h", "fight")`,查 `builtin_native`),
+/// 也支持直接挂任意 `Fn` 闭包(`add_native("local/h", |msg| { ... })`,可带捕获)。
+/// 顶层 `fn` 也会走闭包分支(无捕获闭包)。
+pub trait IntoNativeHandler {
+    fn into_handler(self) -> Option<NativeHandler>;
+}
+
+/// `&str`:按内建名查找(如 "fight")。未知名返回 None,`add_native` 返回 false。
+impl IntoNativeHandler for &str {
+    fn into_handler(self) -> Option<NativeHandler> {
+        builtin_native(self)
+    }
+}
+
+/// 任意 `Fn(Dynamic) -> Dynamic + Send + Sync` 闭包(含无捕获的顶层 `fn`)。
+/// 允许 `root::add_native("local/h", |msg| { ... })` 直接挂闭包。
+impl<F> IntoNativeHandler for F
+where
+    F: Fn(Dynamic) -> Dynamic + Send + Sync + 'static,
+{
+    fn into_handler(self) -> Option<NativeHandler> {
+        Some(NativeHandler::from_closure(self))
+    }
+}
+
+/// 挂载一个 native 处理函数到 ROOT 树。
+///
+/// 第二个参数既可以是内建名(`&str`,如 "fight"),也可以是任意
+/// `Fn(Dynamic) -> Dynamic + Send + Sync` 闭包(可带捕获环境)。
+///
+/// 注意:示例为说明用途,需在已初始化 ROOT 树的上下文中调用。
+///
+/// ```no_run
+/// # use dynamic::Dynamic;
+/// # use root;
+/// // 按名挂内建
+/// let _ = root::add_native("local/fight", "fight");
+/// // 挂顶层 fn
+/// fn h(msg: Dynamic) -> Dynamic { Dynamic::Null }
+/// let _ = root::add_native("local/h", h);
+/// // 挂带捕获的闭包
+/// let state = 42i64;
+/// let closure = move |msg: Dynamic| -> Dynamic { Dynamic::from(state) };
+/// let _ = root::add_native("local/h2", closure);
+/// ```
+pub fn add_native<H: IntoNativeHandler>(name: &str, handler: H) -> Result<bool> {
+    let Some(handler) = handler.into_handler() else {
         return Ok(false);
     };
     let (m, name) = get_mount(name)?;
@@ -472,6 +570,16 @@ pub fn push(name: &str, value: Dynamic) -> Result<usize> {
     Ok(len)
 }
 
+/// 按 idx 从列表移除元素(符合 sparse slot 设计:不 pack,索引稳定)。
+/// 用于 WS 连接等需要稳定 idx 的场景,断开时回收列表槽位避免无限增长。
+pub fn remove_idx(name: &str, idx: usize) -> Result<Dynamic> {
+    let (m, name) = get_mount(name)?;
+    match m.remove_idx(name, idx)? {
+        Object::Value(v) => Ok(v),
+        _ => Ok(Dynamic::Null),
+    }
+}
+
 pub fn add_map(name: &str) -> Result<()> {
     let (m, name) = get_mount(name)?;
     m.add_map(name);
@@ -499,10 +607,14 @@ fn apply_redis_expire(mount: &Mount<Object>, name: &str, expire: Option<i64>) {
     let Some(expire) = expire else {
         return;
     };
+    // expire 是附加属性,失败不应让 add/insert 报错(主数据已写入),
+    // 但必须记录日志,否则过期未设置会静默导致 key 永驻。
     if let Mount::Redis { client, rl: _ } = mount
         && let Ok(mut conn) = client.get_connection()
     {
-        let _ = conn.expire::<&str, ()>(name, expire);
+        if let Err(e) = conn.expire::<&str, ()>(name, expire) {
+            log::warn!("redis expire {} {}s 失败: {e:#}", name, expire);
+        }
     }
 }
 
@@ -513,6 +625,12 @@ pub fn get_key(name: &str, key: &str) -> Result<Dynamic> {
 
 /// 原子并发更新一个节点的值。返回更新后的值。
 /// 节点必须已存在,否则返回 Err。
+/// 原子并发更新一个 Object 节点的值。返回更新后的值。
+///
+/// **警告**:闭包 `f` 在 Memory 后端持有 scc bucket 级写锁(自旋锁,不可重入)期间执行。
+/// 闭包内**不要再调用任何 ROOT 操作**(如 `root::get`/`root::update`/`root::send_msg`),
+/// 否则若目标 name 与当前 name 落入同一 hash bucket,会自旋死锁。
+/// 闭包应只对传入的 `Dynamic` 做本地计算与修改。
 pub fn update<F>(name: &str, mut f: F) -> Result<Dynamic>
 where
     F: FnMut(Dynamic) -> Dynamic + Send + 'static,
@@ -531,6 +649,9 @@ where
 }
 
 /// 原子并发更新一个 map 节点内某个 key 的值。返回更新后的值。
+///
+/// **警告**:同 [`update`],闭包在 Memory 后端持有写锁期间执行,
+/// 闭包内不要回调 ROOT 操作,否则可能自旋死锁。
 pub fn update_key<F>(name: &str, key: &str, mut f: F) -> Result<Dynamic>
 where
     F: FnMut(Dynamic) -> Dynamic + Send + 'static,
@@ -581,7 +702,7 @@ pub fn get_list(name: &str) -> Result<Vec<Dynamic>> {
 enum MyFn {
     Null,
     Sender(MsgSender<Dynamic>),
-    Native(fn(Dynamic) -> Dynamic),
+    Native(NativeHandler),
     Script(i64, Type),
 }
 
@@ -589,7 +710,7 @@ impl MyFn {
     fn call(&self, msg: Dynamic) -> Result<Dynamic> {
         match self {
             MyFn::Sender(tx) => call(tx, msg),
-            MyFn::Native(f) => Ok(f(msg)),
+            MyFn::Native(f) => Ok(f.call(msg)),
             MyFn::Script(ptr, ty) => dynamic::call_fn(*ptr, ty.clone(), Box::new(msg)).map(|r| r.as_ref().clone()),
             MyFn::Null => Ok(Dynamic::Null),
         }
@@ -600,14 +721,26 @@ impl From<&Object> for MyFn {
     fn from(obj: &Object) -> Self {
         match obj {
             Object::Tx(tx, _) => MyFn::Sender(tx.clone()),
-            Object::Task(t, _) => {
-                t.abort();
+            Object::Task(_, _) => {
+                // Task 节点不可作为函数调用;读它不应有 abort 副作用(否则 send_msg
+                // 读取 Task 句柄会杀掉正在运行的后台任务)。
                 MyFn::Null
             }
             Object::Func(ptr, ty) => MyFn::Script(*ptr, ty.clone()),
-            Object::Native(f) => MyFn::Native(*f),
+            Object::Native(f) => MyFn::Native(f.clone()),
             _ => MyFn::Null,
         }
+    }
+}
+
+/// SEND_STACK 的 RAII guard:无论 send_msg/send_idx_msg 的调用是正常返回还是 panic,
+/// Drop 都会弹出栈帧,避免 thread_local 栈残留导致后续误判"递归路径检测"。
+struct SendStackGuard;
+impl Drop for SendStackGuard {
+    fn drop(&mut self) {
+        SEND_STACK.with(|stack| {
+            let _ = stack.borrow_mut().pop();
+        });
     }
 }
 
@@ -624,15 +757,11 @@ pub fn send_msg(name: &str, msg: Dynamic) -> Result<Dynamic> {
         Ok(())
     });
     entered?;
-    let result = (|| {
-        let (m, name) = get_mount(name)?;
-        let f: MyFn = m.get(name, |obj| obj.into())?;
-        f.call(msg)
-    })();
-    SEND_STACK.with(|stack| {
-        let _ = stack.borrow_mut().pop();
-    });
-    result
+    // guard 在此作用域结束(含 panic unwind)时 Drop,保证 SEND_STACK 不残留。
+    let _guard = SendStackGuard;
+    let (m, name) = get_mount(name)?;
+    let f: MyFn = m.get(name, |obj| obj.into())?;
+    f.call(msg)
 }
 
 pub fn send_idx_msg(name: &str, idx: usize, msg: Dynamic) -> Result<Dynamic> {
@@ -649,15 +778,10 @@ pub fn send_idx_msg(name: &str, idx: usize, msg: Dynamic) -> Result<Dynamic> {
         Ok(())
     });
     entered?;
-    let result = (|| {
-        let (m, name) = get_mount(name)?;
-        let f: MyFn = m.get_idx(name, idx, |obj| obj.into())?;
-        f.call(msg)
-    })();
-    SEND_STACK.with(|stack| {
-        let _ = stack.borrow_mut().pop();
-    });
-    result
+    let _guard = SendStackGuard;
+    let (m, name) = get_mount(name)?;
+    let f: MyFn = m.get_idx(name, idx, |obj| obj.into())?;
+    f.call(msg)
 }
 
 #[cfg(test)]
@@ -696,6 +820,37 @@ mod tests {
         assert!(result.is_map());
         assert!(result.get_dynamic("winner").is_some());
         assert!(result.get_dynamic("process").is_some_and(|v| v.is_list()));
+    }
+
+    #[test]
+    fn add_native_accepts_closure_with_captured_state() {
+        // 挂带捕获环境的闭包:原先 Object::Native 是 fn 指针,不支持闭包;
+        // 改成 NativeHandler(Arc<dyn Fn>) 后应能挂任意 Fn 闭包。
+        let multiplier: i64 = 10;
+        let closure = move |msg: Dynamic| -> Dynamic {
+            let n = msg.as_int().unwrap_or(0);
+            Dynamic::from(n * multiplier)
+        };
+        assert!(add_native("local/test/closure_handler", closure).unwrap());
+        let result = send_msg("local/test/closure_handler", Dynamic::from(5i64)).unwrap();
+        assert_eq!(result.as_int(), Some(50));
+    }
+
+    #[test]
+    fn add_native_accepts_bare_fn() {
+        // 顶层 fn 也应能直接挂(走 Fn 闭包分支)
+        fn echo(msg: Dynamic) -> Dynamic {
+            msg
+        }
+        assert!(add_native("local/test/echo", echo).unwrap());
+        let result = send_msg("local/test/echo", Dynamic::from(42i64)).unwrap();
+        assert_eq!(result.as_int(), Some(42));
+    }
+
+    #[test]
+    fn add_native_unknown_builtin_name_returns_false() {
+        // 未知名按 &str 分支返回 None,add_native 返回 false 而非报错
+        assert!(!add_native("local/test/unknown", "no_such_builtin").unwrap());
     }
 
     #[test]

@@ -5,7 +5,7 @@ use crate::memory::{alloc_dynamic, alloc_struct_bytes, take_dynamic_return};
 use anyhow::{Result, anyhow};
 use cranelift::prelude::AbiParam;
 use cranelift_module::{Linkage, Module};
-use dynamic::{Dynamic, Type};
+use dynamic::{Dynamic, ToYaml, Type};
 use parser::{BinaryOp, Expr, ExprKind, Span};
 use rand::RngExt;
 use std::borrow::Cow;
@@ -125,7 +125,7 @@ extern "C" fn random(start: *const Dynamic, stop: *const Dynamic) -> *const Dyna
     if !start.is_null() && !stop.is_null() {
         let mut rng = rand::rng();
         unsafe {
-            if (&*start).is_int() {
+            if (&*start).is_int() || (&*start).is_uint() {
                 let start = (*start).as_int().unwrap_or(0);
                 let stop = (*stop).as_int().unwrap_or(100);
                 return alloc_dynamic(Dynamic::I64(rng.random_range(start..stop)));
@@ -322,13 +322,11 @@ pub(crate) extern "C" fn import_with_vm(context: *const Weak<RwLock<JITRunTime>>
     if addr.is_null() || path.is_null() {
         return false;
     }
-    super::with_native_context(context, |jit| {
-        let name = unsafe { &*addr }.as_str();
-        let path = unsafe { &*path }.as_str();
-        jit.import(name, path)
-    })
-    .map_err(|e| log::error!("import failed: {e:#}"))
-    .is_ok()
+    let name = if addr.is_null() || path.is_null() { return false; } else { unsafe { (&*addr).as_str().to_string() } };
+    let path = unsafe { (&*path).as_str().to_string() };
+    super::with_native_context(context, |jit| jit.import(name.as_str(), path.as_str()))
+        .map_err(|e| log::error!("import {name} 失败: {e:#}"))
+        .is_ok()
 }
 
 pub(crate) extern "C" fn spawn_with_vm(context: *const Weak<RwLock<JITRunTime>>, fn_name: *const Dynamic, args: *const Dynamic) -> bool {
@@ -341,14 +339,20 @@ pub(crate) extern "C" fn spawn_with_vm(context: *const Weak<RwLock<JITRunTime>>,
     }
     let args = if args.is_null() { Dynamic::Null } else { unsafe { (&*args).deep_clone() } };
     let context = unsafe { (&*context).clone() };
-    std::thread::Builder::new()
-        .name(format!("zust:{fn_name}"))
-        .spawn(move || {
-            if let Err(err) = spawn_run(context, fn_name.as_str(), args) {
-                log::error!("spawn {fn_name} failed: {err:?}");
-            }
-        })
-        .is_ok()
+    let thread_name = format!("zust:{fn_name}");
+    // spawn 返回 bool:true=线程已启动(不代表任务执行成功),false=线程启动失败(资源耗尽等)。
+    // 任务执行错误在新线程内 log::error,调用方通过返回值感知启动失败。
+    match std::thread::Builder::new().name(thread_name).spawn(move || {
+        if let Err(err) = spawn_run(context, fn_name.as_str(), args) {
+            log::error!("spawn {fn_name} failed: {err:#}");
+        }
+    }) {
+        Ok(_) => true,
+        Err(e) => {
+            log::error!("spawn 线程启动失败: {e:#}");
+            false
+        }
+    }
 }
 
 fn spawn_args(args: Dynamic) -> Vec<Dynamic> {
@@ -378,14 +382,19 @@ pub(crate) extern "C" fn spawn_ptr(fn_ptr: i64, ret_ty: i64, args: *const Dynami
     let fn_ptr = fn_ptr as usize;
     let ret_ty = unsafe { (&*(ret_ty as *const Type)).clone() };
     let args = if args.is_null() { Dynamic::Null } else { unsafe { (&*args).deep_clone() } };
-    std::thread::Builder::new()
+    match std::thread::Builder::new()
         .name("zust:closure".to_string())
         .spawn(move || {
             if let Err(err) = spawn_run_ptr(fn_ptr, ret_ty, args) {
-                log::error!("spawn closure failed: {err:?}");
+                log::error!("spawn closure failed: {err:#}");
             }
-        })
-        .is_ok()
+        }) {
+        Ok(_) => true,
+        Err(e) => {
+            log::error!("spawn closure 线程启动失败: {e:#}");
+            false
+        }
+    }
 }
 
 pub(crate) extern "C" fn callback_new(fn_ptr: i64, ret_ty: i64, explicit_arg_len: i64, captures: *const Dynamic) -> *const Dynamic {
@@ -1058,7 +1067,16 @@ extern "C" fn any_substring(addr: *const Dynamic, start: i64, stop: *const Dynam
 }
 
 extern "C" fn get_idx(addr: *const Dynamic, idx: i64) -> *const Dynamic {
-    if addr.is_null() { any_null() } else { alloc_dynamic(unsafe { (*addr).get_idx(idx as usize).unwrap_or(Dynamic::Null) }) }
+    if addr.is_null() {
+        any_null()
+    } else {
+        // 负索引用 usize::try_from 拒绝(返回 Null),避免 idx as usize 把 -1 变成 usize::MAX 的越界隐患。
+        // 与 typed-vec 路径(list_get_idx_value)行为一致。
+        match usize::try_from(idx) {
+            Ok(idx) => alloc_dynamic(unsafe { (*addr).get_idx(idx).unwrap_or(Dynamic::Null) }),
+            Err(_) => any_null(),
+        }
+    }
 }
 
 fn list_get_idx_value(addr: *const Dynamic, idx: i64) -> Option<Dynamic> {
@@ -1378,7 +1396,11 @@ extern "C" fn set_idx(addr: *mut Dynamic, idx: i64, value: *const Dynamic) {
     if addr.is_null() {
         return;
     }
-    unsafe { (&mut *addr).set_idx(idx as usize, (&*value).clone()) }
+    // 负索引用 usize::try_from 拒绝(静默不写入),避免 idx as usize 的越界隐患。
+    // 与 typed-vec 路径行为一致。
+    if let Ok(idx) = usize::try_from(idx) {
+        unsafe { (&mut *addr).set_idx(idx, (&*value).clone()) }
+    }
 }
 
 extern "C" fn any_from_i64(v: i64) -> *const Dynamic {
@@ -1458,6 +1480,26 @@ extern "C" fn any_to_string(addr: *const Dynamic) -> *const Dynamic {
     alloc_dynamic(Dynamic::from(unsafe { &*addr }.to_string()))
 }
 
+extern "C" fn any_to_yaml(addr: *const Dynamic) -> *const Dynamic {
+    if addr.is_null() {
+        return alloc_dynamic(Dynamic::from(""));
+    }
+    let mut buf = String::new();
+    unsafe { &*addr }.to_yaml(&mut buf);
+    alloc_dynamic(Dynamic::from(buf))
+}
+
+extern "C" fn any_from_yaml(addr: *const Dynamic) -> *const Dynamic {
+    if addr.is_null() {
+        return alloc_dynamic(Dynamic::Null);
+    }
+    let text = unsafe { &*addr }.as_str();
+    match Dynamic::from_yaml_buf(text.as_bytes()) {
+        Ok(value) => alloc_dynamic(value),
+        Err(_) => alloc_dynamic(Dynamic::Null),
+    }
+}
+
 extern "C" fn any_binary(left: *const Dynamic, op: i32, right: *const Dynamic) -> *const Dynamic {
     if left.is_null() {
         if right.is_null() {
@@ -1504,7 +1546,7 @@ pub const STD: [(&str, &[Type], Type, *const u8); 6] = [
     ("rand", &[Type::Any, Type::Any], Type::Any, random as *const u8),
 ];
 
-pub const ANY: [(&str, &[Type], Type, *const u8); 85] = [
+pub const ANY: [(&str, &[Type], Type, *const u8); 87] = [
     ("Any::null", &[], Type::Any, any_null as *const u8),
     ("Any::is_map", &[Type::Any], Type::Bool, any_is_map as *const u8),
     ("Any::is_list", &[Type::Any], Type::Bool, any_is_list as *const u8),
@@ -1585,6 +1627,8 @@ pub const ANY: [(&str, &[Type], Type, *const u8); 85] = [
     ("Any::from_f64", &[Type::F64], Type::Any, any_from_f64 as *const u8),
     ("Any::to_f64", &[Type::Any], Type::F64, any_to_f64 as *const u8),
     ("Any::to_string", &[Type::Any], Type::Str, any_to_string as *const u8),
+    ("Any::to_yaml", &[Type::Any], Type::Str, any_to_yaml as *const u8),
+    ("Any::from_yaml", &[Type::Any], Type::Any, any_from_yaml as *const u8),
     ("Any::binary", &[Type::Any, Type::I32, Type::Any], Type::Any, any_binary as *const u8),
     ("Any::logic", &[Type::Any, Type::I32, Type::Any], Type::Bool, any_logic as *const u8),
     ("Any::iter", &[Type::Any], Type::Any, any_iter as *const u8),

@@ -301,10 +301,11 @@ fn yaml_write_seq<I: Iterator<Item = Dynamic>>(items: I, indent: usize, buf: &mu
                 pairs.1.to_yaml_indent(0, buf);
             }
             if let Some(rest) = map_remaining_pairs(&item) {
-                // 紧接 `- key: value` 之后还有 sibling key,需要换行 + 缩进对齐。
+                // 第一条 sibling key 必须换到新行;yaml_write_map 自己
+                // 负责 pad 和后续换行,不要再手动 push pad(否则会跟 map
+                // 内部的首条 pad 叠加成双倍缩进)。
                 buf.push('\n');
-                buf.push_str(&" ".repeat(indent + 4));
-                yaml_write_map(rest, indent + 4, buf);
+                yaml_write_map(rest, indent + 2, buf);
             }
         } else if is_yaml_block(&item) {
             let one_more = indent + 2;

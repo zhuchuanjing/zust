@@ -451,8 +451,16 @@ pub fn get_mount<'a>(name: &'a str) -> Result<(Mount<Object>, &'a str)> {
     ROOT.get_mount(name)
 }
 
+pub fn mount_dir(name: &str, host_dir: &str) -> Result<bool> {
+    ROOT.mount_dir(name, host_dir)
+}
+
 pub fn add(name: &str, obj: Object) -> Result<bool> {
     let (m, name) = get_mount(name)?;
+    // Dir 后端的 add 走文件 I/O(impl Mount<Object>::dir_add)。
+    if matches!(m, Mount::Dir { .. }) {
+        return Ok(m.dir_add(name, obj));
+    }
     let mut obj = obj;
     let expire = take_object_expire(&mut obj);
     let added = m.add(name, obj);
@@ -530,6 +538,10 @@ pub fn add_value<T: Into<Dynamic>>(name: &str, val: T) -> Result<bool> {
 
 pub fn get(name: &str) -> Result<Dynamic> {
     let (m, name) = get_mount(name)?;
+    // Dir 后端:文件 → decode;目录 → Null(不报错);不存在 → Err。
+    if matches!(m, Mount::Dir { .. }) {
+        return m.dir_get(name);
+    }
     m.get(name, |obj| obj.value())
 }
 
@@ -544,11 +556,20 @@ pub fn keys(name: &str) -> Result<Dynamic> {
 }
 
 pub fn contains(name: &str) -> bool {
-    if let Ok((m, name)) = get_mount(name) { m.contains(name) } else { false }
+    if let Ok((m, name)) = get_mount(name) {
+        if matches!(m, Mount::Dir { .. }) {
+            return m.dir_contains(name);
+        }
+        return m.contains(name);
+    }
+    false
 }
 
 pub fn remove(name: &str) -> Result<Dynamic> {
     let (m, name) = get_mount(name)?;
+    if matches!(m, Mount::Dir { .. }) {
+        return m.dir_remove(name);
+    }
     match m.remove(name) {
         Ok(Object::Value(v)) => Ok(v),
         _ => Err(anyhow!("没有删除对象")),
@@ -636,6 +657,12 @@ where
     F: FnMut(Dynamic) -> Dynamic + Send + 'static,
 {
     let (m, name) = get_mount(name)?;
+    // Dir 后端的 update:读文件 → 应用 f → 写回。不保证原子,
+    // 但与 Memory/Redis/Fjall 后端的 update 整体语义一致(都是单节点 RMW)。
+    if matches!(m, Mount::Dir { .. }) {
+        let mut f_owned = f;
+        return m.dir_update(name, move |current| f_owned(current));
+    }
     m.get_mut(name, move |obj| match obj {
         Object::Value(v) => {
             let current = std::mem::take(v);
@@ -691,6 +718,26 @@ pub fn get_list(name: &str) -> Result<Vec<Dynamic>> {
             for idx in 0..len {
                 if let Ok(value) = m.get_idx(name, idx, |obj| obj.value()) {
                     items.push(value);
+                }
+            }
+            Ok(items)
+        }
+        // Dir 后端没有 List 概念,但保留接口语义:返回目录下一级 entry 列表
+        //(全是 string name,跟 dir() 一致;调用方拿 Dynamic 列表).
+        Mount::Dir { base } => {
+            let path = crate::mount::safe_path(&base, &name)
+                .ok_or_else(|| anyhow!("path 非法: {}", name))?;
+            if !path.exists() {
+                return Err(anyhow!("{} 不存在", name));
+            }
+            if !path.is_dir() {
+                return Err(anyhow!("{} 不是目录", name));
+            }
+            let mut items = Vec::new();
+            for entry in std::fs::read_dir(&path).map_err(|e| anyhow!("读取 {} 失败: {}", path.display(), e))? {
+                let entry = entry.map_err(|e| anyhow!("读取目录项失败: {}", e))?;
+                if let Some(s) = entry.file_name().to_str() {
+                    items.push(Dynamic::from(s.to_string()));
                 }
             }
             Ok(items)

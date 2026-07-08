@@ -64,6 +64,20 @@ extern "C" fn root_mount_fjall(name: *const Dynamic, data_dir: *const Dynamic) {
     }
 }
 
+extern "C" fn root_mount_dir(name: *const Dynamic, host_dir: *const Dynamic) -> bool {
+    unsafe {
+        // mount_dir 会校验 host_dir 存在并 canonicalize;失败时记日志但不 panic,
+        // 返回 false 让脚本拿到失败信号。
+        match root::mount_dir(&(*name).as_str(), &(*host_dir).as_str()) {
+            Ok(added) => added,
+            Err(e) => {
+                log::error!("root::mount_dir 失败: {:#}", e);
+                false
+            }
+        }
+    }
+}
+
 extern "C" fn root_get(name: *const Dynamic) -> *const Dynamic {
     unsafe { alloc_dynamic(if let Ok((m, name)) = get_mount(&(*name).as_str()) { m.get(name, |v| v.value()).unwrap_or(Dynamic::Null) } else { Dynamic::Null }) }
 }
@@ -143,6 +157,7 @@ extern "C" fn root_update_key(name: *const Dynamic, key: *const Dynamic, callbac
 pub const ROOT_NATIVE: &[(&str, &[Type], Type, *const u8)] = &[
     ("mount", &[Type::Any, Type::Any], Type::Void, root_mount as *const u8),
     ("mount_fjall", &[Type::Any, Type::Any], Type::Void, root_mount_fjall as *const u8),
+    ("mount_dir", &[Type::Any, Type::Any], Type::Bool, root_mount_dir as *const u8),
     ("add_list", &[Type::Any], Type::Bool, root_add_list as *const u8),
     ("add_map", &[Type::Any], Type::Bool, root_add_map as *const u8),
     ("add", &[Type::Any, Type::Any], Type::Bool, root_add as *const u8),

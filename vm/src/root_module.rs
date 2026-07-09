@@ -5,7 +5,7 @@ use crate::JITRunTime;
 use crate::RwLock;
 use crate::ZustCallback;
 use crate::memory::alloc_dynamic;
-use root::{Object, get_mount};
+use root::{Mount, Object, get_mount};
 use std::sync::Weak;
 extern "C" fn root_add(name: *const Dynamic, value: *const Dynamic) -> bool {
     unsafe {
@@ -79,7 +79,20 @@ extern "C" fn root_mount_dir(name: *const Dynamic, host_dir: *const Dynamic) -> 
 }
 
 extern "C" fn root_get(name: *const Dynamic) -> *const Dynamic {
-    unsafe { alloc_dynamic(if let Ok((m, name)) = get_mount(&(*name).as_str()) { m.get(name, |v| v.value()).unwrap_or(Dynamic::Null) } else { Dynamic::Null }) }
+    // Dir 后端:走 `get_for_object` 特化(从文件 decode,wrap 成 Object::Value);
+    // 其它后端走通用 `m.get`。`m.get` 本身对 Dir 永远 Err(那是底层约束,
+    // 因为泛型 T 不一定能量成 Object::Value),所以必须在 C 导出层分派。
+    unsafe {
+        let result = (|| -> Option<Dynamic> {
+            let (m, name) = get_mount(&(*name).as_str()).ok()?;
+            if matches!(m, Mount::Dir { .. }) {
+                m.get_for_object(name, |v| v.value().clone()).ok()
+            } else {
+                m.get(name, |v| v.value()).ok()
+            }
+        })();
+        alloc_dynamic(result.unwrap_or(Dynamic::Null))
+    }
 }
 
 extern "C" fn root_len(name: *const Dynamic) -> i64 {

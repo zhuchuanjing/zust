@@ -170,8 +170,10 @@ impl<T: std::fmt::Debug + MsgPack + MsgUnpack + Default + Send> Mount<T> {
                 Ok(f(&v))
             }
             Self::Fjall { values, .. } => fjall_get_object(values, name).map(|v| f(&v)),
-            // Dir 后端的 get 走 `impl Mount<Object>::dir_get`。
-            Self::Dir { .. } => Err(anyhow!("Mount::Dir 的读请用 dir_get")),
+            // Dir 后端的 get 走下面 `impl Mount<Object>::get` 的特化实现——
+            // 泛型 T 不一定能包成 Object::Value,需要单独处理。
+            // 兜底仍报 Err,让上层知道这个 T 走不了 Dir。
+            Self::Dir { .. } => Err(anyhow!("Mount::Dir 的 get 请用 impl Mount<Object>::get")),
         }
     }
 
@@ -1075,6 +1077,7 @@ impl Mount<Object> {
         Ok(dynamic)
     }
 
+
     pub fn dir_contains(&self, name: &str) -> bool {
         let base = match self {
             Self::Dir { base } => base,
@@ -1110,6 +1113,33 @@ impl Mount<Object> {
         }
         std::fs::write(&path, new_bytes).map_err(|e| anyhow!("写入 {} 失败: {}", path.display(), e))?;
         Ok(next)
+    }
+}
+
+// ----------------------------------------------------------------------------
+// `impl Mount<Object>` 的特化方法
+// ----------------------------------------------------------------------------
+
+impl Mount<Object> {
+    /// Mount::Dir 后端的 `get` 特化:从文件 decode,wrap 成 Object::Value。
+    /// 解决 mount_dir 写完 YAML 后 `root::get` 拿不到 round-trip Dynamic 的问题。
+    pub fn get_for_object<R, F: FnOnce(&Object) -> R>(
+        &self,
+        name: &str,
+        f: F,
+    ) -> Result<R> {
+        match self {
+            Self::Dir { .. } => {
+                let dynamic = self.dir_get(name)?;
+                let mut value = Object::default();
+                if let Object::Value(slot) = &mut value {
+                    *slot = dynamic;
+                }
+                Ok(f(&value))
+            }
+            // 其它后端走通用 get,但 callback 类型是 `&Object`(非泛型)。
+            _ => self.get(name, |v| f(v)),
+        }
     }
 }
 

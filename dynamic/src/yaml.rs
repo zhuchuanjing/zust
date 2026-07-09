@@ -316,7 +316,11 @@ fn yaml_write_seq<I: Iterator<Item = Dynamic>>(items: I, indent: usize, buf: &mu
         }
     }
     if first {
-        // 空序列:用 flow 形式 `[]`,避免下游解析器拿到空 buf。
+        // 空序列:用 flow 形式 `[]`,但必须先 push pad 对齐到当前 block 的缩进,
+        // 否则会落到第 0 列,被 block parser 当成顶层 sequence 截断(整个 round-trip
+        // 都崩)。`indent` 反映的是调用方在 yaml_write_map 里为 block value 准备的
+        // `indent + 2` 缩进,这里把 `[]` 摆到该缩进上即可。
+        buf.push_str(&pad);
         buf.push_str("[]");
     }
 }

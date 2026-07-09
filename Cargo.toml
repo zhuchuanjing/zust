@@ -12,7 +12,17 @@
         "llm",
         "zust-lsp",
         "benches",
+        "zust",
     ]
     # fuzz 是独立 workspace(需 nightly + cargo-fuzz),不纳入常规构建/测试。
     exclude = ["fuzz"]
     resolver = "2"
+
+[workspace.package]
+edition = "2021"
+license = "UNLICENSED"
+publish = false
+
+[workspace.dependencies]
+anyhow = "1"
+clap = { version = "4.6", features = ["derive"] }

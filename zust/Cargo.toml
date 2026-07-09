@@ -2,9 +2,14 @@
 name = "zust"
 version = "0.1.0"
 edition.workspace = true
-license.workspace = true
-publish.workspace = true
-description = "通用 zust 脚本运行器:zust {*.zs} [args...],把剩余参数以 ctx 形式传给 .zs 脚本。默认启用 tree-sitter + source::scan_repo,支持 20+ 主流语言"
+license = "Apache-2.0"
+publish = true
+description = "通用 zust 脚本运行器:zust <script.zs> [args...],把剩余参数以 ctx 形式传给 .zs 脚本。默认启用 tree-sitter + source::scan_repo,支持 41 种主流语言。CLI 入口支持 main(ctx) 函数,ctx 含 script/function/cwd/args。"
+repository = "https://github.com/zhuchuanjing/zust"
+homepage = "https://www.zust-lang.com"
+documentation = "https://docs.rs/zust"
+keywords = ["zust", "scripting", "tree-sitter", "cli", "code-analysis"]
+categories = ["command-line-utilities", "development-tools::source-code-analysis"]
 
 [[bin]]
 name = "zust"

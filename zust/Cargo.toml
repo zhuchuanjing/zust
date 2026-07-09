@@ -9,7 +9,7 @@ repository = "https://github.com/zhuchuanjing/zust"
 homepage = "https://www.zust-lang.com"
 documentation = "https://docs.rs/zust"
 keywords = ["zust", "scripting", "tree-sitter", "cli", "code-analysis"]
-categories = ["command-line-utilities", "development-tools::source-code-analysis"]
+categories = ["command-line-utilities"]
 
 [[bin]]
 name = "zust"

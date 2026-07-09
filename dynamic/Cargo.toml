@@ -1,6 +1,6 @@
 [package]
 name = "zust-dynamic"
-version = "0.9.23"
+version = "0.9.24"
 edition = "2024"
 rust-version = "1.85"
 description = "Dynamic value model for Zust scripts, with JSON, MessagePack, bytes, and typed vectors."

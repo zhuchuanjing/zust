@@ -426,6 +426,22 @@ fn walk(
     language: Language,
     parent_name: Option<&str>,
 ) {
+    walk_inner(node, text, out, language, parent_name, 0)
+}
+
+fn walk_inner(
+    node: tree_sitter::Node<'_>,
+    text: &str,
+    out: &mut Vec<SyntaxUnit>,
+    language: Language,
+    parent_name: Option<&str>,
+    depth: usize,
+) {
+    // 防止 ffmpeg/curl 这种带巨型 #include 链或嵌套结构体数组的 AST 触发栈溢出。
+    // 深度 256 已经远超任何合理的 source-level 嵌套(函数/类典型深度 < 20)。
+    if depth > 256 {
+        return;
+    }
     let kind = node.kind();
     if let Some((unit_kind, name, is_public)) = classify(kind, node, text, language) {
         out.push(SyntaxUnit {
@@ -440,14 +456,14 @@ fn walk(
         // 但函数/类已经识别过的子树就不再重复"用整个 span 拍一个 module"
         for i in 0..node.named_child_count() {
             if let Some(child) = node.named_child(i as u32) {
-                walk(child, text, out, language, name.as_deref());
+                walk_inner(child, text, out, language, name.as_deref(), depth + 1);
             }
         }
     } else {
         // 不识别为 unit 的子树,继续下钻
         for i in 0..node.named_child_count() {
             if let Some(child) = node.named_child(i as u32) {
-                walk(child, text, out, language, parent_name);
+                walk_inner(child, text, out, language, parent_name, depth + 1);
             }
         }
     }
@@ -853,7 +869,8 @@ fn detect_public(
             // 否则上一行 `export function foo() {}` 的 export 会污染下一行的 `function bar()`。
             // 取最近 ~80 字符的 token 窗口。
             let recent_window: String = if trimmed.len() > 80 {
-                trimmed[trimmed.len() - 80..].to_string()
+                // 用 char 边界安全地取最近 N 个字符,避免 from_utf8_lossy 的 U+FFFD 多字节被切断
+            trimmed.chars().rev().take(80).collect::<String>().chars().rev().collect::<String>()
             } else {
                 trimmed.to_string()
             };
@@ -877,7 +894,8 @@ fn detect_public(
         Language::Java | Language::Kotlin | Language::CSharp => {
             // explicit `public`(同样只看最近窗口,避免上一个 class 的 `public` 串扰)
             let recent_window: String = if trimmed.len() > 80 {
-                trimmed[trimmed.len() - 80..].to_string()
+                // 用 char 边界安全地取最近 N 个字符,避免 from_utf8_lossy 的 U+FFFD 多字节被切断
+            trimmed.chars().rev().take(80).collect::<String>().chars().rev().collect::<String>()
             } else {
                 trimmed.to_string()
             };
@@ -911,7 +929,8 @@ fn detect_public(
         Language::Php | Language::GDScript | Language::Glsl | Language::Wgsl => {
             // 简化处理:看是否有 `private` / `protected` 关键字(也只看最近窗口)
             let recent_window: String = if trimmed.len() > 80 {
-                trimmed[trimmed.len() - 80..].to_string()
+                // 用 char 边界安全地取最近 N 个字符,避免 from_utf8_lossy 的 U+FFFD 多字节被切断
+            trimmed.chars().rev().take(80).collect::<String>().chars().rev().collect::<String>()
             } else {
                 trimmed.to_string()
             };

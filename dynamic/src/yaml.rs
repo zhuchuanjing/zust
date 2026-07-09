@@ -273,14 +273,52 @@ impl Dynamic {
 /// (flow scalar)。标量、null、bool、纯数字字符串这些可以直接 inline;mapping /
 /// sequence 必须换行展开。
 fn is_yaml_block(value: &Dynamic) -> bool {
+    // 短小的纯标量序列(2~4 个 int/float/bool)用 inline flow `[a, b]`,
+    // 走 is_yaml_compact_flow;其余 List / Map / Vec 仍走 block。
+    if is_yaml_compact_flow(value) {
+        return false;
+    }
     matches!(value, Dynamic::Map(_) | Dynamic::List(_) | Dynamic::Bytes(_) | Dynamic::StructView { .. } | Dynamic::StructOwned { .. })
         || matches!(value, Dynamic::VecI8(_) | Dynamic::VecU16(_) | Dynamic::VecI16(_) | Dynamic::VecU32(_) | Dynamic::VecI32(_) | Dynamic::VecF32(_) | Dynamic::VecU64(_) | Dynamic::VecI64(_) | Dynamic::VecF64(_))
 }
 
+/// 是否能用 inline flow `[a, b]` 表示的短标量序列。
+/// 用于 `line: [6, 8]` 这种位置对的紧凑写法,省掉 block 风格的两行缩进。
+fn is_yaml_compact_flow(value: &Dynamic) -> bool {
+    let items = match value {
+        Dynamic::List(items) => items.read().clone(),
+        _ => return false,
+    };
+    items.len() >= 2
+        && items.len() <= 4
+        && items.iter().all(is_yaml_flow_scalar)
+}
+
 fn yaml_write_seq<I: Iterator<Item = Dynamic>>(items: I, indent: usize, buf: &mut String) {
     let pad = " ".repeat(indent);
+
+    // 收集所有 item,以决定走 block 还是 flow。
+    // 短小的纯标量序列(2~4 个 int / float / bool / 短字符串)用 flow `[a, b]`
+    // 节省垂直空间;长序列或含 map/嵌套结构的仍走 block `- ` 形式。
+    let items_vec: Vec<Dynamic> = items.collect();
+    let use_flow = items_vec.len() >= 2
+        && items_vec.len() <= 4
+        && items_vec.iter().all(is_yaml_flow_scalar);
+
+    if use_flow {
+        buf.push('[');
+        for (i, item) in items_vec.iter().enumerate() {
+            if i > 0 {
+                buf.push_str(", ");
+            }
+            item.to_yaml_indent(0, buf);
+        }
+        buf.push(']');
+        return;
+    }
+
     let mut first = true;
-    for item in items {
+    for item in items_vec {
         // 第一个 item 用 pad (无 newline);后续 item 用 "\n + pad" 分隔。
         buf.push_str(if first { &pad } else { "\n" });
         if !first {
@@ -323,6 +361,19 @@ fn yaml_write_seq<I: Iterator<Item = Dynamic>>(items: I, indent: usize, buf: &mu
         buf.push_str(&pad);
         buf.push_str("[]");
     }
+}
+
+/// 是否可以在 flow `[a, b]` 里内联的标量(int / float / bool / 短字符串 / null)。
+fn is_yaml_flow_scalar(value: &Dynamic) -> bool {
+    matches!(
+        value,
+        Dynamic::Null
+            | Dynamic::Bool(_)
+            | Dynamic::U64(_)
+            | Dynamic::I64(_)
+            | Dynamic::F32(_)
+            | Dynamic::F64(_)
+    )
 }
 
 fn yaml_write_map<I: Iterator<Item = (SmolStr, Dynamic)>>(entries: I, indent: usize, buf: &mut String) {

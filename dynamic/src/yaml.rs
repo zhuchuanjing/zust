@@ -1,4 +1,4 @@
-use crate::{Dynamic, ZOnce};
+use crate::Dynamic;
 
 use anyhow::{Result, anyhow};
 use indexmap::IndexMap;
@@ -56,27 +56,7 @@ fn yaml_string_needs_quoting(s: &str) -> bool {
         return true;
     }
     // 数字 / null / bool 字面量全比较一遍,大小写敏感 (YAML 1.2)。
-    if matches!(
-        s,
-        "true"
-            | "false"
-            | "null"
-            | "Null"
-            | "NULL"
-            | "~"
-            | "yes"
-            | "no"
-            | "on"
-            | "off"
-            | "True"
-            | "False"
-            | "TRUE"
-            | "FALSE"
-            | "YES"
-            | "NO"
-            | "ON"
-            | "OFF"
-    ) {
+    if matches!(s, "true" | "false" | "null" | "Null" | "NULL" | "~" | "yes" | "no" | "on" | "off" | "True" | "False" | "TRUE" | "FALSE" | "YES" | "NO" | "ON" | "OFF") {
         return true;
     }
     // 像数字的字符串也需要引号,避免下游解析误读。
@@ -93,6 +73,25 @@ fn yaml_string_needs_quoting(s: &str) -> bool {
             _ => {}
         }
     }
+    // 短符号字面量(YAML 1.2 reserved indicators):`+`/`-` 在 number / sexagesimal
+    // 上下文里是保留字符,严格解析器(PyYAML safe_load)会拒绝裸出的 `name: +`。
+    // 常见来源:Ruby/Perl 运算符方法名(`+`, `-`, `<<`, `>>`)、C 操作符 token。
+    if matches!(s, "+" | "-" | "<<" | ">>" | "<=>" | "===" | "=~" | "!~" | "**" | "&&" | "||") {
+        return true;
+    }
+    // block scalar indicator:`|` / `>` 开头表示 literal / folded block scalar,
+    // 后面跟 chomping(`-` / `+`) 和 indentation hint。`name: |+std::...`(C++ 模板
+    // 方法名 `operator|+<...>`)会被严格解析器当成 block scalar 起始报错。
+    // 任何 `|` / `>` 开头的字符串一律加引号,避免被误读。
+    if s.starts_with('|') || s.starts_with('>') {
+        return true;
+    }
+    // `+` / `-` 开头当 name 时严格 YAML 也不让裸出(`name: -foo` 是 sequence entry,
+    // `name: +bar` 是 sexagesimal 起始)。已经覆盖了单字符 +/-,多字符 `+foo`/`-foo`
+    // 也需要加引号。
+    if s.starts_with('+') || s.starts_with('-') {
+        return true;
+    }
     // 首字符是 `-` 或 `?` 时为了避免被解析成 sequence / complex key,也加引号。
     // (已在 RESERVED_FIRST 包含)
     // 末尾空格 / tab 需要引号,否则会被 trim 掉。
@@ -107,11 +106,7 @@ fn looks_like_number(s: &str) -> bool {
     if s.eq_ignore_ascii_case("inf") || s.eq_ignore_ascii_case("nan") || s.eq_ignore_ascii_case(".inf") || s.eq_ignore_ascii_case(".nan") {
         return true;
     }
-    if s.contains('.') || s.contains('e') || s.contains('E') {
-        return s.parse::<f64>().is_ok()
-    } else {
-        return s.parse::<i64>().is_ok()
-    }
+    if s.contains('.') || s.contains('e') || s.contains('E') { return s.parse::<f64>().is_ok() } else { return s.parse::<i64>().is_ok() }
 }
 
 /// 把字符串内容里必须转义的字符按 YAML 双引号 scalar 的规则写出。
@@ -141,28 +136,53 @@ fn yaml_quote_string(s: &str, buf: &mut String) {
 /// `|` 之后的 chomping indicator 用 `+` 表示保留末尾所有换行;LLM 解析 YAML 时
 /// 这个最不会出错,代价是多一两行。块缩进以首个非空行的缩进为基准。
 fn yaml_block_string(s: &str, indent: usize, buf: &mut String) {
-    let pad = " ".repeat(indent);
+    // 块缩进必须 > 父 key 的缩进,否则内容会被 YAML 解析器当成兄弟 key。
+    // 父 key 缩进 = `indent`,块至少 indent+2。
+    let block_indent = indent + 2;
+    let pad = " ".repeat(block_indent);
+    // 若字符串首字符是 YAML reserved indicator(`+` / `-` / `?` / `:` / `#` 等),
+    // block 起始行会被 strict 解析器误读。改用引号包裹,`\n` 转义成 `\n`。
+    let first = s.chars().next().unwrap_or(' ');
+    if matches!(first, '+' | '-' | '?' | ':' | '#' | '&' | '*' | '!' | '|' | '>' | '<' | '[' | ']' | '{' | '}') {
+        yaml_quote_string(s, buf);
+        return;
+    }
+    // 同时:任何空行(以 ` ` 开头)或首字符为空格/Tab 的多行字符串,
+    // 严格 YAML 解析器也会 reject(空行会被解析器当成文档分隔)。也走 quoted。
+    if first == ' ' || first == '\t' {
+        yaml_quote_string(s, buf);
+        return;
+    }
     buf.push_str("|+\n");
+    // 按 `\n` 切行,每行加 `pad` 缩进;保留行内的所有字符不动。
     let mut count = 0usize;
+    let mut line = String::new();
     for ch in s.chars() {
-        buf.push_str(&pad);
         if ch == '\n' {
+            buf.push_str(&pad);
+            buf.push_str(&line);
             buf.push('\n');
+            line.clear();
             count = 0;
         } else {
-            buf.push(ch);
+            line.push(ch);
             count += 1;
         }
     }
     if count > 0 {
+        buf.push_str(&pad);
+        buf.push_str(&line);
         buf.push('\n');
     }
 }
 
-/// 把一个字符串写出。优先裸出;必要时双引号;含换行时用 `|` block。
-fn yaml_write_string(s: &str, indent: usize, buf: &mut String) {
+/// 把一个字符串写出。优先裸出;必要时双引号;含换行时走 quoted(`\n` 转义)。
+/// 早期版本用 `|+\n` block literal,但 block 缩进必须严格大于父 key 缩进,
+/// 跨嵌套层管理很脆弱,容易把 `  std::unordered_map<...>` 这种 C++ 模板名写到
+/// 与父 key 同缩进的位置,YAML 解析器 reject。改用 quoted,稳定且无缩进依赖。
+fn yaml_write_string(s: &str, _indent: usize, buf: &mut String) {
     if s.contains('\n') {
-        yaml_block_string(s, indent, buf);
+        yaml_quote_string(s, buf);
         return;
     }
     if yaml_string_needs_quoting(s) {
@@ -289,9 +309,7 @@ fn is_yaml_compact_flow(value: &Dynamic) -> bool {
         Dynamic::List(items) => items.read().clone(),
         _ => return false,
     };
-    items.len() >= 2
-        && items.len() <= 4
-        && items.iter().all(is_yaml_flow_scalar)
+    items.len() >= 2 && items.len() <= 4 && items.iter().all(is_yaml_flow_scalar)
 }
 
 fn yaml_write_seq<I: Iterator<Item = Dynamic>>(items: I, indent: usize, buf: &mut String) {
@@ -301,9 +319,7 @@ fn yaml_write_seq<I: Iterator<Item = Dynamic>>(items: I, indent: usize, buf: &mu
     // 短小的纯标量序列(2~4 个 int / float / bool / 短字符串)用 flow `[a, b]`
     // 节省垂直空间;长序列或含 map/嵌套结构的仍走 block `- ` 形式。
     let items_vec: Vec<Dynamic> = items.collect();
-    let use_flow = items_vec.len() >= 2
-        && items_vec.len() <= 4
-        && items_vec.iter().all(is_yaml_flow_scalar);
+    let use_flow = items_vec.len() >= 2 && items_vec.len() <= 4 && items_vec.iter().all(is_yaml_flow_scalar);
 
     if use_flow {
         buf.push('[');
@@ -365,15 +381,7 @@ fn yaml_write_seq<I: Iterator<Item = Dynamic>>(items: I, indent: usize, buf: &mu
 
 /// 是否可以在 flow `[a, b]` 里内联的标量(int / float / bool / 短字符串 / null)。
 fn is_yaml_flow_scalar(value: &Dynamic) -> bool {
-    matches!(
-        value,
-        Dynamic::Null
-            | Dynamic::Bool(_)
-            | Dynamic::U64(_)
-            | Dynamic::I64(_)
-            | Dynamic::F32(_)
-            | Dynamic::F64(_)
-    )
+    matches!(value, Dynamic::Null | Dynamic::Bool(_) | Dynamic::U64(_) | Dynamic::I64(_) | Dynamic::F32(_) | Dynamic::F64(_))
 }
 
 fn yaml_write_map<I: Iterator<Item = (SmolStr, Dynamic)>>(entries: I, indent: usize, buf: &mut String) {
@@ -722,8 +730,8 @@ fn try_read_key(buf: &[u8], pos: usize) -> Option<(SmolStr, usize)> {
         return Some((SmolStr::from(if quote == b'"' { unescape_double_quoted(key_str) } else { unescape_single_quoted(key_str) }), after));
     }
     // 普通 key:扫到 `:` 或"明显不能作为 key 字符"为止。空白 / `,` / `}` / `]` /
-// `#` / `\n` 都属于 separator,提前终止。这样在 `{a: 1, b: 2}` 这种 inline 上下文里
-// 才不会把后面的 `, b: 2` 吞进 key。
+    // `#` / `\n` 都属于 separator,提前终止。这样在 `{a: 1, b: 2}` 这种 inline 上下文里
+    // 才不会把后面的 `, b: 2` 吞进 key。
     let mut p = pos;
     while p < buf.len() {
         match buf[p] {
@@ -913,7 +921,8 @@ fn parse_block_seq(buf: &[u8], mut pos: usize, parent_indent: usize) -> Result<(
                         let dash_indent = line_indent(buf, pos);
                         // 跳过行首缩进,看看是不是 `key:` 续行。
                         let key_start = p + next_indent;
-                        if next_indent > dash_indent && key_start < buf.len()
+                        if next_indent > dash_indent
+                            && key_start < buf.len()
                             && let Some((next_key, colon)) = try_read_key(buf, key_start)
                         {
                             // 用 parse_block_map 把后续 key:value 行都收进来。
@@ -1030,17 +1039,6 @@ impl Dynamic {
         Ok(value)
     }
 }
-
-impl Dynamic {
-    /// 给 `to_yaml` / 测试用的小工具:在已有 map 里塞一个 entry 并返回 map。
-    fn map_with_entry(key: SmolStr, value: Dynamic) -> Self {
-        let mut map = IndexMap::new();
-        map.insert(key, value);
-        Dynamic::Map(Arc::new(RwLock::new(map)))
-    }
-}
-
-// ---- 测试 --------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {

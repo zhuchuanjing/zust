@@ -1,6 +1,6 @@
 [package]
 name = "zust"
-version = "0.1.0"
+version = "0.1.1"
 edition.workspace = true
 license = "Apache-2.0"
 publish = true
@@ -46,11 +46,11 @@ tree-sitter = [
 [dependencies]
 anyhow.workspace = true
 clap = { workspace = true, features = ["derive"] }
-dynamic = { package = "zust-dynamic", version = "0.9.23", path = "../dynamic" }
-root = { package = "zust-root", version = "0.9.22", path = "../root" }
+dynamic = { package = "zust-dynamic", version = "0.9.24", path = "../dynamic" }
+root = { package = "zust-root", version = "0.9.23", path = "../root" }
 smol_str = "0.3"
 uuid = { version = "1", features = ["v4"] }
-vm = { package = "zust-vm", version = "0.9.102", path = "../vm" }
+vm = { package = "zust-vm", version = "0.9.103", path = "../vm" }
 walkdir = { version = "2", optional = true }
 
 # tree-sitter grammars(全部 optional,跟 tree-sitter 0.26 兼容)

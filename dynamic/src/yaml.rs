@@ -132,50 +132,6 @@ fn yaml_quote_string(s: &str, buf: &mut String) {
     buf.push('"');
 }
 
-/// 多行字符串用 `|` literal block scalar 输出。
-/// `|` 之后的 chomping indicator 用 `+` 表示保留末尾所有换行;LLM 解析 YAML 时
-/// 这个最不会出错,代价是多一两行。块缩进以首个非空行的缩进为基准。
-fn yaml_block_string(s: &str, indent: usize, buf: &mut String) {
-    // 块缩进必须 > 父 key 的缩进,否则内容会被 YAML 解析器当成兄弟 key。
-    // 父 key 缩进 = `indent`,块至少 indent+2。
-    let block_indent = indent + 2;
-    let pad = " ".repeat(block_indent);
-    // 若字符串首字符是 YAML reserved indicator(`+` / `-` / `?` / `:` / `#` 等),
-    // block 起始行会被 strict 解析器误读。改用引号包裹,`\n` 转义成 `\n`。
-    let first = s.chars().next().unwrap_or(' ');
-    if matches!(first, '+' | '-' | '?' | ':' | '#' | '&' | '*' | '!' | '|' | '>' | '<' | '[' | ']' | '{' | '}') {
-        yaml_quote_string(s, buf);
-        return;
-    }
-    // 同时:任何空行(以 ` ` 开头)或首字符为空格/Tab 的多行字符串,
-    // 严格 YAML 解析器也会 reject(空行会被解析器当成文档分隔)。也走 quoted。
-    if first == ' ' || first == '\t' {
-        yaml_quote_string(s, buf);
-        return;
-    }
-    buf.push_str("|+\n");
-    // 按 `\n` 切行,每行加 `pad` 缩进;保留行内的所有字符不动。
-    let mut count = 0usize;
-    let mut line = String::new();
-    for ch in s.chars() {
-        if ch == '\n' {
-            buf.push_str(&pad);
-            buf.push_str(&line);
-            buf.push('\n');
-            line.clear();
-            count = 0;
-        } else {
-            line.push(ch);
-            count += 1;
-        }
-    }
-    if count > 0 {
-        buf.push_str(&pad);
-        buf.push_str(&line);
-        buf.push('\n');
-    }
-}
-
 /// 把一个字符串写出。优先裸出;必要时双引号;含换行时走 quoted(`\n` 转义)。
 /// 早期版本用 `|+\n` block literal,但 block 缩进必须严格大于父 key 缩进,
 /// 跨嵌套层管理很脆弱,容易把 `  std::unordered_map<...>` 这种 C++ 模板名写到

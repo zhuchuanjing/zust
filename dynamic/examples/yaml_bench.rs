@@ -1,22 +1,16 @@
 use std::collections::BTreeMap;
 use std::time::Instant;
 
-use dynamic::{Dynamic, ToYaml};
+use dynamic::Dynamic;
 
 fn gen_node(depth: i64, idx: i64) -> Dynamic {
     let mut m: BTreeMap<smol_str::SmolStr, Dynamic> = BTreeMap::new();
     m.insert("id".into(), Dynamic::I64(idx));
     m.insert("name".into(), Dynamic::String(format!("user_{idx}").into()));
-    m.insert(
-        "email".into(),
-        Dynamic::String(format!("user{idx}@example.com").into()),
-    );
+    m.insert("email".into(), Dynamic::String(format!("user{idx}@example.com").into()));
     m.insert("active".into(), Dynamic::Bool(idx % 3 == 0));
     m.insert("score".into(), Dynamic::F64((idx as f64) * 7.0 / 13.0));
-    let tags = vec![
-        Dynamic::String(format!("tag_{}", idx % 5).into()),
-        Dynamic::String(format!("tag_{}", idx % 7).into()),
-    ];
+    let tags = vec![Dynamic::String(format!("tag_{}", idx % 5).into()), Dynamic::String(format!("tag_{}", idx % 7).into())];
     m.insert("tags".into(), Dynamic::list(tags));
     if depth > 0 && idx % 10 == 0 {
         let mut children = Vec::new();
@@ -33,10 +27,7 @@ fn gen_node(depth: i64, idx: i64) -> Dynamic {
 fn gen_dataset(n: i64) -> Dynamic {
     let mut root: BTreeMap<smol_str::SmolStr, Dynamic> = BTreeMap::new();
     root.insert("version".into(), Dynamic::String("1.0".into()));
-    root.insert(
-        "generated_at".into(),
-        Dynamic::String("2026-07-08T19:51:00Z".into()),
-    );
+    root.insert("generated_at".into(), Dynamic::String("2026-07-08T19:51:00Z".into()));
     root.insert("count".into(), Dynamic::I64(n));
     let mut users = Vec::new();
     for i in 0..n {
@@ -75,20 +66,8 @@ fn main() {
         println!("---");
         println!("size:        {}", size);
         println!("build:       {} ms", build_ms);
-        println!(
-            "to_yaml:     {} ms ({} bytes, {:.1} bytes/node)",
-            emit_ms,
-            yaml_len,
-            yaml_len as f64 / size as f64
-        );
-        println!(
-            "from_yaml:   {} ms ({:.0} bytes/ms)",
-            parse_ms,
-            yaml_len as f64 / parse_ms.max(1) as f64
-        );
-        println!(
-            "round-trip:  {}",
-            if ok { "ok" } else { "FAIL" }
-        );
+        println!("to_yaml:     {} ms ({} bytes, {:.1} bytes/node)", emit_ms, yaml_len, yaml_len as f64 / size as f64);
+        println!("from_yaml:   {} ms ({:.0} bytes/ms)", parse_ms, yaml_len as f64 / parse_ms.max(1) as f64);
+        println!("round-trip:  {}", if ok { "ok" } else { "FAIL" });
     }
 }

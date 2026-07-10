@@ -39,29 +39,6 @@ pub enum BuiltinFn {
 }
 
 impl BuiltinFn {
-    /// 注册时用的 Cranelift 符号名。
-    /// 保留与原先 15 个独立字段的命名一致性,只改了字段 -> 集合里的 key。
-    fn symbol_name(self) -> &'static str {
-        match self {
-            Self::ScopeEnter => "__vm_scope_enter",
-            Self::ScopeExitVoid => "__vm_scope_exit_void",
-            Self::ScopeExitDynamic => "__vm_scope_exit_dynamic",
-            Self::ScopeExitBytes => "__vm_scope_exit_bytes",
-            Self::StructAlloc => "__vm_struct_alloc",
-            Self::RepeatFill => "__vm_repeat_fill",
-            Self::Strcat => "__vm_strcat",
-            Self::StrcatI64 => "__vm_strcat_i64",
-            Self::StrcatAssign => "__vm_strcat_assign",
-            Self::CallbackNew => "__vm_callback_new",
-            Self::CallbackCall => "__vm_callback_call",
-            Self::SpawnPtr => "__vm_spawn_ptr",
-            Self::StructFromPtr => "__vm_struct_from_ptr",
-            Self::ArrayFromPtr => "__vm_array_from_ptr",
-            Self::ArrayToPtr => "__vm_array_to_ptr",
-            Self::ArithFault => "__vm_arith_fault",
-        }
-    }
-
     /// 未注册时的错误信息,与原先 31 处调用点的 `anyhow!(...)` 消息一致。
     fn unregistered_msg(self) -> &'static str {
         match self {

@@ -33,7 +33,9 @@ pub enum Mount<T> {
     /// 且序列化方式按文件扩展名 dispatch:`.json` 走 to_json/from_json,
     /// `.yaml`/`.yml` 走 to_yaml/from_yaml,`.md` 写用 to_markdown / 读回 String,
     /// 其他后缀按 String 处理。
-    Dir { base: PathBuf },
+    Dir {
+        base: PathBuf,
+    },
 }
 
 impl<T: std::fmt::Debug + MsgPack + MsgUnpack + Default + Send> Mount<T> {
@@ -331,11 +333,7 @@ impl<T: std::fmt::Debug + MsgPack + MsgUnpack + Default + Send> Mount<T> {
             Self::Dir { base } => {
                 let path = safe_path(base, name).ok_or_else(|| anyhow!("path 非法: {}", name))?;
                 let metadata = std::fs::metadata(&path).map_err(|e| anyhow!("{} 不存在: {}", name, e))?;
-                if metadata.is_dir() {
-                    Ok(0)
-                } else {
-                    Ok(metadata.len() as usize)
-                }
+                if metadata.is_dir() { Ok(0) } else { Ok(metadata.len() as usize) }
             }
         }
     }
@@ -375,9 +373,7 @@ impl<T: std::fmt::Debug + MsgPack + MsgUnpack + Default + Send> Mount<T> {
             Self::Redis { client: _, rl: _ } => {}
             Self::Fjall { db, values, write_lock } => {
                 if let Ok(_guard) = write_lock.lock() {
-                    let _ = fjall_clear_node(values, name)
-                        .and_then(|_| fjall_set_node_type(values, name, FjallNodeType::List))
-                        .and_then(|_| fjall_persist(db));
+                    let _ = fjall_clear_node(values, name).and_then(|_| fjall_set_node_type(values, name, FjallNodeType::List)).and_then(|_| fjall_persist(db));
                 }
             }
             Self::Dir { .. } => {
@@ -394,9 +390,7 @@ impl<T: std::fmt::Debug + MsgPack + MsgUnpack + Default + Send> Mount<T> {
             Self::Redis { client: _, rl: _ } => {}
             Self::Fjall { db, values, write_lock } => {
                 if let Ok(_guard) = write_lock.lock() {
-                    let _ = fjall_clear_node(values, name)
-                        .and_then(|_| fjall_set_node_type(values, name, FjallNodeType::Map))
-                        .and_then(|_| fjall_persist(db));
+                    let _ = fjall_clear_node(values, name).and_then(|_| fjall_set_node_type(values, name, FjallNodeType::Map)).and_then(|_| fjall_persist(db));
                 }
             }
             Self::Dir { .. } => {
@@ -1077,7 +1071,6 @@ impl Mount<Object> {
         Ok(dynamic)
     }
 
-
     pub fn dir_contains(&self, name: &str) -> bool {
         let base = match self {
             Self::Dir { base } => base,
@@ -1123,11 +1116,7 @@ impl Mount<Object> {
 impl Mount<Object> {
     /// Mount::Dir 后端的 `get` 特化:从文件 decode,wrap 成 Object::Value。
     /// 解决 mount_dir 写完 YAML 后 `root::get` 拿不到 round-trip Dynamic 的问题。
-    pub fn get_for_object<R, F: FnOnce(&Object) -> R>(
-        &self,
-        name: &str,
-        f: F,
-    ) -> Result<R> {
+    pub fn get_for_object<R, F: FnOnce(&Object) -> R>(&self, name: &str, f: F) -> Result<R> {
         match self {
             Self::Dir { .. } => {
                 let dynamic = self.dir_get(name)?;
@@ -1225,14 +1214,7 @@ mod tests {
         let root = Root::<Dynamic>::new();
         assert!(root.mount_fjall("fjall", data_dir_str).unwrap());
 
-        for path in [
-            "fjall/root/a/deep/one",
-            "fjall/root/a/deep/two",
-            "fjall/root/a-/leaf",
-            "fjall/root/a./leaf",
-            "fjall/root/a0/leaf",
-            "fjall/root/b",
-        ] {
+        for path in ["fjall/root/a/deep/one", "fjall/root/a/deep/two", "fjall/root/a-/leaf", "fjall/root/a./leaf", "fjall/root/a0/leaf", "fjall/root/b"] {
             let (mount, name) = root.get_mount(path).unwrap();
             assert!(mount.add(name, 1.into()));
         }
@@ -1268,7 +1250,7 @@ mod tests {
     fn mount_dir_yaml_round_trip() {
         let (mount, base) = fresh_dir_mount("ddd");
         let value = Dynamic::map(Default::default());
-        let mut value = value;
+        let value = value;
         value.insert("name", "zust");
         value.insert("age", 18);
 
@@ -1285,7 +1267,7 @@ mod tests {
     #[test]
     fn mount_dir_json_round_trip() {
         let (mount, base) = fresh_dir_mount("ddd");
-        let mut value = Dynamic::map(Default::default());
+        let value = Dynamic::map(Default::default());
         value.insert("k", "v");
         value.insert("n", 42);
 
@@ -1300,7 +1282,7 @@ mod tests {
     #[test]
     fn mount_dir_md_writes_markdown_reads_string() {
         let (mount, base) = fresh_dir_mount("ddd");
-        let mut value = Dynamic::map(Default::default());
+        let value = Dynamic::map(Default::default());
         // 用 i64 值绕开 to_markdown 把 String 当 char list 迭代的现有行为:
         // 当前 dynamic 实现把 Dynamic::String 视作字符序列,直接 panic 在 unwrap。
         // 这里只验证 .md 写/读路径正常,不强求 markdown 内容细节。
@@ -1398,7 +1380,7 @@ mod tests {
     #[test]
     fn mount_dir_remove_returns_decoded_value() {
         let (mount, base) = fresh_dir_mount("ddd");
-        let mut v = Dynamic::map(Default::default());
+        let v = Dynamic::map(Default::default());
         v.insert("hello", "world");
         assert!(mount.dir_add("x.json", Object::Value(v)));
 
@@ -1427,16 +1409,18 @@ mod tests {
     #[test]
     fn mount_dir_update_read_modify_write() {
         let (mount, base) = fresh_dir_mount("ddd");
-        let mut v = Dynamic::map(Default::default());
+        let v = Dynamic::map(Default::default());
         v.insert("count", 1);
         assert!(mount.dir_add("c.json", Object::Value(v)));
 
-        let next = mount.dir_update("c.json", |mut cur| {
-            if let Some(n) = cur.get_dynamic("count").and_then(|d| d.as_int()) {
-                cur.insert("count", n + 10);
-            }
-            cur
-        }).unwrap();
+        let next = mount
+            .dir_update("c.json", |cur| {
+                if let Some(n) = cur.get_dynamic("count").and_then(|d| d.as_int()) {
+                    cur.insert("count", n + 10);
+                }
+                cur
+            })
+            .unwrap();
         assert_eq!(next.get_dynamic("count").and_then(|d| d.as_int()), Some(11));
 
         let _ = std::fs::remove_dir_all(base);

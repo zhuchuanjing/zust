@@ -12,7 +12,7 @@ use std::{
 pub use symbol::{Symbol, SymbolTable, eval_const_int_type, substitute_type};
 
 #[derive(Clone)]
-enum FnInferRet {
+pub enum FnInferRet {
     Pending(Option<Type>),
     Done(Type),
 }
@@ -42,6 +42,9 @@ pub struct SymTab {
 
 /// 编译器的类型推导状态。推导逻辑(类型推导栈、列表元素状态、参数计数等)集中在这里,
 /// 改推导算法时只需读这个文件,不会被符号表或 IO 状态干扰。
+///
+/// `Compiler` 整个 struct 是 `pub`,其 `type_ctx` 字段也是 `pub`,所以
+/// `TypeCtx` 必须也是 `pub` 才不会出现 "private interface" 警告。
 #[derive(Default, Clone)]
 pub struct TypeCtx {
     pub list_elem_states: Vec<Option<ListElemState>>,
@@ -615,12 +618,7 @@ mod tests {
     #[test]
     fn arithmetic_with_string_is_compile_error() {
         let mut compiler = Compiler::new();
-        let err = compiler
-            .import_code(
-                "arith_str",
-                br#"pub fn main() { let _ = 1i64 - "x"; }"#.to_vec(),
-            )
-            .expect_err("Str - Str should fail");
+        let err = compiler.import_code("arith_str", br#"pub fn main() { let _ = 1i64 - "x"; }"#.to_vec()).expect_err("Str - Str should fail");
         let msg = format!("{err:#}");
         assert!(msg.contains("不支持 Str/Bool"), "got: {msg}");
     }
@@ -628,12 +626,7 @@ mod tests {
     #[test]
     fn arithmetic_with_bool_is_compile_error() {
         let mut compiler = Compiler::new();
-        let err = compiler
-            .import_code(
-                "arith_bool",
-                br#"pub fn main() { let _ = true * false; }"#.to_vec(),
-            )
-            .expect_err("Bool * Bool should fail");
+        let err = compiler.import_code("arith_bool", br#"pub fn main() { let _ = true * false; }"#.to_vec()).expect_err("Bool * Bool should fail");
         let msg = format!("{err:#}");
         assert!(msg.contains("不支持 Str/Bool"), "got: {msg}");
     }
@@ -642,9 +635,7 @@ mod tests {
     fn add_with_string_still_allowed() {
         // Str + 任何 = Str,与动态语义一致,合理保留
         let mut compiler = Compiler::new();
-        compiler
-            .import_code("add_ok", br#"pub fn main() { let _ = 1i64 + "x"; }"#.to_vec())
-            .expect("Str + Int is allowed");
+        compiler.import_code("add_ok", br#"pub fn main() { let _ = 1i64 + "x"; }"#.to_vec()).expect("Str + Int is allowed");
     }
 
     /// Bug #1 回归测试:`import_file` 走 strict 路径,EOF 时不再静默吞错。
@@ -653,9 +644,7 @@ mod tests {
         let tmp = std::env::temp_dir().join(format!("zust_compiler_test_{}.zs", std::process::id()));
         std::fs::write(&tmp, "fn main() { let s = \"unterminated\nfn next() { 1 }").unwrap();
         let mut compiler = Compiler::new();
-        let err = compiler
-            .import_file("unclosed_str_file", &tmp)
-            .expect_err("unclosed string at EOF should be reported");
+        let err = compiler.import_file("unclosed_str_file", &tmp).expect_err("unclosed string at EOF should be reported");
         let msg = format!("{err:#}");
         assert!(msg.contains("未关闭") || msg.contains("截断"), "got: {msg}");
         let _ = std::fs::remove_file(&tmp);
@@ -667,9 +656,7 @@ mod tests {
         let tmp = std::env::temp_dir().join(format!("zust_compiler_ws_{}.zs", std::process::id()));
         std::fs::write(&tmp, "fn main() { 42 }\n   \n").unwrap();
         let mut compiler = Compiler::new();
-        compiler
-            .import_file("whitespace_ok", &tmp)
-            .expect("trailing whitespace should be allowed");
+        compiler.import_file("whitespace_ok", &tmp).expect("trailing whitespace should be allowed");
         let _ = std::fs::remove_file(&tmp);
     }
 
@@ -682,50 +669,27 @@ mod tests {
         use smol_str::SmolStr;
 
         // 已知集合包含多字母 (`Item`)、单大写字母 (`N`)、小写字母 (`elem`)。
-        let known: Vec<Type> = vec![
-            Type::Ident { name: SmolStr::from("Item"), params: Vec::new() },
-            Type::Ident { name: SmolStr::from("N"), params: Vec::new() },
-            Type::Ident { name: SmolStr::from("elem"), params: Vec::new() },
-        ];
+        let known: Vec<Type> =
+            vec![Type::Ident { name: SmolStr::from("Item"), params: Vec::new() }, Type::Ident { name: SmolStr::from("N"), params: Vec::new() }, Type::Ident { name: SmolStr::from("elem"), params: Vec::new() }];
 
         // 已知集合中的名字 — 单大写 / 多字母 / 小写 都被识别为泛型。
-        assert!(super::has_unresolved_generic_param(
-            &Type::Ident { name: SmolStr::from("N"), params: Vec::new() }, &known));
-        assert!(super::has_unresolved_generic_param(
-            &Type::Ident { name: SmolStr::from("Item"), params: Vec::new() }, &known));
-        assert!(super::has_unresolved_generic_param(
-            &Type::Ident { name: SmolStr::from("elem"), params: Vec::new() }, &known));
+        assert!(super::has_unresolved_generic_param(&Type::Ident { name: SmolStr::from("N"), params: Vec::new() }, &known));
+        assert!(super::has_unresolved_generic_param(&Type::Ident { name: SmolStr::from("Item"), params: Vec::new() }, &known));
+        assert!(super::has_unresolved_generic_param(&Type::Ident { name: SmolStr::from("elem"), params: Vec::new() }, &known));
 
         // 已知集合外的名字 — 即使首字母大写也不算泛型。
-        assert!(!super::has_unresolved_generic_param(
-            &Type::Ident { name: SmolStr::from("Vec"), params: Vec::new() }, &known));
-        assert!(!super::has_unresolved_generic_param(
-            &Type::Ident { name: SmolStr::from("BigFloat"), params: Vec::new() }, &known));
-        assert!(!super::has_unresolved_generic_param(
-            &Type::Ident { name: SmolStr::from("Ok"), params: Vec::new() }, &known));
-        assert!(!super::has_unresolved_generic_param(
-            &Type::Ident { name: SmolStr::from("Result"), params: Vec::new() }, &known));
+        assert!(!super::has_unresolved_generic_param(&Type::Ident { name: SmolStr::from("Vec"), params: Vec::new() }, &known));
+        assert!(!super::has_unresolved_generic_param(&Type::Ident { name: SmolStr::from("BigFloat"), params: Vec::new() }, &known));
+        assert!(!super::has_unresolved_generic_param(&Type::Ident { name: SmolStr::from("Ok"), params: Vec::new() }, &known));
+        assert!(!super::has_unresolved_generic_param(&Type::Ident { name: SmolStr::from("Result"), params: Vec::new() }, &known));
 
         // 嵌套:`Result<T, E>` 之类 — 内层 params 也用同一已知集合判断。
-        let nested = Type::Ident {
-            name: SmolStr::from("Result"),
-            params: vec![
-                Type::Ident { name: SmolStr::from("T"), params: Vec::new() },
-                Type::Ident { name: SmolStr::from("E"), params: Vec::new() },
-            ],
-        };
-        assert!(!super::has_unresolved_generic_param(&nested, &known),
-            "Result 不在 known_generics 里,即使 T/E 在也不应判为未解析");
+        let nested = Type::Ident { name: SmolStr::from("Result"), params: vec![Type::Ident { name: SmolStr::from("T"), params: Vec::new() }, Type::Ident { name: SmolStr::from("E"), params: Vec::new() }] };
+        assert!(!super::has_unresolved_generic_param(&nested, &known), "Result 不在 known_generics 里,即使 T/E 在也不应判为未解析");
 
         // 同名 + 已知集合命中,嵌套泛型 OK。
-        let ok_nested = Type::Ident {
-            name: SmolStr::from("Vec"),
-            params: vec![
-                Type::Ident { name: SmolStr::from("N"), params: Vec::new() },
-            ],
-        };
-        assert!(super::has_unresolved_generic_param(&ok_nested, &known),
-            "Vec{{N}},N 在 known_generics 里 → 应当识别为含未解析泛型");
+        let ok_nested = Type::Ident { name: SmolStr::from("Vec"), params: vec![Type::Ident { name: SmolStr::from("N"), params: Vec::new() }] };
+        assert!(super::has_unresolved_generic_param(&ok_nested, &known), "Vec{{N}},N 在 known_generics 里 → 应当识别为含未解析泛型");
     }
 }
 
@@ -1011,7 +975,13 @@ impl Compiler {
     }
 
     pub fn take_local_state(&mut self) -> (Vec<usize>, Vec<SmolStr>, Vec<Type>, Vec<Option<ListElemState>>, Vec<usize>) {
-        (std::mem::take(&mut self.sym_tab.frames), std::mem::take(&mut self.sym_tab.names), std::mem::take(&mut self.sym_tab.tys), std::mem::take(&mut self.type_ctx.list_elem_states), std::mem::take(&mut self.type_ctx.arg_counts))
+        (
+            std::mem::take(&mut self.sym_tab.frames),
+            std::mem::take(&mut self.sym_tab.names),
+            std::mem::take(&mut self.sym_tab.tys),
+            std::mem::take(&mut self.type_ctx.list_elem_states),
+            std::mem::take(&mut self.type_ctx.arg_counts),
+        )
     }
 
     pub fn restore_local_state(&mut self, state: (Vec<usize>, Vec<SmolStr>, Vec<Type>, Vec<Option<ListElemState>>, Vec<usize>)) {
@@ -1540,11 +1510,7 @@ impl Compiler {
                                     Type::Ident { params, .. } => params.clone(),
                                     _ => Vec::new(),
                                 };
-                                let mut generic_params = if !target_generics.is_empty() && has_unresolved_generic_param(&target, &target_generics) {
-                                    target_generics.clone()
-                                } else {
-                                    Vec::new()
-                                };
+                                let mut generic_params = if !target_generics.is_empty() && has_unresolved_generic_param(&target, &target_generics) { target_generics.clone() } else { Vec::new() };
                                 for param in fn_generic_params {
                                     if !generic_params.contains(&param) {
                                         generic_params.push(param);

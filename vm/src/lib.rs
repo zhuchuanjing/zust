@@ -25,11 +25,11 @@ mod gpu_module;
 mod http_module;
 #[cfg(feature = "llm")]
 mod llm_module;
+mod math_module;
 #[cfg(feature = "llm")]
 mod oss_module;
 mod root_module;
 mod time_module;
-mod math_module;
 pub use gpu_layout::{GpuFieldLayout, GpuStructLayout};
 pub use parking_lot::RwLock;
 
@@ -732,10 +732,10 @@ mod tests {
         )?;
         let compiled = vm.get_fn("vm_any_case::lower", &[Type::Any])?;
         let lower: extern "C" fn(*const Dynamic) -> *const Dynamic = unsafe { std::mem::transmute(compiled.ptr()) };
-        assert_eq!(unsafe { (&*lower(&Dynamic::from("AbCア炎"))) }.as_str(), "abcア炎");
+        assert_eq!(unsafe { &*lower(&Dynamic::from("AbCア炎")) }.as_str(), "abcア炎");
         let compiled = vm.get_fn("vm_any_case::upper", &[Type::Any])?;
         let upper: extern "C" fn(*const Dynamic) -> *const Dynamic = unsafe { std::mem::transmute(compiled.ptr()) };
-        assert_eq!(unsafe { (&*upper(&Dynamic::from("AbC"))) }.as_str(), "ABC");
+        assert_eq!(unsafe { &*upper(&Dynamic::from("AbC")) }.as_str(), "ABC");
         Ok(())
     }
 
@@ -769,10 +769,10 @@ mod tests {
         )?;
         let compiled = vm.get_fn("vm_any_substring::head", &[Type::Any])?;
         let head: extern "C" fn(*const Dynamic) -> *const Dynamic = unsafe { std::mem::transmute(compiled.ptr()) };
-        assert_eq!(unsafe { (&*head(&Dynamic::from("hello"))) }.as_str(), "hello");
+        assert_eq!(unsafe { &*head(&Dynamic::from("hello")) }.as_str(), "hello");
         let compiled = vm.get_fn("vm_any_substring::middle", &[Type::Any])?;
         let middle: extern "C" fn(*const Dynamic) -> *const Dynamic = unsafe { std::mem::transmute(compiled.ptr()) };
-        assert_eq!(unsafe { (&*middle(&Dynamic::from("hello"))) }.as_str(), "el");
+        assert_eq!(unsafe { &*middle(&Dynamic::from("hello")) }.as_str(), "el");
         Ok(())
     }
 
@@ -1715,7 +1715,7 @@ mod tests {
             m.insert("age".into(), Dynamic::I64(30));
             m
         });
-        let mut outer = Dynamic::map({
+        let outer = Dynamic::map({
             let mut m = std::collections::BTreeMap::new();
             m.insert("user".into(), inner);
             m.insert("tags".into(), items);

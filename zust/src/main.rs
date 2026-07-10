@@ -2,6 +2,7 @@
 //!
 //! 用法:
 //!   zust <script.zs> [args...]
+//!   zust -c|--check <script.zs>
 //!
 //! 第一个位置参数是 .zs 脚本路径,后续所有参数都进 `ctx.args` 数组传给脚本。
 //!
@@ -9,6 +10,9 @@
 //!   - `args`:   List<String>,所有命令行参数(脚本名后的部分)
 //!   - `script`: String,本次执行的 .zs 路径
 //!   - `cwd`:    String,当前工作目录
+//!
+//! `-c`/`--check` 只跑编译/语义检查(对应 `compiler::import_file`),不查找
+//! 入口函数、不分配 ctx、不调用 JIT。退出码:成功 0、编译失败非零。
 
 use anyhow::{Context, Result};
 use clap::Parser;
@@ -26,6 +30,10 @@ struct Args {
     #[arg(long, default_value = "main")]
     function: String,
 
+    /// 只做编译/语义检查,不实际运行。成功时输出 "✓ <path> 编译通过" 到 stderr,退出码 0。
+    #[arg(short = 'c', long = "check")]
+    check: bool,
+
     /// 透传给 .zs 脚本的其余参数
     #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
     script_args: Vec<String>,
@@ -39,6 +47,11 @@ fn main() -> Result<()> {
     let module = "zust_cli";
     let script_path = args.script.to_str().context("script 路径不是 UTF-8")?.to_string();
     vm.jit.write().compiler.import_file(module, &script_path).with_context(|| format!("编译 {script_path} 失败"))?;
+
+    if args.check {
+        eprintln!("✓ {script_path} 编译通过");
+        return Ok(());
+    }
 
     let full_name = format!("{module}::{}", args.function);
     let (ptr, _ret_ty) = vm.jit.write().get_fn_ptr(&full_name, &[Type::Any]).with_context(|| format!("找不到 {full_name}"))?;

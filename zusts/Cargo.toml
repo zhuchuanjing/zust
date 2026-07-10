@@ -12,7 +12,7 @@ root = { package = "zust-root", version = "0.9.15", path = "../root" }
 vm = { package = "zust-vm", version = "0.9.91", path = "../vm", features = ["ir-disassembly"] }
 vm-spirv = { package = "zust-vm-spirv", version = "0.9.11", path = "../vm-spirv" }
 vulkan = { package = "zust-vulkan", version = "0.9.5", path = "../vulkan" }
-llm = { package = "zust-llm", version = "0.9.20", path = "../llm" }
+llm = { package = "zust-llm", version = "0.9.22", path = "../llm" }
 anyhow = "1.0.102"
 smol_str = "0.3.6"
 cranelift = "0.131.1"

@@ -70,50 +70,34 @@ use tokio_util::io::StreamReader; // 关键转换工具
 
 type HmacSha256 = Hmac<Sha256>;
 
-fn model_name(options: &Dynamic) -> String {
-    options
-        .get_dynamic("model")
-        .or_else(|| options.get_dynamic("text_model"))
-        .or_else(|| options.get_dynamic("vision_model"))
-        .or_else(|| options.get_dynamic("image_model"))
-        .or_else(|| options.get_dynamic("tts_model"))
-        .or_else(|| options.get_dynamic("asr_model"))
-        .or_else(|| options.get_dynamic("audio_model"))
-        .map(|v| v.as_str().to_ascii_lowercase())
-        .unwrap_or_default()
-}
-
+// llm 配置必须显式提供 endpoint (url) 和 model 名。
+// 既不允许从 model 前缀猜 url，也不允许 url/model 缺失时静默使用默认值。
 fn normalize_provider(options: Dynamic) -> Result<Dynamic> {
-    if options.contains("url") {
-        return Ok(options);
+    let url = options
+        .get_dynamic("url")
+        .ok_or_else(|| anyhow!("llm 配置缺少 endpoint (url)；必须显式提供 url"))?;
+    if url.as_str().trim().is_empty() {
+        return Err(anyhow!("llm 配置 url 为空；必须显式提供 endpoint"));
     }
-
-    let model = model_name(&options);
-    if model.starts_with("glm") || model.contains("zhipu") {
-        options.insert("url", "https://open.bigmodel.cn/api/paas/v4");
-    } else if model.starts_with("doubao") || model.contains("ark") || model.contains("volcengine") {
-        options.insert("url", "https://ark.cn-beijing.volces.com/api/v3");
-    } else if model.starts_with("deepseek") {
-        options.insert("url", "https://api.deepseek.com");
-    } else if model.starts_with("qwen") || model.contains("dashscope") {
-        options.insert("url", "https://dashscope.aliyuncs.com/compatible-mode/v1");
-    }
-
-    if options.contains("url") { Ok(options) } else { Err(anyhow!("没有 url；也不能从 model 识别服务商")) }
+    Ok(options)
 }
 
 fn with_kind_model(options: Dynamic, kind: &str) -> Result<Dynamic> {
     let options = normalize_provider(options)?;
-    let model_key = match kind {
+    let kind_hint = match kind {
         "complete" => options.get_dynamic("vision_model").or_else(|| options.get_dynamic("text_model")),
         "image" => options.get_dynamic("image_model"),
         "tts" => options.get_dynamic("tts_model").or_else(|| options.get_dynamic("audio_model")),
         "audio" => options.get_dynamic("asr_model").or_else(|| options.get_dynamic("audio_model")),
         _ => None,
     };
-    if let Some(model) = model_key {
-        options.insert("model", model);
+    let model = kind_hint
+        .or_else(|| options.get_dynamic("model"))
+        .ok_or_else(|| anyhow!("llm 配置缺少 model 名；必须显式提供 model（或 {kind}_model）"))?;
+    if model.as_str().trim().is_empty() {
+        return Err(anyhow!("llm 配置 model 为空；必须显式提供 model 名"));
     }
+    options.insert("model", model);
     Ok(options)
 }
 
@@ -1581,11 +1565,61 @@ mod test {
     }
 
     #[test]
-    fn model_name_can_infer_qwen_url() -> anyhow::Result<()> {
+    fn normalize_provider_requires_explicit_url() {
         let options = map!("model"=> "qwen-plus", "key"=> "sk-test");
+        let err = super::normalize_provider(options).expect_err("missing url should fail");
+
+        assert!(err.to_string().contains("url"), "error should mention url: {err}");
+    }
+
+    #[test]
+    fn normalize_provider_rejects_empty_url() {
+        let options = map!("url"=> "  ", "model"=> "qwen-plus");
+        let err = super::normalize_provider(options).expect_err("blank url should fail");
+
+        assert!(err.to_string().contains("url"), "error should mention url: {err}");
+    }
+
+    #[test]
+    fn normalize_provider_keeps_user_url_without_inference() -> anyhow::Result<()> {
+        let options = map!("url"=> "https://my-proxy.test/v1", "model"=> "qwen-plus", "key"=> "sk-test");
         let normalized = super::normalize_provider(options)?;
 
-        assert_eq!(normalized.get_dynamic("url").unwrap().as_str(), "https://dashscope.aliyuncs.com/compatible-mode/v1");
+        assert_eq!(normalized.get_dynamic("url").unwrap().as_str(), "https://my-proxy.test/v1");
+        Ok(())
+    }
+
+    #[test]
+    fn with_kind_model_requires_explicit_model() {
+        let options = map!("url"=> "https://example.test", "key"=> "sk-test");
+        let err = super::with_kind_model(options, "complete").expect_err("missing model should fail");
+
+        assert!(err.to_string().contains("model"), "error should mention model: {err}");
+    }
+
+    #[test]
+    fn with_kind_model_rejects_empty_model() {
+        let options = map!("url"=> "https://example.test", "model"=> "");
+        let err = super::with_kind_model(options, "complete").expect_err("blank model should fail");
+
+        assert!(err.to_string().contains("model"), "error should mention model: {err}");
+    }
+
+    #[test]
+    fn with_kind_model_promotes_kind_specific_model() -> anyhow::Result<()> {
+        let options = map!("url"=> "https://example.test", "model"=> "deepseek-chat", "vision_model"=> "gpt-4o");
+        let normalized = super::with_kind_model(options, "complete")?;
+
+        assert_eq!(normalized.get_dynamic("model").unwrap().as_str(), "gpt-4o");
+        Ok(())
+    }
+
+    #[test]
+    fn with_kind_model_image_kind_uses_image_model() -> anyhow::Result<()> {
+        let options = map!("url"=> "https://example.test", "image_model"=> "dall-e-3");
+        let normalized = super::with_kind_model(options, "image")?;
+
+        assert_eq!(normalized.get_dynamic("model").unwrap().as_str(), "dall-e-3");
         Ok(())
     }
 

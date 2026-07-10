@@ -573,7 +573,7 @@ pub fn ws_message(req) {
 
 ### `llm`
 
-`llm` wraps model, image, audio, and TTS requests. The first argument is model configuration, usually with `url`, `model`, `key`, and optional request defaults. If `url` is missing, GLM, Doubao, DeepSeek, and Qwen-compatible URLs are inferred from `model`.
+`llm` wraps model, image, audio, and TTS requests. The first argument is model configuration; both `url` (endpoint) and `model` (model name) are required — `zust-llm` never infers the endpoint from the model name, so every config must point at the exact provider URL you want to talk to.
 
 - `llm::complete(model, value)`: input can be text, text plus image URLs, or text plus video URLs. Output is `Dynamic`.
 - `llm::image(model, value, callback)`: input is text plus optional image URLs. The call returns a local task id; the completed result is `{url: "..."}` with a downloadable image URL, and is passed to the callback closure.
@@ -585,6 +585,7 @@ Examples:
 
 ```zust
 let model = {
+    url: "https://api.deepseek.com",
     model: "deepseek-chat",
     key: root::get("local/keys/deepseek"),
 };

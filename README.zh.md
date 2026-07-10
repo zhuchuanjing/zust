@@ -571,10 +571,11 @@ pub fn ws_message(req) {
 
 ### llm
 
-`llm` 封装文本、图片、语音识别和 TTS 请求。第一个参数是模型配置，通常包含 `url`、`model`、`key` 和可选请求默认值。如果缺少 `url`，会按 `model` 推断 GLM、Doubao、DeepSeek、Qwen 兼容地址。
+`llm` 封装文本、图片、语音识别和 TTS 请求。第一个参数是模型配置，`url`（endpoint）和 `model`（模型名）都是必备字段，`zust-llm` 不会从模型名前缀推断 endpoint，每个配置都必须显式指向你实际要打的 provider URL。
 
 ```zust
 let model = {
+    url: "https://api.deepseek.com",
     model: "deepseek-chat",
     key: root::get("local/keys/deepseek"),
 };

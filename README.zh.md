@@ -29,6 +29,7 @@ VM 托管临时内存的工作已经完成。VM 创建的 `Any`/`Dynamic` 值和
 - dict shorthand 字段：`{name}` 等价于 `{name: name}`。
 - `std::sqrt(value)` 计算 `f64` 的平方根。
 - `std::sleep(ms)` 阻塞当前执行线程指定毫秒数。
+- `std::env(name)` 读取进程环境变量；变量不存在或不是合法 unicode 时返回 `null`。
 - `std::spawn(target, args)` 启动独立 OS 线程；回调闭包支持最多 24 个参数。
 
 ## 设计思路

@@ -699,6 +699,53 @@ mod tests {
     }
 
     #[test]
+    fn std_env_returns_value_when_set_and_null_when_missing() -> anyhow::Result<()> {
+        let vm = Vm::with_all()?;
+        // 用 uuid 拼一个 unique key,降低跟其它测试 / 宿主环境撞名的概率。
+        let present_key = format!("ZUST_TEST_ENV_PRESENT_{}", uuid::Uuid::new_v4().simple());
+        let missing_key = format!("ZUST_TEST_ENV_MISSING_{}", uuid::Uuid::new_v4().simple());
+
+        // 签名:std::env(Str) -> Any
+        assert_eq!(vm.infer("std::env", &[Type::Str])?, Type::Any);
+
+        // 直接调用 native 函数,避免脚本侧 Any/Str 类型协调的额外复杂度。
+        // add_std 走 add_native_ptr(name, name, ...),native_symbols 里的 key 是 bare 名。
+        let fn_ptr = *vm
+            .jit
+            .read()
+            .native_symbols
+            .read()
+            .get("env")
+            .ok_or_else(|| anyhow::anyhow!("env 未注册"))?;
+        let env_fn: extern "C" fn(*const Dynamic) -> *const Dynamic = unsafe { std::mem::transmute(fn_ptr) };
+
+        // set_var 在 cargo test 多线程并行下不安全;在测试进程内本测试函数串行执行。
+        // 新版 std 把 set_var / remove_var 标成 unsafe,需要 unsafe 块。
+        unsafe {
+            std::env::set_var(&present_key, "hello-zust");
+        }
+
+        let present_name = Dynamic::from(present_key.as_str());
+        let present = unsafe { &*env_fn(&present_name) };
+        assert_eq!(present.as_str(), "hello-zust");
+        assert!(!present.is_null());
+
+        let missing_name = Dynamic::from(missing_key.as_str());
+        let missing = unsafe { &*env_fn(&missing_name) };
+        assert!(missing.is_null());
+
+        // 空 key 跟缺失同样视作 null(避免把"空字符串"误当成有效变量名报 panic)。
+        let empty = Dynamic::from("");
+        let empty_result = unsafe { &*env_fn(&empty) };
+        assert!(empty_result.is_null());
+
+        unsafe {
+            std::env::remove_var(&present_key);
+        }
+        Ok(())
+    }
+
+    #[test]
     fn any_trim_replace_chains_like_mlit_price_parsing() -> anyhow::Result<()> {
         // 覆盖 MLIT 价格字段的清洗链路:" 1,760,000 " → 1760000
         let vm = Vm::with_all()?;

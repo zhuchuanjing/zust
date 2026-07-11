@@ -143,6 +143,17 @@ extern "C" fn uuid() -> *const Dynamic {
     alloc_dynamic(uuid::Uuid::new_v4().to_string().into())
 }
 
+/// 读取进程环境变量。name 是字符串;变量不存在(或值不是合法 unicode)时返回 Null。
+/// 跟宿主 `std::env::var` 一致:不区分「不存在」和「非 unicode」,都视为空,避免把
+/// 内部错误升级成脚本可观察的 panic。
+extern "C" fn env(addr: *const Dynamic) -> *const Dynamic {
+    let name = if addr.is_null() { "" } else { unsafe { (&*addr).as_str() } };
+    match std::env::var(name) {
+        Ok(value) => alloc_dynamic(Dynamic::from(value)),
+        Err(_) => alloc_dynamic(Dynamic::Null),
+    }
+}
+
 pub(crate) extern "C" fn struct_alloc(size: i64) -> *mut u8 {
     let size = size.max(0) as usize;
     let ptr = alloc_struct_bytes(size);
@@ -1537,13 +1548,14 @@ extern "C" fn any_logic(left: *const Dynamic, op: i32, right: *const Dynamic) ->
     }
 }
 
-pub const STD: [(&str, &[Type], Type, *const u8); 6] = [
+pub const STD: [(&str, &[Type], Type, *const u8); 7] = [
     ("print", &[Type::Any], Type::Void, print as *const u8),
     ("sqrt", &[Type::F64], Type::F64, sqrt as *const u8),
     ("sleep", &[Type::I64], Type::Void, sleep as *const u8),
     ("log", &[Type::Any], Type::Void, log_any as *const u8),
     ("uuid", &[], Type::Any, uuid as *const u8),
     ("rand", &[Type::Any, Type::Any], Type::Any, random as *const u8),
+    ("env", &[Type::Str], Type::Any, env as *const u8),
 ];
 
 pub const ANY: [(&str, &[Type], Type, *const u8); 87] = [

@@ -29,6 +29,7 @@ Recent compiler/runtime fixes also include:
 - Dict shorthand fields: `{name}` is equivalent to `{name: name}`.
 - `std::sqrt(value)` computes the square root of an `f64`.
 - `std::sleep(ms)` blocks the current execution thread for the given number of milliseconds.
+- `std::env(name)` reads a process environment variable; returns `null` when the variable is missing or not valid unicode.
 - `std::spawn(target, args)` starts a detached OS thread; callback closures support up to 24 arguments.
 
 ## Additional Documentation

@@ -434,6 +434,13 @@ fn at_line_end(buf: &[u8], pos: usize) -> bool {
     pos >= buf.len() || buf[pos] == b'\n'
 }
 
+fn next_line(buf: &[u8], pos: usize) -> usize {
+    match buf[pos..].iter().position(|b| *b == b'\n') {
+        Some(offset) => pos + offset + 1,
+        None => buf.len(),
+    }
+}
+
 /// 判断一行是否完全为空 (只有空白 / 注释 / 换行)。
 fn line_is_blank(buf: &[u8], mut pos: usize) -> bool {
     while pos < buf.len() && buf[pos] != b'\n' {
@@ -450,6 +457,15 @@ fn line_is_blank(buf: &[u8], mut pos: usize) -> bool {
 /// 这里只把 `---` 当一个"可选的前缀"吃掉,不影响实际语义。
 fn skip_doc_marker(buf: &[u8], mut pos: usize) -> usize {
     pos = skip_white(buf, pos).unwrap_or(pos);
+    if buf.get(pos..pos + 3) == Some(&[0xef, 0xbb, 0xbf]) {
+        pos += 3;
+    }
+    // `%YAML 1.2` / `%TAG ...` directive 是合法文档前缀。当前 Dynamic 不需要
+    // directive 元数据，整行忽略即可。
+    while pos < buf.len() && buf[pos] == b'%' {
+        pos = next_line(buf, pos);
+        pos = skip_white(buf, pos).unwrap_or(pos);
+    }
     if buf.get(pos..pos + 3) == Some(b"---") && (pos + 3 == buf.len() || matches!(buf[pos + 3], b' ' | b'\t' | b'\n' | b'\r')) {
         pos += 3;
     }
@@ -459,10 +475,6 @@ fn skip_doc_marker(buf: &[u8], mut pos: usize) -> usize {
 /// 解析一个 YAML scalar 字面量(到行尾或遇到 `#` 注释为止)。
 /// 返回 (去掉 trailing comment 后的内容, 消耗的字节数)。
 ///
-/// 这里不处理 multi-line scalar (`|` / `>`);要支持的话需要在 mapping / sequence
-/// 解析中专门检测。当前实现里,parser 一旦进入 scalar 就只读本行,后面的多行
-/// 内容会被当成"意外的额外内容"报错 —— 这是有意的取舍,LLM 输出通常不会写
-/// 折叠 scalar。
 fn read_scalar(buf: &[u8], pos: usize) -> Result<(&str, usize)> {
     let start = pos;
     let mut end = pos;
@@ -525,7 +537,7 @@ fn read_scalar(buf: &[u8], pos: usize) -> Result<(&str, usize)> {
                 // mapping 的 key:value 分隔,跳出。
                 break;
             }
-            b'#' if in_flow_bracket == 0 => break,
+            b'#' if in_flow_bracket == 0 && (end == start || matches!(buf[end - 1], b' ' | b'\t')) => break,
             b'\n' if in_flow_bracket == 0 => break,
             _ => end += 1,
         }
@@ -611,11 +623,123 @@ fn unescape_single_quoted(s: &str) -> String {
     s.replace("''", "'")
 }
 
+/// 解析 `|` / `>` block scalar。header 中不认识的字符被忽略，缩进不一致但
+/// 仍深于父节点的行也继续收进字符串，避免一行坏数据截断整个 YAML 文档。
+fn parse_block_scalar(buf: &[u8], pos: usize, parent_indent: usize) -> Option<(Dynamic, usize)> {
+    let folded = match buf.get(pos) {
+        Some(b'|') => false,
+        Some(b'>') => true,
+        _ => return None,
+    };
+    let header_end = buf[pos..].iter().position(|b| *b == b'\n').map(|offset| pos + offset).unwrap_or(buf.len());
+    let mut chomp = 0i8;
+    let mut explicit_indent = None;
+    for b in &buf[pos + 1..header_end] {
+        match b {
+            b'+' => chomp = 1,
+            b'-' => chomp = -1,
+            b'1'..=b'9' => explicit_indent = Some((b - b'0') as usize),
+            b'#' => break,
+            _ => {}
+        }
+    }
+
+    if header_end == buf.len() {
+        return Some((Dynamic::String("".into()), header_end));
+    }
+    let content_start = header_end + 1;
+    let mut scan = content_start;
+    let mut content_indent = explicit_indent.map(|n| parent_indent + n);
+    while content_indent.is_none() && scan < buf.len() {
+        let end = buf[scan..].iter().position(|b| *b == b'\n').map(|offset| scan + offset).unwrap_or(buf.len());
+        let line_end = if end > scan && buf[end - 1] == b'\r' { end - 1 } else { end };
+        let indent = line_indent(buf, scan);
+        let blank = buf[scan + indent..line_end].iter().all(|b| matches!(b, b' ' | b'\t'));
+        if !blank {
+            if indent <= parent_indent {
+                return Some((Dynamic::String("".into()), scan));
+            }
+            content_indent = Some(indent);
+            break;
+        }
+        scan = if end < buf.len() { end + 1 } else { end };
+    }
+    let content_indent = content_indent.unwrap_or(parent_indent + 1);
+
+    let mut lines: Vec<(String, bool, bool)> = Vec::new();
+    let mut p = content_start;
+    while p < buf.len() {
+        let end = buf[p..].iter().position(|b| *b == b'\n').map(|offset| p + offset).unwrap_or(buf.len());
+        let line_end = if end > p && buf[end - 1] == b'\r' { end - 1 } else { end };
+        let indent = line_indent(buf, p);
+        let blank = buf[p + indent..line_end].iter().all(|b| matches!(b, b' ' | b'\t'));
+        if !blank && indent <= parent_indent {
+            break;
+        }
+        let text = if blank {
+            String::new()
+        } else {
+            let strip = indent.min(content_indent);
+            String::from_utf8_lossy(&buf[p + strip..line_end]).into_owned()
+        };
+        lines.push((text, !blank && indent > content_indent, end < buf.len()));
+        p = if end < buf.len() { end + 1 } else { end };
+    }
+
+    let mut value = String::new();
+    for (idx, (line, more_indented, had_newline)) in lines.iter().enumerate() {
+        value.push_str(line);
+        if !had_newline {
+            continue;
+        }
+        if folded && idx + 1 < lines.len() && !line.is_empty() && !lines[idx + 1].0.is_empty() && !more_indented && !lines[idx + 1].1 {
+            value.push(' ');
+        } else {
+            value.push('\n');
+        }
+    }
+    if chomp <= 0 {
+        let had_trailing_newline = value.ends_with('\n');
+        while value.ends_with('\n') {
+            value.pop();
+        }
+        if chomp == 0 && had_trailing_newline {
+            value.push('\n');
+        }
+    }
+    Some((Dynamic::String(value.into()), p))
+}
+
+/// value 局部语法损坏时保留当前行原文并推进到下一行。调用方因此还能继续找
+/// 后续 sibling key，而不是返回一个只解析到一半的 map。
+fn parse_node_tolerant(buf: &[u8], pos: usize, min_indent: usize, in_block: bool) -> (Dynamic, usize) {
+    match parse_node(buf, pos, min_indent, in_block) {
+        Ok(result) => result,
+        Err(_) => {
+            let end = buf[pos..].iter().position(|b| *b == b'\n').map(|offset| pos + offset).unwrap_or(buf.len());
+            let raw = String::from_utf8_lossy(&buf[pos..end]).trim().to_string();
+            (Dynamic::String(raw.into()), end)
+        }
+    }
+}
+
 /// `from_yaml` 入口。跟 `from_json` 一样返回 (value, consumed)。
 impl FromYaml for Dynamic {
     fn from_yaml(buf: &[u8]) -> Result<(Self, usize)> {
         let pos = skip_doc_marker(buf, 0);
-        parse_node(buf, pos, 0, false)
+        match parse_node(buf, pos, 0, false) {
+            Ok((value, consumed)) => {
+                let mut consumed = skip_white(buf, consumed)?;
+                if buf.get(consumed..consumed + 3) == Some(b"...") {
+                    consumed = skip_white(buf, (consumed + 3).min(buf.len()))?;
+                }
+                Ok((value, consumed))
+            }
+            Err(_) => {
+                let raw = String::from_utf8_lossy(&buf[pos..]).trim().to_string();
+                Ok((Dynamic::String(raw.into()), buf.len()))
+            }
+        }
     }
 }
 
@@ -626,6 +750,9 @@ fn parse_node(buf: &[u8], pos: usize, min_indent: usize, in_block: bool) -> Resu
     let pos = skip_white(buf, pos)?;
     if pos >= buf.len() {
         return Err(anyhow!("yaml 文档提前结束"));
+    }
+    if let Some(result) = parse_block_scalar(buf, pos, min_indent) {
+        return Ok(result);
     }
     // 先看是否是流集合 `{ ... }` / `[ ... ]`。
     if buf[pos] == b'{' {
@@ -662,9 +789,10 @@ fn parse_node(buf: &[u8], pos: usize, min_indent: usize, in_block: bool) -> Resu
 /// 成功时返回 (key, ':' 位置)。不修改 pos。
 fn try_read_key(buf: &[u8], pos: usize) -> Option<(SmolStr, usize)> {
     let start = pos;
+    let first = *buf.get(pos)?;
     // 单 / 双引号包裹的 key 直接到对应引号收尾。
-    if buf[pos] == b'"' || buf[pos] == b'\'' {
-        let quote = buf[pos];
+    if first == b'"' || first == b'\'' {
+        let quote = first;
         let mut p = pos + 1;
         while p < buf.len() && buf[p] != quote {
             if buf[p] == b'\\' && quote == b'"' && p + 1 < buf.len() {
@@ -677,22 +805,24 @@ fn try_read_key(buf: &[u8], pos: usize) -> Option<(SmolStr, usize)> {
             return None;
         }
         let key = &buf[start + 1..p];
-        let after = p + 1;
-        let after = skip_white(buf, after).ok()?;
+        let mut after = p + 1;
+        while after < buf.len() && matches!(buf[after], b' ' | b'\t') {
+            after += 1;
+        }
         if after >= buf.len() || buf[after] != b':' {
             return None;
         }
         let key_str = std::str::from_utf8(key).ok()?;
         return Some((SmolStr::from(if quote == b'"' { unescape_double_quoted(key_str) } else { unescape_single_quoted(key_str) }), after));
     }
-    // 普通 key:扫到 `:` 或"明显不能作为 key 字符"为止。空白 / `,` / `}` / `]` /
-    // `#` / `\n` 都属于 separator,提前终止。这样在 `{a: 1, b: 2}` 这种 inline 上下文里
-    // 才不会把后面的 `, b: 2` 吞进 key。
+    // 普通 key 允许包含空格；`,` / `}` / `]` / 注释 / 换行才结束 key。
+    // `:` 后是空白、换行、flow 结束符或 EOF 时才作为 mapping 分隔符，URL
+    // 中的 `:` 因此不会误切。
     let mut p = pos;
     while p < buf.len() {
         match buf[p] {
-            b':' if p + 1 < buf.len() && (matches!(buf[p + 1], b' ' | b'\t' | b'\n') || p + 1 == buf.len()) => break,
-            b' ' | b'\t' | b'\r' | b'\n' | b'#' | b',' | b'}' | b']' => return None,
+            b':' if p + 1 == buf.len() || matches!(buf[p + 1], b' ' | b'\t' | b'\r' | b'\n' | b'}' | b']' | b',') => break,
+            b'\r' | b'\n' | b'#' | b',' | b'}' | b']' => return None,
             _ => p += 1,
         }
     }
@@ -777,13 +907,13 @@ fn parse_block_map(buf: &[u8], mut pos: usize, parent_indent: usize, first_key: 
                     pos = consumed;
                 } else {
                     // 真正的 block value (sequence 或 deeper mapping)。
-                    let (value, consumed) = parse_node(buf, p, next_indent, true)?;
+                    let (value, consumed) = parse_node_tolerant(buf, p, next_indent, true);
                     map.insert(current_key.clone(), value);
                     pos = consumed;
                 }
             } else {
                 // 同行 inline value。
-                let (value, consumed) = parse_node(buf, after_value, parent_indent, false)?;
+                let (value, consumed) = parse_node_tolerant(buf, after_value, indent, false);
                 map.insert(current_key.clone(), value);
                 pos = consumed;
             }
@@ -796,7 +926,9 @@ fn parse_block_map(buf: &[u8], mut pos: usize, parent_indent: usize, first_key: 
             pos = colon + 1;
             expect_value = true;
         } else {
-            break;
+            // 当前行损坏或使用了尚未支持的 YAML 语法。只跳过这一行，继续寻找
+            // 同级 key；缩进变浅仍由上面的边界判断正常返回给父节点。
+            pos = next_line(buf, pos);
         }
     }
     Ok((Dynamic::Map(Arc::new(RwLock::new(map))), pos))
@@ -825,7 +957,8 @@ fn parse_block_seq(buf: &[u8], mut pos: usize, parent_indent: usize) -> Result<(
             break;
         }
         if buf[pos] != b'-' || (pos + 1 < buf.len() && !matches!(buf[pos + 1], b' ' | b'\t' | b'\n')) {
-            break;
+            pos = next_line(buf, pos);
+            continue;
         }
         // 跳过 `- ` 前缀。
         let after_dash = pos + 1;
@@ -843,7 +976,7 @@ fn parse_block_seq(buf: &[u8], mut pos: usize, parent_indent: usize) -> Result<(
                         p += 1;
                     }
                     let next_indent = if p < buf.len() { line_indent(buf, p) } else { 0 };
-                    let (value, consumed) = parse_node(buf, p, next_indent.max(parent_indent + 2), true)?;
+                    let (value, consumed) = parse_node_tolerant(buf, p, next_indent.max(parent_indent + 2), true);
                     let mut map = IndexMap::new();
                     map.insert(key, value);
                     items.push(Dynamic::Map(Arc::new(RwLock::new(map))));
@@ -852,7 +985,7 @@ fn parse_block_seq(buf: &[u8], mut pos: usize, parent_indent: usize) -> Result<(
                     // `- key: value` 同行内联值。处理完首条 entry 后,
                     // 还要看后面是不是还有以更深缩进延续的 `key: value` 行
                     // (YAML compact block sequence)。
-                    let (value, consumed) = parse_node(buf, after_colon, parent_indent, false)?;
+                    let (value, consumed) = parse_node_tolerant(buf, after_colon, parent_indent, false);
                     let mut map = IndexMap::new();
                     map.insert(key.clone(), value);
                     // 把已读位置推到行尾之后,准备看下一行。
@@ -897,7 +1030,7 @@ fn parse_block_seq(buf: &[u8], mut pos: usize, parent_indent: usize) -> Result<(
                     pos = p;
                 }
             } else {
-                let (value, consumed) = parse_node(buf, after_dash, parent_indent, false)?;
+                let (value, consumed) = parse_node_tolerant(buf, after_dash, parent_indent, false);
                 items.push(value);
                 pos = consumed;
             }
@@ -917,7 +1050,7 @@ fn parse_block_seq(buf: &[u8], mut pos: usize, parent_indent: usize) -> Result<(
             items.push(Dynamic::Null);
             break;
         }
-        let (value, consumed) = parse_node(buf, p, next_indent, true)?;
+        let (value, consumed) = parse_node_tolerant(buf, p, next_indent, true);
         items.push(value);
         pos = consumed;
     }
@@ -1052,14 +1185,14 @@ mod tests {
     }
 
     #[test]
-    fn multiline_string_uses_block_scalar() {
+    fn multiline_string_uses_quoted_scalar() {
         let value = Dynamic::String("line1\nline2\nline3".into());
         let mut buf = String::new();
         value.to_yaml(&mut buf);
-        assert!(buf.starts_with("|+\n"), "should use block scalar: {buf}");
-        assert!(buf.contains("line1\n"));
-        assert!(buf.contains("line2\n"));
-        assert!(buf.contains("line3\n"));
+        assert_eq!(buf, "\"line1\\nline2\\nline3\"");
+        let (parsed, consumed) = <Dynamic as FromYaml>::from_yaml(buf.as_bytes()).expect("parse");
+        assert_eq!(consumed, buf.len());
+        assert_eq!(parsed.as_str(), "line1\nline2\nline3");
     }
 
     #[test]
@@ -1131,6 +1264,83 @@ mod tests {
         let (value, _) = <Dynamic as FromYaml>::from_yaml(input.as_bytes()).expect("parse");
         assert_eq!(value.get_dynamic("name").unwrap().as_str(), "zust");
         assert_eq!(value.get_dynamic("version").unwrap().as_int(), Some(1));
+    }
+
+    #[test]
+    fn bom_directive_and_document_markers_are_ignored() {
+        let input = "\u{feff}%YAML 1.2\n---\nname: zust\nversion: 1\n...\n";
+        let (value, consumed) = <Dynamic as FromYaml>::from_yaml(input.as_bytes()).expect("parse");
+        assert_eq!(consumed, input.len());
+        assert_eq!(value.get_dynamic("name").unwrap().as_str(), "zust");
+        assert_eq!(value.get_dynamic("version").unwrap().as_int(), Some(1));
+    }
+
+    #[test]
+    fn block_scalar_does_not_truncate_following_keys() {
+        let input = "title: demo\ndescription: |\n  first line\n  second line\nafter: 42\n";
+        let (value, consumed) = <Dynamic as FromYaml>::from_yaml(input.as_bytes()).expect("parse");
+        assert_eq!(consumed, input.len());
+        assert_eq!(value.get_dynamic("title").unwrap().as_str(), "demo");
+        assert_eq!(value.get_dynamic("description").unwrap().as_str(), "first line\nsecond line\n");
+        assert_eq!(value.get_dynamic("after").unwrap().as_int(), Some(42));
+    }
+
+    #[test]
+    fn block_scalar_supports_fold_and_chomp() {
+        let input = "literal: |-\n  first\n  second\nfolded: >-\n  hello\n  world\nkeep: |+\n  tail\n\nnext: true\n";
+        let (value, consumed) = <Dynamic as FromYaml>::from_yaml(input.as_bytes()).expect("parse");
+        assert_eq!(consumed, input.len());
+        assert_eq!(value.get_dynamic("literal").unwrap().as_str(), "first\nsecond");
+        assert_eq!(value.get_dynamic("folded").unwrap().as_str(), "hello world");
+        assert_eq!(value.get_dynamic("keep").unwrap().as_str(), "tail\n\n");
+        assert_eq!(value.get_dynamic("next").unwrap().as_bool(), Some(true));
+    }
+
+    #[test]
+    fn block_scalar_inside_sequence_map_keeps_sibling_entries() {
+        let input = "items:\n  - name: first\n    description: |\n      line one\n      line two\n    enabled: true\n  - name: second\ntail: done\n";
+        let (value, consumed) = <Dynamic as FromYaml>::from_yaml(input.as_bytes()).expect("parse");
+        assert_eq!(consumed, input.len());
+        let items = value.get_dynamic("items").unwrap();
+        assert_eq!(items.len(), 2);
+        let first = items.get_idx(0).unwrap();
+        assert_eq!(first.get_dynamic("description").unwrap().as_str(), "line one\nline two\n");
+        assert_eq!(first.get_dynamic("enabled").unwrap().as_bool(), Some(true));
+        assert_eq!(items.get_idx(1).unwrap().get_dynamic("name").unwrap().as_str(), "second");
+        assert_eq!(value.get_dynamic("tail").unwrap().as_str(), "done");
+    }
+
+    #[test]
+    fn mapping_accepts_spaced_keys_and_hash_inside_plain_scalar() {
+        let input = "display name: Zust\nurl: https://example.com/page#section\nafter: ok\n";
+        let (value, consumed) = <Dynamic as FromYaml>::from_yaml(input.as_bytes()).expect("parse");
+        assert_eq!(consumed, input.len());
+        assert_eq!(value.get_dynamic("display name").unwrap().as_str(), "Zust");
+        assert_eq!(value.get_dynamic("url").unwrap().as_str(), "https://example.com/page#section");
+        assert_eq!(value.get_dynamic("after").unwrap().as_str(), "ok");
+    }
+
+    #[test]
+    fn malformed_lines_do_not_truncate_later_mapping_entries() {
+        let input = "before: 1\nthis line is malformed\nbroken: [1, 2\nafter: 3\nnested:\n  okay: true\n  another malformed line\n  tail: done\nlast: yes\n";
+        let (value, consumed) = <Dynamic as FromYaml>::from_yaml(input.as_bytes()).expect("parse");
+        assert_eq!(consumed, input.len());
+        assert_eq!(value.get_dynamic("before").unwrap().as_int(), Some(1));
+        assert_eq!(value.get_dynamic("broken").unwrap().as_str(), "[1, 2");
+        assert_eq!(value.get_dynamic("after").unwrap().as_int(), Some(3));
+        let nested = value.get_dynamic("nested").unwrap();
+        assert_eq!(nested.get_dynamic("okay").unwrap().as_bool(), Some(true));
+        assert_eq!(nested.get_dynamic("tail").unwrap().as_str(), "done");
+        assert_eq!(value.get_dynamic("last").unwrap().as_str(), "yes");
+    }
+
+    #[test]
+    fn malformed_documents_return_best_effort_value_without_panicking() {
+        for input in ["", "{", "[", "{broken", "[1, 2", "\"unterminated", "key: [1, 2\nafter: ok\n"] {
+            let result = <Dynamic as FromYaml>::from_yaml(input.as_bytes());
+            assert!(result.is_ok(), "input={input:?} result={result:?}");
+            assert_eq!(result.unwrap().1, input.len());
+        }
     }
 
     #[test]

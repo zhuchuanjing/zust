@@ -2245,6 +2245,43 @@ mod tests {
     }
 
     #[test]
+    fn root_dir_all_is_available_to_zust() -> anyhow::Result<()> {
+        let vm = Vm::with_all()?;
+        assert_eq!(vm.infer("root::dir", &[Type::Any, Type::Bool])?, Type::Any);
+        let suffix = uuid::Uuid::new_v4().simple().to_string();
+        let module = format!("vm_root_dir_all_{suffix}");
+        let path = format!("local/test/{module}");
+        vm.import_code(
+            &module,
+            format!(
+                r#"
+                pub fn run(all) {{
+                    root::add("{path}/a", 1);
+                    root::add("{path}/sub/item", 2);
+                    root::add("{path}/sub/deep/leaf", 3);
+                    root::dir("{path}", all)
+                }}
+                "#
+            )
+            .into_bytes(),
+        )?;
+
+        let compiled = vm.get_fn(&format!("{module}::run"), &[Type::Bool])?;
+        let run: extern "C" fn(bool) -> *const Dynamic = unsafe { std::mem::transmute(compiled.ptr()) };
+
+        let direct = unsafe { &*run(false) };
+        let mut direct = (0..direct.len()).map(|idx| direct.get_idx(idx).unwrap().as_str().to_string()).collect::<Vec<_>>();
+        direct.sort();
+        assert_eq!(direct, vec!["a", "sub"]);
+
+        let all = unsafe { &*run(true) };
+        let mut all = (0..all.len()).map(|idx| all.get_idx(idx).unwrap().as_str().to_string()).collect::<Vec<_>>();
+        all.sort();
+        assert_eq!(all, vec!["a", "sub", "sub/deep", "sub/deep/leaf", "sub/item"]);
+        Ok(())
+    }
+
+    #[test]
     fn root_mount_fjall_accepts_mount_name() -> anyhow::Result<()> {
         let vm = Vm::with_all()?;
         assert_eq!(vm.infer("root::mount_fjall", &[Type::Any, Type::Any])?, Type::Void);

@@ -528,7 +528,7 @@ fn collect_routes(prefix: &str, out: &mut Vec<String>, depth: usize) {
     if root::contains(prefix) {
         out.push(prefix.to_string());
     }
-    let Ok(children) = root::dir(prefix) else {
+    let Ok(children) = root::dir(prefix, false) else {
         return;
     };
     if !children.is_list() {

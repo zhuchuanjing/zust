@@ -545,9 +545,9 @@ pub fn get(name: &str) -> Result<Dynamic> {
     m.get(name, |obj| obj.value())
 }
 
-pub fn dir(name: &str) -> Result<Dynamic> {
+pub fn dir(name: &str, all: bool) -> Result<Dynamic> {
     let (m, name) = get_mount(name)?;
-    m.dir(name).map(Into::into)
+    m.dir(name, all).map(Into::into)
 }
 
 pub fn keys(name: &str) -> Result<Dynamic> {
@@ -1007,10 +1007,46 @@ mod tests {
         add_value(&format!("{path}/a"), 1_i64).unwrap();
         add_value(&format!("{path}/sub/item"), 2_i64).unwrap();
 
-        let entries = dir(&path).unwrap();
+        let entries = dir(&path, false).unwrap();
         let mut entries = (0..entries.len()).map(|idx| entries.get_idx(idx).unwrap().as_str().to_string()).collect::<Vec<_>>();
         entries.sort();
         assert_eq!(entries, vec!["a".to_string(), "sub".to_string()]);
+    }
+
+    #[test]
+    fn dir_all_returns_relative_descendant_paths() {
+        let path = format!("local/test/public_dir_all/{}", uuid::Uuid::new_v4());
+        add_value(&format!("{path}/a"), 1_i64).unwrap();
+        add_value(&format!("{path}/sub/item"), 2_i64).unwrap();
+        add_value(&format!("{path}/sub/deep/leaf"), 3_i64).unwrap();
+
+        let entries = dir(&path, true).unwrap();
+        let mut entries = (0..entries.len()).map(|idx| entries.get_idx(idx).unwrap().as_str().to_string()).collect::<Vec<_>>();
+        entries.sort();
+        assert_eq!(entries, vec!["a", "sub", "sub/deep", "sub/deep/leaf", "sub/item"]);
+    }
+
+    #[test]
+    fn dir_has_same_semantics_for_directory_mount() {
+        let base = std::env::temp_dir().join(format!("zust-root-public-dir-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(base.join("sub/deep")).unwrap();
+        std::fs::write(base.join("a.txt"), "a").unwrap();
+        std::fs::write(base.join("sub/item.txt"), "item").unwrap();
+        std::fs::write(base.join("sub/deep/leaf.txt"), "leaf").unwrap();
+        let mount_name = format!("dir_{}", uuid::Uuid::new_v4().simple());
+        assert!(mount_dir(&mount_name, base.to_str().unwrap()).unwrap());
+
+        let direct = dir(&format!("{mount_name}/"), false).unwrap();
+        let mut direct = (0..direct.len()).map(|idx| direct.get_idx(idx).unwrap().as_str().to_string()).collect::<Vec<_>>();
+        direct.sort();
+        assert_eq!(direct, vec!["a.txt", "sub"]);
+
+        let all = dir(&format!("{mount_name}/"), true).unwrap();
+        let mut all = (0..all.len()).map(|idx| all.get_idx(idx).unwrap().as_str().to_string()).collect::<Vec<_>>();
+        all.sort();
+        assert_eq!(all, vec!["a.txt", "sub", "sub/deep", "sub/deep/leaf.txt", "sub/item.txt"]);
+
+        let _ = std::fs::remove_dir_all(base);
     }
 
     #[test]

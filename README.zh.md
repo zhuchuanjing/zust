@@ -4,7 +4,7 @@ Zust 是一个用 Rust 编写的类 Rust 脚本语言和运行时。它保留了
 
 官方网站：[www.zust-lang.com](https://www.zust-lang.com)
 
-项目已经接近成熟的开源版本。当前 workspace 内各 crate 独立发版：VM crate 为 `0.9.93`，root crate 为 `0.9.18`，dynamic crate 为 `0.9.20`，compiler 为 `0.9.44`，parser 为 `0.9.25`，SPIR-V 后端为 `0.9.11`，Metal 后端为 `0.9.13`，编辑器相关包为 `0.9.2`。
+项目已经接近成熟的开源版本。当前 workspace 内各 crate 独立发版：VM crate 为 `0.9.106`，root crate 为 `0.9.25`，dynamic crate 为 `0.9.25`，compiler 为 `0.9.47`，parser 为 `0.9.26`，SPIR-V 后端为 `0.9.12`，Metal 后端为 `0.9.14`，编辑器相关包为 `0.9.2`。
 
 English: [README.md](README.md)
 
@@ -462,8 +462,9 @@ events.push({kind: "logout"});                   // 错误: 只改 events 副本
 
 - `root::mount(name, url)`：挂载 Redis-backed root path。
 - `root::mount_fjall(name, data_dir)`：把本地 Fjall 存储挂载到指定 ROOT 路径名 `name`。
+- `root::mount_dir(name, host_dir)`：把本地文件系统目录挂载到指定 ROOT 路径名 `name`。
 - `root::add(path, value)`、`root::get(path)`、`root::remove(path)`、`root::contains(path)`。
-- `root::dir(path)`：列出 `path` 下一级子项名，不递归、不返回完整路径。`root::len(path)`、`root::keys(path)`。
+- `root::dir(path, all)`：`all` 为 `false` 时列出下一级子项名，为 `true` 时递归列出相对 `path` 的全部子项目路径。`root::len(path)`、`root::keys(path)`。
 - `root::add_list(path)`、`root::push(path, value)`、`root::get_idx(path, idx)`、`root::remove_idx(path, idx)`。
 - `root::add_map(path)`、`root::insert(path, key, value)`、`root::get_key(path, key)`、`root::remove_key(path, key)`。
 - `root::send(path, value)`、`root::send_idx(path, idx, value)`：向 native handler 或 Zust handler 发送消息。

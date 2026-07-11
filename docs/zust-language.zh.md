@@ -462,6 +462,7 @@ Any::logic(a, op_id, b) -> bool
 // 挂载
 root::mount(name, kind)                 // memory / redis 等
 root::mount_fjall(name, data_dir)
+root::mount_dir(name, host_dir)
 
 // 节点构造
 root::add_list(path) -> bool
@@ -472,7 +473,7 @@ root::remove(path) -> any
 
 // 查询
 root::get(path)
-root::dir(path) -> [string]        // 当前目录下一级子项名,不递归
+root::dir(path, all) -> [string]   // all=false 列一级名称；all=true 递归列相对子项目路径
 root::len(path)
 root::keys(path) -> [string]
 
@@ -703,7 +704,7 @@ v.iter()  it.next()
 
 // root
 root::add(p, v)        root::get(p)         root::insert(p, k, v)
-root::keys(p)          root::dir(p)         root::len(p)
+root::keys(p)          root::dir(p, all)    root::len(p)
 root::update(p, f)     root::update_key(p, k, f)        // 原子 RMW
 root::send(p, msg)
 

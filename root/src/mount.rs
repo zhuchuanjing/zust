@@ -229,7 +229,32 @@ impl<T: std::fmt::Debug + MsgPack + MsgUnpack + Default + Send> Mount<T> {
         }
     }
 
-    pub fn dir(&self, name: &str) -> Result<Vec<SmolStr>> {
+    /// 列出 `name` 下的项目。`all == false` 时只返回一级名称；`all == true`
+    /// 时递归返回相对 `name` 的路径，并包含中间目录。
+    ///
+    /// ROOT 没有独立的目录节点类型，递归时按 `len == 0` 判断目录。因此
+    /// Mount::Dir 暂时无法区分空文件与目录。
+    pub fn dir(&self, name: &str, all: bool) -> Result<Vec<SmolStr>> {
+        let children = self.dir_direct(name)?;
+        if !all {
+            return Ok(children);
+        }
+
+        let mut entries = Vec::new();
+        for child in children {
+            entries.push(child.clone());
+            let child_path = if name.is_empty() { child.to_string() } else { format!("{}/{}", name.trim_end_matches('/'), child) };
+            if self.len(&child_path)? != 0 {
+                continue;
+            }
+            for descendant in self.dir(&child_path, true)? {
+                entries.push(format!("{}/{}", child, descendant).into());
+            }
+        }
+        Ok(entries)
+    }
+
+    fn dir_direct(&self, name: &str) -> Result<Vec<SmolStr>> {
         if let Self::Redis { client, rl: _ } = self {
             let mut conn = client.get_connection()?;
             return directory::children(&mut conn, name);
@@ -237,9 +262,8 @@ impl<T: std::fmt::Debug + MsgPack + MsgUnpack + Default + Send> Mount<T> {
         if let Self::Fjall { values, .. } = self {
             return fjall_dir(values, name);
         }
-        // Dir 后端的目录列表由 `impl Mount<Object>::dir_list` 处理。
         if let Self::Dir { .. } = self {
-            return Err(anyhow!("Mount::Dir 的目录列表请用 dir_list"));
+            return self.dir_raw(name);
         }
 
         let prefix = if name.is_empty() || name.ends_with('/') { name.to_string() } else { format!("{name}/") };
@@ -313,13 +337,23 @@ impl<T: std::fmt::Debug + MsgPack + MsgUnpack + Default + Send> Mount<T> {
 
     pub fn len(&self, name: &str) -> Result<usize> {
         match self {
-            Self::Memory(m) => m.read_sync(name, |_, v| v.len()).ok_or(anyhow!("{} 不是列表", name)),
+            Self::Memory(m) => {
+                if let Some(len) = m.read_sync(name, |_, v| v.len()) {
+                    Ok(len)
+                } else if !self.dir_direct(name)?.is_empty() {
+                    Ok(0)
+                } else {
+                    Err(anyhow!("{} 不存在", name))
+                }
+            }
             Self::Redis { client, rl: _ } => {
                 let mut conn = client.get_connection()?;
                 let ty: String = conn.key_type(name)?;
                 match ty.as_str() {
                     "list" => Ok(conn.llen(name)?),
                     "hash" => Ok(conn.hlen(name)?),
+                    "none" if !directory::children(&mut conn, name)?.is_empty() => Ok(0),
+                    "none" => Err(anyhow!("{} 不存在", name)),
                     _ => Ok(1),
                 }
             }
@@ -327,6 +361,7 @@ impl<T: std::fmt::Debug + MsgPack + MsgUnpack + Default + Send> Mount<T> {
                 Some(FjallNodeType::List) => Ok(fjall_count_prefix(values, fjall_list_prefix(name))?),
                 Some(FjallNodeType::Map) => Ok(fjall_count_prefix(values, fjall_map_prefix(name))?),
                 None if values.contains_key(fjall_object_key(name))? => Ok(1),
+                None if !fjall_dir(values, name)?.is_empty() => Ok(0),
                 None => Err(anyhow!("{} 不存在", name)),
             },
             // Dir 后端:文件 = 字节数,目录 = 0,不存在 = 报错。
@@ -1148,7 +1183,7 @@ mod tests {
         assert!(mount.add(name, 3.into()));
 
         let (mount, name) = root.get_mount("local/test/dir").unwrap();
-        let mut entries = mount.dir(name).unwrap();
+        let mut entries = mount.dir(name, false).unwrap();
         entries.sort();
 
         assert_eq!(entries, vec![SmolStr::new("a"), SmolStr::new("sub")]);
@@ -1161,7 +1196,48 @@ mod tests {
         assert!(mount.add(name, 1.into()));
 
         let (mount, name) = root.get_mount("local/test/slash/").unwrap();
-        assert_eq!(mount.dir(name).unwrap(), vec![SmolStr::new("a")]);
+        assert_eq!(mount.dir(name, false).unwrap(), vec![SmolStr::new("a")]);
+    }
+
+    #[test]
+    fn memory_dir_all_returns_relative_descendant_paths() {
+        let root = Root::<Dynamic>::new();
+        for path in ["local/tree/a", "local/tree/sub/b", "local/tree/sub/deep/c"] {
+            let (mount, name) = root.get_mount(path).unwrap();
+            assert!(mount.add(name, 1.into()));
+        }
+
+        let (mount, name) = root.get_mount("local/tree").unwrap();
+        let mut direct = mount.dir(name, false).unwrap();
+        direct.sort();
+        assert_eq!(direct, vec![SmolStr::new("a"), SmolStr::new("sub")]);
+
+        let mut all = mount.dir(name, true).unwrap();
+        all.sort();
+        assert_eq!(all, vec![SmolStr::new("a"), SmolStr::new("sub"), SmolStr::new("sub/b"), SmolStr::new("sub/deep"), SmolStr::new("sub/deep/c")]);
+    }
+
+    #[test]
+    #[ignore = "requires ZUST_TEST_REDIS_URL"]
+    fn redis_dir_all_returns_relative_descendant_paths() {
+        let url = std::env::var("ZUST_TEST_REDIS_URL").expect("ZUST_TEST_REDIS_URL 未设置");
+        let mount = Mount::<Dynamic>::redis(&url).unwrap();
+        let prefix = format!("zust-root-dir-all-{}", uuid::Uuid::new_v4());
+        for path in [format!("{prefix}/a"), format!("{prefix}/sub/b"), format!("{prefix}/sub/deep/c")] {
+            assert!(mount.add(&path, 1.into()));
+        }
+
+        let mut direct = mount.dir(&prefix, false).unwrap();
+        direct.sort();
+        assert_eq!(direct, vec![SmolStr::new("a"), SmolStr::new("sub")]);
+
+        let mut all = mount.dir(&prefix, true).unwrap();
+        all.sort();
+        assert_eq!(all, vec![SmolStr::new("a"), SmolStr::new("sub"), SmolStr::new("sub/b"), SmolStr::new("sub/deep"), SmolStr::new("sub/deep/c")]);
+
+        for path in [format!("{prefix}/a"), format!("{prefix}/sub/b"), format!("{prefix}/sub/deep/c")] {
+            mount.remove(&path).unwrap();
+        }
     }
 
     #[test]
@@ -1192,7 +1268,7 @@ mod tests {
             let (mount, name) = root.get_mount("fjall/test/kv/a").unwrap();
             assert_eq!(mount.get(name, |v| v.as_int()).unwrap(), Some(42));
             let (mount, name) = root.get_mount("fjall/test").unwrap();
-            let mut entries = mount.dir(name).unwrap();
+            let mut entries = mount.dir(name, false).unwrap();
             entries.sort();
             assert_eq!(entries, vec![SmolStr::new("kv"), SmolStr::new("list"), SmolStr::new("map")]);
             let (mount, name) = root.get_mount("fjall/test/list").unwrap();
@@ -1220,10 +1296,29 @@ mod tests {
         }
 
         let (mount, name) = root.get_mount("fjall/root").unwrap();
-        let mut entries = mount.dir(name).unwrap();
+        let mut entries = mount.dir(name, false).unwrap();
         entries.sort();
 
         assert_eq!(entries, vec![SmolStr::new("a"), SmolStr::new("a-"), SmolStr::new("a."), SmolStr::new("a0"), SmolStr::new("b")]);
+
+        let _ = std::fs::remove_dir_all(data_dir);
+    }
+
+    #[test]
+    fn fjall_dir_all_returns_relative_descendant_paths() {
+        let data_dir = std::env::temp_dir().join(format!("zust-root-fjall-dir-all-{}", uuid::Uuid::new_v4()));
+        let root = Root::<Dynamic>::new();
+        assert!(root.mount_fjall("fjall", data_dir.to_str().unwrap()).unwrap());
+
+        for path in ["fjall/tree/a", "fjall/tree/sub/b", "fjall/tree/sub/deep/c"] {
+            let (mount, name) = root.get_mount(path).unwrap();
+            assert!(mount.add(name, 1.into()));
+        }
+
+        let (mount, name) = root.get_mount("fjall/tree").unwrap();
+        let mut all = mount.dir(name, true).unwrap();
+        all.sort();
+        assert_eq!(all, vec![SmolStr::new("a"), SmolStr::new("sub"), SmolStr::new("sub/b"), SmolStr::new("sub/deep"), SmolStr::new("sub/deep/c")]);
 
         let _ = std::fs::remove_dir_all(data_dir);
     }
@@ -1335,12 +1430,18 @@ mod tests {
         let (mount, base) = fresh_dir_mount("ddd");
         assert!(mount.dir_add("a.yaml", Object::Value(Dynamic::from(1i64))));
         assert!(mount.dir_add("b.txt", Object::Value(Dynamic::from("x".to_string()))));
-        std::fs::create_dir_all(base.join("sub")).unwrap();
+        std::fs::create_dir_all(base.join("sub/deep")).unwrap();
+        assert!(mount.dir_add("sub/item.txt", Object::Value(Dynamic::from("item".to_string()))));
+        assert!(mount.dir_add("sub/deep/leaf.txt", Object::Value(Dynamic::from("leaf".to_string()))));
         std::fs::create_dir_all(base.join("nested")).unwrap();
 
-        let mut names = mount.dir_raw("").unwrap();
-        names.sort();
-        assert_eq!(names, vec![SmolStr::new("a.yaml"), SmolStr::new("b.txt"), SmolStr::new("nested"), SmolStr::new("sub")]);
+        let mut direct = mount.dir("", false).unwrap();
+        direct.sort();
+        assert_eq!(direct, vec![SmolStr::new("a.yaml"), SmolStr::new("b.txt"), SmolStr::new("nested"), SmolStr::new("sub")]);
+
+        let mut all = mount.dir("", true).unwrap();
+        all.sort();
+        assert_eq!(all, vec![SmolStr::new("a.yaml"), SmolStr::new("b.txt"), SmolStr::new("nested"), SmolStr::new("sub"), SmolStr::new("sub/deep"), SmolStr::new("sub/deep/leaf.txt"), SmolStr::new("sub/item.txt"),]);
 
         let _ = std::fs::remove_dir_all(base);
     }

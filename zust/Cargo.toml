@@ -1,6 +1,6 @@
 [package]
 name = "zust"
-version = "0.2.1"
+version = "0.2.2"
 edition.workspace = true
 license = "Apache-2.0"
 publish = true
@@ -21,6 +21,6 @@ path = "src/main.rs"
 anyhow.workspace = true
 clap = { workspace = true, features = ["derive"] }
 dynamic = { package = "zust-dynamic", version = "0.9.25", path = "../dynamic" }
-root = { package = "zust-root", version = "0.9.23", path = "../root" }
+root = { package = "zust-root", version = "0.9.25", path = "../root" }
 smol_str = "0.3"
-vm = { package = "zust-vm", version = "0.9.103", path = "../vm" }
+vm = { package = "zust-vm", version = "0.9.106", path = "../vm" }

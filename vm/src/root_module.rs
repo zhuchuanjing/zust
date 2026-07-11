@@ -22,8 +22,8 @@ extern "C" fn root_remove(name: *const Dynamic) -> *const Dynamic {
     unsafe { alloc_dynamic(root::remove((*name).as_str()).unwrap_or(Dynamic::Null)) }
 }
 
-extern "C" fn root_dir(name: *const Dynamic) -> *const Dynamic {
-    unsafe { alloc_dynamic(root::dir((*name).as_str()).unwrap_or(Dynamic::Null)) }
+extern "C" fn root_dir(name: *const Dynamic, all: bool) -> *const Dynamic {
+    unsafe { alloc_dynamic(root::dir((*name).as_str(), all).unwrap_or(Dynamic::Null)) }
 }
 
 extern "C" fn root_keys(name: *const Dynamic) -> *const Dynamic {
@@ -174,7 +174,7 @@ pub const ROOT_NATIVE: &[(&str, &[Type], Type, *const u8)] = &[
     ("add_list", &[Type::Any], Type::Bool, root_add_list as *const u8),
     ("add_map", &[Type::Any], Type::Bool, root_add_map as *const u8),
     ("add", &[Type::Any, Type::Any], Type::Bool, root_add as *const u8),
-    ("dir", &[Type::Any], Type::Any, root_dir as *const u8),
+    ("dir", &[Type::Any, Type::Bool], Type::Any, root_dir as *const u8),
     ("keys", &[Type::Any], Type::Any, root_keys as *const u8),
     ("remove", &[Type::Any], Type::Any, root_remove as *const u8),
     ("contains", &[Type::Any], Type::Bool, root_contains as *const u8),

@@ -4,7 +4,7 @@ Zust is a Rust-like scripting language and runtime written in Rust. It keeps the
 
 Official website: [www.zust-lang.com](https://www.zust-lang.com)
 
-The project is close to a mature open-source release. The workspace now contains separately versioned crates, with the VM crate at `0.9.96`, the root crate at `0.9.20`, the dynamic crate at `0.9.21`, the compiler at `0.9.45`, the parser at `0.9.25`, the SPIR-V backend at `0.9.11`, the Metal backend at `0.9.13`, and the editor-facing packages at `0.9.2`.
+The project is close to a mature open-source release. The workspace now contains separately versioned crates, with the VM crate at `0.9.106`, the root crate at `0.9.25`, the dynamic crate at `0.9.25`, the compiler at `0.9.47`, the parser at `0.9.26`, the SPIR-V backend at `0.9.12`, the Metal backend at `0.9.14`, and the editor-facing packages at `0.9.2`.
 
 中文文档: [README.zh.md](README.zh.md)
 
@@ -466,8 +466,9 @@ Functions:
 
 - `root::mount(name, url)`: mount a Redis-backed root path.
 - `root::mount_fjall(name, data_dir)`: mount a local Fjall-backed root path at `name`.
+- `root::mount_dir(name, host_dir)`: mount a local filesystem directory at `name`.
 - `root::add(path, value)`, `root::get(path)`, `root::remove(path)`, `root::contains(path)`.
-- `root::dir(path)`: list immediate child entry names under `path`. `root::len(path)`, `root::keys(path)`.
+- `root::dir(path, all)`: list immediate child names, or all descendant relative paths when `all` is `true`. `root::len(path)`, `root::keys(path)`.
 - `root::add_list(path)`, `root::push(path, value)`, `root::get_idx(path, idx)`, `root::remove_idx(path, idx)`.
 - `root::add_map(path)`, `root::insert(path, key, value)`, `root::get_key(path, key)`, `root::remove_key(path, key)`.
 - `root::send(path, value)`, `root::send_idx(path, idx, value)`: send a message to a native or script handler.

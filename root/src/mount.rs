@@ -244,7 +244,12 @@ impl<T: std::fmt::Debug + MsgPack + MsgUnpack + Default + Send> Mount<T> {
         for child in children {
             entries.push(child.clone());
             let child_path = if name.is_empty() { child.to_string() } else { format!("{}/{}", name.trim_end_matches('/'), child) };
-            if self.len(&child_path)? != 0 {
+            // 用 file_type 区分文件 / 目录(0 字节文件会让 len=0,跟目录撞上)。
+            let is_dir = match self {
+                Self::Dir { base } => safe_path(base, &child_path).map(|p| p.is_dir()).unwrap_or(false),
+                _ => self.len(&child_path).map(|n| n == 0).unwrap_or(false),
+            };
+            if !is_dir {
                 continue;
             }
             for descendant in self.dir(&child_path, true)? {
@@ -314,7 +319,7 @@ impl<T: std::fmt::Debug + MsgPack + MsgUnpack + Default + Send> Mount<T> {
             Self::Fjall { values, .. } => {
                 names.append(&mut fjall_paths_with_prefix(values, name)?);
             }
-            // Dir 后端直接列一级:不区分文件/目录,调用方用 len 区分(目录=0)。
+            // Dir 后端直接列一级:不区分文件/目录,调用方用 file_type 区分(目录=is_dir)。
             Self::Dir { base } => {
                 let path = safe_path(base, name).ok_or_else(|| anyhow!("path 非法: {}", name))?;
                 if !path.exists() {
@@ -323,7 +328,8 @@ impl<T: std::fmt::Debug + MsgPack + MsgUnpack + Default + Send> Mount<T> {
                 if !path.is_dir() {
                     return Err(anyhow!("{} 不是目录", name));
                 }
-                for entry in std::fs::read_dir(&path).map_err(|e| anyhow!("读取 {} 失败: {}", path.display(), e))? {
+                let read = std::fs::read_dir(&path).map_err(|e| anyhow!("读取 {} 失败: {}", path.display(), e))?;
+                for entry in read {
                     let entry = entry.map_err(|e| anyhow!("读取目录项失败: {}", e))?;
                     if let Some(s) = entry.file_name().to_str() {
                         names.push(SmolStr::new(s));

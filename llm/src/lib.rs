@@ -1,5 +1,5 @@
 use anyhow::{Result, anyhow};
-use dynamic::{Dynamic, FromJson, ToJson};
+use dynamic::{Dynamic, FromJson, FromYaml, ToJson};
 use std::io::Write;
 
 #[cfg(feature = "candle")]
@@ -73,9 +73,7 @@ type HmacSha256 = Hmac<Sha256>;
 // llm 配置必须显式提供 endpoint (url) 和 model 名。
 // 既不允许从 model 前缀猜 url，也不允许 url/model 缺失时静默使用默认值。
 fn normalize_provider(options: Dynamic) -> Result<Dynamic> {
-    let url = options
-        .get_dynamic("url")
-        .ok_or_else(|| anyhow!("llm 配置缺少 endpoint (url)；必须显式提供 url"))?;
+    let url = options.get_dynamic("url").ok_or_else(|| anyhow!("llm 配置缺少 endpoint (url)；必须显式提供 url"))?;
     if url.as_str().trim().is_empty() {
         return Err(anyhow!("llm 配置 url 为空；必须显式提供 endpoint"));
     }
@@ -91,9 +89,7 @@ fn with_kind_model(options: Dynamic, kind: &str) -> Result<Dynamic> {
         "audio" => options.get_dynamic("asr_model").or_else(|| options.get_dynamic("audio_model")),
         _ => None,
     };
-    let model = kind_hint
-        .or_else(|| options.get_dynamic("model"))
-        .ok_or_else(|| anyhow!("llm 配置缺少 model 名；必须显式提供 model（或 {kind}_model）"))?;
+    let model = kind_hint.or_else(|| options.get_dynamic("model")).ok_or_else(|| anyhow!("llm 配置缺少 model 名；必须显式提供 model（或 {kind}_model）"))?;
     if model.as_str().trim().is_empty() {
         return Err(anyhow!("llm 配置 model 为空；必须显式提供 model 名"));
     }
@@ -572,7 +568,7 @@ async fn poll_image_task(options: &Dynamic, task_id: &str) -> Result<Dynamic> {
     };
     let interval_ms = options.get_dynamic("task_poll_interval_ms").and_then(|v| v.as_int()).unwrap_or(2000).max(200) as u64;
     let max_polls = options.get_dynamic("task_poll_max").and_then(|v| v.as_int()).unwrap_or(180).max(1);
-    let client = reqwest::Client::builder().timeout(http_timeout(options)).build()?;
+    let client = http_client_builder(options).timeout(http_timeout(options)).build()?;
 
     for _ in 0..max_polls {
         let mut req = client.get(&task_url);
@@ -812,7 +808,7 @@ pub async fn audio_recognize(bigmodel: Dynamic, audio: Dynamic) -> Result<Dynami
 
     let body = map!("user"=> map!("uid"=> app_id.clone()), "audio"=> audio, "request"=> map!("model_name"=> "bigmodel"));
 
-    let client = reqwest::Client::new();
+    let client = shared_http_client(&bigmodel)?;
     let mut body_str = String::new();
     body.to_json(&mut body_str);
     let resp = client
@@ -849,6 +845,71 @@ fn copy_request_options(options: &Dynamic, msg: &Dynamic) {
     copy_request_options_except(options, msg, &[]);
 }
 
+fn no_proxy_enabled(options: &Dynamic) -> bool {
+    options.get_dynamic("no_proxy").and_then(|value| value.as_bool()).unwrap_or(false)
+}
+
+fn duration_option_ms(options: &Dynamic, keys: &[&str]) -> Option<std::time::Duration> {
+    keys.iter().find_map(|key| options.get_dynamic(key).and_then(|value| value.as_int())).map(|millis| std::time::Duration::from_millis(millis.max(1000) as u64))
+}
+
+// 统一构造所有 zust-llm HTTP client。`no_proxy: true` 必须作用于文本、
+// 二进制、显式 stream、音频与异步任务轮询，而不只是 chat post。
+fn http_client_builder(options: &Dynamic) -> reqwest::ClientBuilder {
+    let mut builder = reqwest::Client::builder()
+        .use_rustls_tls()
+        .connect_timeout(duration_option_ms(options, &["connect_timeout_ms"]).unwrap_or(std::time::Duration::from_secs(30)))
+        // 这是单次 socket read 的空闲超时；SSE 持续产出 chunk 时会不断重置，
+        // 不限制完整大文件响应的总生成时间。
+        .read_timeout(duration_option_ms(options, &["read_timeout_ms"]).unwrap_or(std::time::Duration::from_secs(120)));
+    if let Some(timeout) = duration_option_ms(options, &["request_timeout_ms", "timeout_ms"]) {
+        builder = builder.timeout(timeout);
+    }
+    if no_proxy_enabled(options) { builder.no_proxy() } else { builder }
+}
+
+fn http_client_cache_key(options: &Dynamic) -> String {
+    let connect = duration_option_ms(options, &["connect_timeout_ms"]).unwrap_or(std::time::Duration::from_secs(30));
+    let read = duration_option_ms(options, &["read_timeout_ms"]).unwrap_or(std::time::Duration::from_secs(120));
+    let request = duration_option_ms(options, &["request_timeout_ms", "timeout_ms"]);
+    format!(
+        "no_proxy={};connect_ms={};read_ms={};request_ms={}",
+        no_proxy_enabled(options),
+        connect.as_millis(),
+        read.as_millis(),
+        request.map(|value| value.as_millis().to_string()).unwrap_or_else(|| "none".to_string())
+    )
+}
+
+fn shared_http_client(options: &Dynamic) -> Result<std::sync::Arc<reqwest::Client>> {
+    static CLIENTS: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, std::sync::Arc<reqwest::Client>>>> = std::sync::OnceLock::new();
+
+    let key = http_client_cache_key(options);
+    let clients = CLIENTS.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+    let mut clients = clients.lock().map_err(|_| anyhow!("LLM HTTP client cache lock poisoned"))?;
+    if let Some(client) = clients.get(&key) {
+        return Ok(client.clone());
+    }
+    let client = std::sync::Arc::new(http_client_builder(options).build()?);
+    clients.insert(key, client.clone());
+    Ok(client)
+}
+
+fn stream_tail_preview(text: &str, max_chars: usize) -> String {
+    let total_chars = text.chars().count();
+    if total_chars <= max_chars {
+        return text.to_string();
+    }
+    text.chars().skip(total_chars - max_chars).collect()
+}
+
+fn validate_stream_finish_reason(finish_reason: Option<&str>, text: &str) -> Result<()> {
+    match finish_reason {
+        None | Some("") | Some("stop") | Some("tool_calls") => Ok(()),
+        Some(reason) => Err(anyhow!("LLM 流式生成未完整结束: finish_reason={reason}; received_chars={}; tail={:?}", text.chars().count(), stream_tail_preview(text, 2000))),
+    }
+}
+
 fn copy_request_options_except(options: &Dynamic, msg: &Dynamic, skipped_keys: &[&str]) {
     for key in options.keys() {
         if key != "url"
@@ -872,6 +933,11 @@ fn copy_request_options_except(options: &Dynamic, msg: &Dynamic, skipped_keys: &
             && key != "kind"
             && key != "provider"
             && key != "debug_log_file"
+            && key != "no_proxy"
+            && key != "connect_timeout_ms"
+            && key != "read_timeout_ms"
+            && key != "request_timeout_ms"
+            && key != "timeout_ms"
             && key != "name"
             && key != "brand"
             && key != "text_model"
@@ -893,7 +959,7 @@ pub async fn post_binary(method: &str, openai: Dynamic, msg: Dynamic) -> Result<
 
     copy_request_options_except(&openai, &msg, &["stream"]);
 
-    let client = reqwest::Client::new();
+    let client = shared_http_client(&openai)?;
     let mut body_str = String::new();
     msg.to_json(&mut body_str);
     log::info!("{}", body_str);
@@ -970,18 +1036,16 @@ pub async fn post(method: &str, openai: Dynamic, msg: Dynamic, tx: Option<Dynami
     let url = openai.get_dynamic("url").ok_or(anyhow!("没有 url"))?;
     let token = bearer_token(&openai)?;
 
-    let is_stream = if tx.is_none() {
-        openai.insert("stream", false);
-        false
-    } else {
-        openai.get_dynamic("stream").and_then(|is_stream| is_stream.as_bool()).unwrap_or(true)
-    };
+    let is_stream = openai.get_dynamic("stream").and_then(|value| value.as_bool()).unwrap_or(tx.is_some());
+    openai.insert("stream", is_stream);
 
     copy_request_options(&openai, &msg);
 
     normalize_glm_tools(&msg);
 
-    let client = reqwest::Client::new();
+    // 进程内复用 reqwest Client 的连接池；显式失败恢复会启动新进程，
+    // 因而不会把坏连接池带入下一次 run，也不在同一 run 自动重试。
+    let client = shared_http_client(&openai)?;
     let mut body_str = String::new();
     msg.to_json(&mut body_str);
     log::info!("{}", body_str);
@@ -999,15 +1063,26 @@ pub async fn post(method: &str, openai: Dynamic, msg: Dynamic, tx: Option<Dynami
     let mut buf_reader = BufReader::new(reader);
     let mut line = String::new();
     let mut text = String::new();
+    let mut finish_reason: Option<String> = None;
     loop {
         line.clear(); // 清空上一行的内容
         if buf_reader.read_line(&mut line).await? == 0 {
+            break;
+        }
+        if is_stream && line.trim() == "data: [DONE]" {
+            // SSE 已明确完成；不要继续等服务端关闭 chunked/TLS 连接。
             break;
         }
         if is_stream && line.trim().starts_with("data") {
             if let Some(start) = line.find('{') {
                 if let Ok((v, _)) = Dynamic::from_json(&line.as_bytes()[start..]) {
                     if let Some(choice) = v.remove_dynamic("choices").and_then(|c| c.into_vec::<Dynamic>()).and_then(|choices| choices.into_iter().next()) {
+                        if let Some(reason) = choice.get_dynamic("finish_reason") {
+                            let reason = reason.as_str();
+                            if !reason.is_empty() {
+                                finish_reason = Some(reason.to_string());
+                            }
+                        }
                         if let Some(delta) = choice.remove_dynamic("delta") {
                             // 思考链（OpenAI o1 用 reasoning_content；Claude/DeepSeek 用 thinking 或 reasoning）
                             for key in ["reasoning_content", "thinking", "reasoning"] {
@@ -1025,6 +1100,16 @@ pub async fn post(method: &str, openai: Dynamic, msg: Dynamic, tx: Option<Dynami
                             if let Some(content) = delta.get_dynamic("content") {
                                 let s = content.as_str();
                                 if !s.is_empty() {
+                                    text.push_str(s);
+                                    // Opt-in raw stream visibility for supervised probe runs.
+                                    // Keep the default quiet so normal callers and persisted
+                                    // artifacts are unchanged; stderr can be watched via the
+                                    // caller's existing run log/terminal.
+                                    if std::env::var_os("ZUST_LLM_STREAM_STDERR").is_some() {
+                                        use std::io::Write as _;
+                                        eprint!("{s}");
+                                        let _ = std::io::stderr().flush();
+                                    }
                                     tx.as_ref().map(|tx| {
                                         log::debug!("text delta: {:?}", &s);
                                         notify(tx, map!("text"=> s))
@@ -1035,7 +1120,9 @@ pub async fn post(method: &str, openai: Dynamic, msg: Dynamic, tx: Option<Dynami
                     }
                 }
             }
-        } else {
+        } else if !is_stream {
+            // SSE 的 data 事件之间有空分隔行；streaming 模式必须忽略，
+            // 否则会在每个 token 后错误插入换行。
             text.push_str(&line);
         }
     }
@@ -1055,6 +1142,10 @@ pub async fn post(method: &str, openai: Dynamic, msg: Dynamic, tx: Option<Dynami
     );
     if !status.is_success() {
         return Err(anyhow!("LLM 请求失败 HTTP {}: {}", status.as_u16(), text.trim()));
+    }
+    if is_stream {
+        validate_stream_finish_reason(finish_reason.as_deref(), &text)?;
+        return decode_text_content(Dynamic::from(text.clone()), text.trim());
     }
     let (t, _) = Dynamic::from_json(text.as_bytes()).map_err(|e| {
         tx.as_ref().map(|tx| notify(tx, Dynamic::Null));
@@ -1091,7 +1182,7 @@ where
     copy_request_options(&bigmodel, &body);
     normalize_glm_tools(&body);
 
-    let client = reqwest::Client::new();
+    let client = shared_http_client(&bigmodel)?;
     let mut body_str = String::new();
     body.to_json(&mut body_str);
     log::debug!("stream req: {}", body_str);
@@ -1322,27 +1413,21 @@ pub fn decode_text_content(content: Dynamic, _raw_text: &str) -> Result<Dynamic>
         log::info!("LLM think:\n{}", think_text);
     }
     let text = text.trim();
-    if text.trim_start().starts_with('{') || text.trim_start().starts_with('[') {
-        Dynamic::from_json(text.as_bytes()).map(|(v, _)| v)
-    } else {
-        let reg = regex::Regex::new(r"```(\w+)?\n([\s\S]*?)\n?```")?;
-        if let Some(cap) = reg.captures_iter(text).next() {
-            let lang = cap.get(1).map_or("unknown", |m| m.as_str());
-            let code = cap.get(2).unwrap().as_str();
-            if lang == "json" || code.trim_start().starts_with('{') || code.trim_start().starts_with('[') { Dynamic::from_json(code.as_bytes()).map(|(v, _)| v) } else { Ok(map!("lang"=> lang, "code"=> code)) }
-        } else if let (Some(start), Some(end)) = (text.find('{'), text.rfind('}')) {
-            if start < end {
-                let (v, _) = Dynamic::from_json(text[start..=end].as_bytes())?;
-                Ok(v)
-            } else {
-                Ok(content)
-            }
-        } else if let Some(pos) = text.find("\n{") {
-            let (v, _) = Dynamic::from_json(text[pos..].as_bytes())?;
-            Ok(v)
+    let reg = regex::Regex::new(r"(?s)```[ \t]*([^\r\n]*)\r?\n(.*?)\r?\n?[ \t]*```")?;
+    if let Some(cap) = reg.captures_iter(text).next() {
+        let format = cap.get(1).map_or("", |value| value.as_str()).trim().to_ascii_lowercase();
+        let code = cap.get(2).unwrap().as_str().trim();
+        if format == "json" || (format.is_empty() && ((code.starts_with('{') && code.ends_with('}')) || (code.starts_with('[') && code.ends_with(']')))) {
+            Dynamic::from_json(code.as_bytes()).map(|(value, _)| value)
+        } else if format == "yaml" || format == "yml" {
+            Dynamic::from_yaml(code.as_bytes()).map(|(value, _)| value)
         } else {
-            Ok(text.into())
+            Ok(code.into())
         }
+    } else if (text.starts_with('{') && text.ends_with('}')) || (text.starts_with('[') && text.ends_with(']')) {
+        Dynamic::from_json(text.as_bytes()).map(|(value, _)| value)
+    } else {
+        Ok(text.into())
     }
 }
 
@@ -1565,6 +1650,61 @@ mod test {
     }
 
     #[test]
+    fn decode_text_content_keeps_yaml_with_rust_braces_as_text() -> anyhow::Result<()> {
+        let yaml = "path_role: benchmark\nsource_units:\n  - signature: \"macro_rules! generate { ($name:ident) => { ... } }\"\noutput_complete: true";
+        let decoded = super::decode_text_content(yaml.into(), "")?;
+
+        assert!(decoded.is_str());
+        assert_eq!(decoded.as_str(), yaml);
+        Ok(())
+    }
+
+    #[test]
+    fn decode_text_content_decodes_fenced_json() -> anyhow::Result<()> {
+        let decoded = super::decode_text_content("result:\n```json\n{\"ok\": true}\n```".into(), "")?;
+
+        assert!(decoded.get_dynamic("ok").unwrap().is_true());
+        Ok(())
+    }
+
+    #[test]
+    fn decode_text_content_decodes_fenced_yaml() -> anyhow::Result<()> {
+        let decoded = super::decode_text_content("```yaml\nok: true\nitems:\n  - one\n  - two\n```".into(), "")?;
+
+        assert!(decoded.get_dynamic("ok").unwrap().is_true());
+        assert_eq!(decoded.get_dynamic("items").unwrap().len(), 2);
+        Ok(())
+    }
+
+    #[test]
+    fn decode_text_content_returns_unknown_fence_as_string() -> anyhow::Result<()> {
+        let decoded = super::decode_text_content("```rust\nfn main() {}\n```".into(), "")?;
+
+        assert!(decoded.is_str());
+        assert_eq!(decoded.as_str(), "fn main() {}");
+        Ok(())
+    }
+
+    #[test]
+    fn decode_text_content_decodes_trimmed_json_array() -> anyhow::Result<()> {
+        let decoded = super::decode_text_content("  [1, 2, 3]\n".into(), "")?;
+
+        assert!(decoded.is_list());
+        assert_eq!(decoded.len(), 3);
+        Ok(())
+    }
+
+    #[test]
+    fn decode_text_content_keeps_embedded_json_as_string() -> anyhow::Result<()> {
+        let text = "result is {\"ok\": true}";
+        let decoded = super::decode_text_content(text.into(), "")?;
+
+        assert!(decoded.is_str());
+        assert_eq!(decoded.as_str(), text);
+        Ok(())
+    }
+
+    #[test]
     fn normalize_provider_requires_explicit_url() {
         let options = map!("model"=> "qwen-plus", "key"=> "sk-test");
         let err = super::normalize_provider(options).expect_err("missing url should fail");
@@ -1712,6 +1852,9 @@ mod test {
             "url"=> "https://api-singapore.klingai.com",
             "access_key"=> "ak-test",
             "secret_key"=> "sk-test",
+            "no_proxy"=> true,
+            "connect_timeout_ms"=> 30000,
+            "read_timeout_ms"=> 120000,
             "model"=> "kling-v2-1"
         );
         let body = map!("prompt"=> "village");
@@ -1720,7 +1863,58 @@ mod test {
 
         assert!(body.get_dynamic("access_key").is_none());
         assert!(body.get_dynamic("secret_key").is_none());
+        assert!(body.get_dynamic("no_proxy").is_none());
+        assert!(body.get_dynamic("connect_timeout_ms").is_none());
+        assert!(body.get_dynamic("read_timeout_ms").is_none());
         assert_eq!(body.get_dynamic("model").unwrap().as_str(), "kling-v2-1");
+    }
+
+    #[test]
+    fn no_proxy_option_is_explicit_boolean() {
+        assert!(super::no_proxy_enabled(&map!("no_proxy"=> true)));
+        assert!(!super::no_proxy_enabled(&map!("no_proxy"=> false)));
+        assert!(!super::no_proxy_enabled(&map!()));
+    }
+
+    #[test]
+    fn transport_timeout_options_are_milliseconds() {
+        let options = map!("read_timeout_ms"=> 45000);
+        assert_eq!(super::duration_option_ms(&options, &["read_timeout_ms"]).unwrap(), std::time::Duration::from_secs(45));
+        assert!(super::duration_option_ms(&options, &["request_timeout_ms"]).is_none());
+    }
+
+    #[test]
+    fn shared_http_client_reuses_only_matching_transport_config() -> anyhow::Result<()> {
+        let first_options = map!("no_proxy"=> true, "connect_timeout_ms"=> 30000, "read_timeout_ms"=> 120000);
+        let same_options = first_options.clone();
+        let different_options = map!("no_proxy"=> true, "connect_timeout_ms"=> 30000, "read_timeout_ms"=> 121000);
+
+        let first = super::shared_http_client(&first_options)?;
+        let same = super::shared_http_client(&same_options)?;
+        let different = super::shared_http_client(&different_options)?;
+
+        assert!(std::sync::Arc::ptr_eq(&first, &same));
+        assert!(!std::sync::Arc::ptr_eq(&first, &different));
+        assert_eq!(super::http_client_cache_key(&first_options), super::http_client_cache_key(&same_options));
+        assert_ne!(super::http_client_cache_key(&first_options), super::http_client_cache_key(&different_options));
+        Ok(())
+    }
+
+    #[test]
+    fn incomplete_stream_finish_reason_is_rejected() {
+        assert!(super::validate_stream_finish_reason(Some("stop"), "完整响应").is_ok());
+        assert!(super::validate_stream_finish_reason(Some("tool_calls"), "完整响应").is_ok());
+        assert!(super::validate_stream_finish_reason(None, "完整响应").is_ok());
+
+        for reason in ["length", "content_filter", "insufficient_system_resource"] {
+            let body = "前缀".repeat(1200) + "结尾标记";
+            let error = super::validate_stream_finish_reason(Some(reason), &body).expect_err("incomplete stream must fail");
+            let message = error.to_string();
+            assert!(message.contains(reason));
+            assert!(message.contains("received_chars=2404"));
+            assert!(message.contains("结尾标记"));
+            assert!(!message.contains(&"前缀".repeat(1200)));
+        }
     }
 
     #[test]

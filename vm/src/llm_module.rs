@@ -107,7 +107,7 @@ extern "C" fn llm_deep(openai: *const Dynamic, value: *const Dynamic, callback: 
                 }
                 llm::StreamEvent::Done => {
                     // 完成时把累积的正文按 llm::complete 的语义解析回 Dynamic
-                    // （JSON 自动转成 map/list，```json 代码块自动剥离，纯文本就是字符串）
+                    // （完整 JSON 自动转成 map/list，JSON/YAML 代码块按格式解析，其他输出是字符串）
                     let parsed = llm::decode_text_content(full_text.as_str().into(), full_text.as_str()).unwrap_or_else(|_| full_text.as_str().into());
                     let chunk = if full_think.is_empty() { dynamic::map!("kind"=> "done", "result"=> parsed) } else { dynamic::map!("kind"=> "done", "think"=> full_think.as_str(), "result"=> parsed) };
                     let _ = callback.call1(chunk);
@@ -119,7 +119,7 @@ extern "C" fn llm_deep(openai: *const Dynamic, value: *const Dynamic, callback: 
         })
         .await?;
 
-        // task 的最终结果用解析后的 Dynamic（保持原 deep 语义：JSON 结构化）
+        // task 的最终结果使用和 complete 相同的输出解析语义。
         let parsed = llm::decode_text_content(full_text.as_str().into(), full_text.as_str()).unwrap_or_else(|_| full_text.as_str().into());
         Ok(parsed)
     });

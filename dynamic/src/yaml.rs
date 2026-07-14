@@ -265,7 +265,7 @@ fn is_yaml_compact_flow(value: &Dynamic) -> bool {
         Dynamic::List(items) => items.read().clone(),
         _ => return false,
     };
-    items.len() >= 2 && items.len() <= 4 && items.iter().all(is_yaml_flow_scalar)
+    items.is_empty() || (items.len() >= 2 && items.len() <= 4 && items.iter().all(is_yaml_flow_scalar))
 }
 
 fn yaml_write_seq<I: Iterator<Item = Dynamic>>(items: I, indent: usize, buf: &mut String) {
@@ -475,10 +475,9 @@ fn skip_doc_marker(buf: &[u8], mut pos: usize) -> usize {
 /// 解析一个 YAML scalar 字面量(到行尾或遇到 `#` 注释为止)。
 /// 返回 (去掉 trailing comment 后的内容, 消耗的字节数)。
 ///
-fn read_scalar(buf: &[u8], pos: usize) -> Result<(&str, usize)> {
+fn read_scalar(buf: &[u8], pos: usize, in_flow: bool) -> Result<(&str, usize)> {
     let start = pos;
     let mut end = pos;
-    let mut in_flow_bracket = 0i32; // [ ] { } 计数,处理 inline 集合里的 scalar
     let mut in_double_quote = false;
     let mut in_single_quote = false;
     while end < buf.len() {
@@ -511,34 +510,30 @@ fn read_scalar(buf: &[u8], pos: usize) -> Result<(&str, usize)> {
             continue;
         }
         match b {
-            b'"' => {
+            // 只有 token 首字符的引号才启动 quoted scalar。plain scalar 内部
+            // 的 Rust lifetime (`BenchGroup<'a>`) 或代码片段引号只是普通字符。
+            b'"' if end == start => {
                 in_double_quote = true;
                 end += 1;
             }
-            b'\'' => {
+            b'\'' if end == start => {
                 in_single_quote = true;
                 end += 1;
             }
-            b'[' | b'{' => {
-                in_flow_bracket += 1;
-                end += 1;
-            }
-            b']' | b'}' => {
-                // `]` / `}` 在 plain scalar 上下文里就是终止符,
-                // 不管是不是在 flow 集合里 —— 调用方会在外层恢复对它们的处理。
-                break;
-            }
-            b',' => {
-                // `,` 是 flow 集合分隔符,plain scalar 遇到直接终止。
-                // 用户如果真的需要带 `,` 的裸字符串,自己加引号。
-                break;
-            }
-            b':' if in_flow_bracket == 0 && end + 1 < buf.len() && (buf[end + 1] == b' ' || buf[end + 1] == b'\t' || buf[end + 1] == b'\n') => {
+            b'"' | b'\'' => end += 1,
+            // 只有 token 首字符为 `[` / `{` 时才是 flow collection；这种情况
+            // 已在 parse_node 里分流。plain scalar 内部的未配对 `{` 很常见，
+            // 例如源码签名 `fn run() {`，不能因此跨行吞掉后续整个 YAML。
+            b'[' | b'{' => end += 1,
+            b']' | b'}' if in_flow => break,
+            b',' if in_flow => break,
+            b']' | b'}' | b',' => end += 1,
+            b':' if end + 1 < buf.len() && (buf[end + 1] == b' ' || buf[end + 1] == b'\t' || buf[end + 1] == b'\n') => {
                 // mapping 的 key:value 分隔,跳出。
                 break;
             }
-            b'#' if in_flow_bracket == 0 && (end == start || matches!(buf[end - 1], b' ' | b'\t')) => break,
-            b'\n' if in_flow_bracket == 0 => break,
+            b'#' if end == start || matches!(buf[end - 1], b' ' | b'\t') => break,
+            b'\n' => break,
             _ => end += 1,
         }
     }
@@ -713,7 +708,7 @@ fn parse_block_scalar(buf: &[u8], pos: usize, parent_indent: usize) -> Option<(D
 /// value 局部语法损坏时保留当前行原文并推进到下一行。调用方因此还能继续找
 /// 后续 sibling key，而不是返回一个只解析到一半的 map。
 fn parse_node_tolerant(buf: &[u8], pos: usize, min_indent: usize, in_block: bool) -> (Dynamic, usize) {
-    match parse_node(buf, pos, min_indent, in_block) {
+    match parse_node(buf, pos, min_indent, in_block, false) {
         Ok(result) => result,
         Err(_) => {
             let end = buf[pos..].iter().position(|b| *b == b'\n').map(|offset| pos + offset).unwrap_or(buf.len());
@@ -727,7 +722,7 @@ fn parse_node_tolerant(buf: &[u8], pos: usize, min_indent: usize, in_block: bool
 impl FromYaml for Dynamic {
     fn from_yaml(buf: &[u8]) -> Result<(Self, usize)> {
         let pos = skip_doc_marker(buf, 0);
-        match parse_node(buf, pos, 0, false) {
+        match parse_node(buf, pos, 0, false, false) {
             Ok((value, consumed)) => {
                 let mut consumed = skip_white(buf, consumed)?;
                 if buf.get(consumed..consumed + 3) == Some(b"...") {
@@ -746,7 +741,7 @@ impl FromYaml for Dynamic {
 /// 解析一个 YAML node。`min_indent` 是当前 block 的最小缩进,`in_block` 表示
 /// 我们正在某个 block 集合(mapping / sequence)的内部 —— 这种情况下一旦遇到
 /// 缩进小于 `min_indent` 的行,就应该结束。
-fn parse_node(buf: &[u8], pos: usize, min_indent: usize, in_block: bool) -> Result<(Dynamic, usize)> {
+fn parse_node(buf: &[u8], pos: usize, min_indent: usize, in_block: bool, in_flow: bool) -> Result<(Dynamic, usize)> {
     let pos = skip_white(buf, pos)?;
     if pos >= buf.len() {
         return Err(anyhow!("yaml 文档提前结束"));
@@ -781,7 +776,7 @@ fn parse_node(buf: &[u8], pos: usize, min_indent: usize, in_block: bool) -> Resu
     if in_block {
         return Err(anyhow!("yaml 期望 block 结构但遇到孤立标量 @{}", pos));
     }
-    let (raw, consumed) = read_scalar(buf, pos)?;
+    let (raw, consumed) = read_scalar(buf, pos, in_flow)?;
     Ok((scalar_to_dynamic(raw), pos + consumed))
 }
 
@@ -870,7 +865,10 @@ fn parse_block_map(buf: &[u8], mut pos: usize, parent_indent: usize, first_key: 
             // 但 compact block sequence 的边界:上一层调用方可能在 pos 处
             // 直接撞上更深的兄弟 key (例如 `- name: alice` 后面的 `    age: 30`),
             // try_read_key 会匹配,这种情况应当让 current_key 没值并切换。
-            if indent == parent_indent {
+            // YAML 允许 mapping 的 sequence value 与 key 同缩进：
+            // `source_units:\n- id: ...`。这种 `- key:` 不能被误认成新的 map key。
+            let indentless_sequence_value = buf[pos] == b'-' && (pos + 1 == buf.len() || matches!(buf[pos + 1], b' ' | b'\t' | b'\n'));
+            if indent == parent_indent && !indentless_sequence_value {
                 if let Some((next_key, colon)) = try_read_key(buf, pos) {
                     map.insert(current_key.clone(), Dynamic::Null);
                     current_key = next_key;
@@ -957,6 +955,11 @@ fn parse_block_seq(buf: &[u8], mut pos: usize, parent_indent: usize) -> Result<(
             break;
         }
         if buf[pos] != b'-' || (pos + 1 < buf.len() && !matches!(buf[pos + 1], b' ' | b'\t' | b'\n')) {
+            // 同缩进的非 `-` 行是 indentless sequence 后面的 sibling map key，
+            // 必须交还给外层 map parser；更深缩进的损坏行才局部跳过。
+            if indent <= parent_indent {
+                break;
+            }
             pos = next_line(buf, pos);
             continue;
         }
@@ -1008,8 +1011,8 @@ fn parse_block_seq(buf: &[u8], mut pos: usize, parent_indent: usize) -> Result<(
                     if p < buf.len() {
                         let next_indent = line_indent(buf, p);
                         let dash_indent = line_indent(buf, pos);
-                        // 跳过行首缩进,看看是不是 `key:` 续行。
-                        let key_start = p + next_indent;
+                        // p 已经被 skip_white 推到本行第一个非空字符。
+                        let key_start = p;
                         if next_indent > dash_indent
                             && key_start < buf.len()
                             && let Some((next_key, colon)) = try_read_key(buf, key_start)
@@ -1072,7 +1075,7 @@ fn parse_flow_map(buf: &[u8], pos: usize) -> Result<(Dynamic, usize)> {
             None => return Err(anyhow!("yaml flow mapping 缺少 key @{}", p)),
         };
         p = skip_white(buf, after + 1)?;
-        let (value, consumed) = parse_node(buf, p, 0, false)?;
+        let (value, consumed) = parse_node(buf, p, 0, false, true)?;
         map.insert(key, value);
         p = consumed;
         p = skip_white(buf, p)?;
@@ -1097,7 +1100,7 @@ fn parse_flow_seq(buf: &[u8], pos: usize) -> Result<(Dynamic, usize)> {
     }
     loop {
         p = skip_white(buf, p)?;
-        let (value, consumed) = parse_node(buf, p, 0, false)?;
+        let (value, consumed) = parse_node(buf, p, 0, false, true)?;
         items.push(value);
         p = consumed;
         p = skip_white(buf, p)?;
@@ -1377,5 +1380,178 @@ mod tests {
         let mut buf = String::new();
         value.to_yaml(&mut buf);
         assert_eq!(buf, "[]");
+    }
+
+    #[test]
+    fn nested_empty_lists_round_trip_as_lists() {
+        let mut unit = IndexMap::new();
+        unit.insert(SmolStr::from("id"), Dynamic::String("file.rs#u0001".into()));
+        unit.insert(SmolStr::from("reads"), Dynamic::list(Vec::new()));
+        unit.insert(SmolStr::from("writes"), Dynamic::list(Vec::new()));
+
+        let mut root = IndexMap::new();
+        root.insert(SmolStr::from("source_units"), Dynamic::list(vec![Dynamic::Map(Arc::new(RwLock::new(unit)))]));
+        let value = Dynamic::Map(Arc::new(RwLock::new(root)));
+
+        let yaml = value.to_yaml_string();
+        assert!(yaml.contains("reads: []"), "{yaml}");
+        assert!(yaml.contains("writes: []"), "{yaml}");
+
+        let (parsed, consumed) = <Dynamic as FromYaml>::from_yaml(yaml.as_bytes()).expect("parse");
+        assert_eq!(consumed, yaml.len());
+        let unit = parsed.get_dynamic("source_units").unwrap().get_idx(0).unwrap();
+        assert!(unit.get_dynamic("reads").unwrap().is_list(), "{yaml}");
+        assert!(unit.get_dynamic("writes").unwrap().is_list(), "{yaml}");
+    }
+
+    #[test]
+    fn compact_sequence_map_keeps_siblings_after_nested_lists() {
+        let input = r#"local_flows:
+  - evidence:
+      - line 6
+      - line 7
+    id: file.rs#f0001
+    name: creation
+    ordered_source_unit_ids:
+      - file.rs#u0001
+    result: done
+source_units:
+  - calls:
+      - build!
+    complexity: low
+    control_flow: []
+    id: file.rs#u0001
+"#;
+
+        let (parsed, consumed) = <Dynamic as FromYaml>::from_yaml(input.as_bytes()).expect("parse");
+        assert_eq!(consumed, input.len());
+
+        let flow = parsed.get_dynamic("local_flows").unwrap().get_idx(0).unwrap();
+        assert_eq!(flow.get_dynamic("id").unwrap().as_str(), "file.rs#f0001");
+        assert_eq!(flow.get_dynamic("name").unwrap().as_str(), "creation");
+        assert_eq!(flow.get_dynamic("result").unwrap().as_str(), "done");
+        assert!(flow.get_dynamic("evidence").unwrap().is_list());
+        assert!(flow.get_dynamic("ordered_source_unit_ids").unwrap().is_list());
+
+        let unit = parsed.get_dynamic("source_units").unwrap().get_idx(0).unwrap();
+        assert!(unit.get_dynamic("calls").unwrap().is_list());
+        assert_eq!(unit.get_dynamic("complexity").unwrap().as_str(), "low");
+        assert!(unit.get_dynamic("control_flow").unwrap().is_list());
+        assert_eq!(unit.get_dynamic("id").unwrap().as_str(), "file.rs#u0001");
+    }
+
+    #[test]
+    fn unmatched_brace_inside_plain_scalar_does_not_consume_following_document() {
+        let input = r#"complete: false
+files:
+  a.js:
+    public_units:
+      - signature: exports.config = { ...
+        source_unit_id: a.js#u0001
+    purpose: configure tests
+    schema_version: shape.source-semantic.v4
+  b.rs:
+    purpose: second file
+phase: source-facts
+project: demo
+"#;
+
+        let (parsed, consumed) = <Dynamic as FromYaml>::from_yaml(input.as_bytes()).expect("parse");
+        assert_eq!(consumed, input.len());
+        assert_eq!(parsed.get_dynamic("phase").unwrap().as_str(), "source-facts");
+        assert_eq!(parsed.get_dynamic("project").unwrap().as_str(), "demo");
+        let files = parsed.get_dynamic("files").unwrap();
+        assert_eq!(files.len(), 2);
+        let first = files.get_dynamic("a.js").unwrap();
+        assert_eq!(first.get_dynamic("purpose").unwrap().as_str(), "configure tests");
+        let unit = first.get_dynamic("public_units").unwrap().get_idx(0).unwrap();
+        assert_eq!(unit.get_dynamic("signature").unwrap().as_str(), "exports.config = { ...");
+        assert_eq!(unit.get_dynamic("source_unit_id").unwrap().as_str(), "a.js#u0001");
+    }
+
+    #[test]
+    fn rust_lifetime_inside_plain_scalar_does_not_start_quoted_string() {
+        let input = r#"files:
+  change_detection.rs:
+    source_units:
+      - kind: type_alias
+        name: BenchGroup<'a>
+        signature: type BenchGroup<'a> = Group<'a, WallTime>;
+    purpose: benchmark aliases
+phase: source-facts
+project: bevy
+"#;
+
+        let (parsed, consumed) = <Dynamic as FromYaml>::from_yaml(input.as_bytes()).expect("parse");
+        assert_eq!(consumed, input.len());
+        assert_eq!(parsed.get_dynamic("phase").unwrap().as_str(), "source-facts");
+        assert_eq!(parsed.get_dynamic("project").unwrap().as_str(), "bevy");
+        let file = parsed.get_dynamic("files").unwrap().get_dynamic("change_detection.rs").unwrap();
+        assert_eq!(file.get_dynamic("purpose").unwrap().as_str(), "benchmark aliases");
+        let unit = file.get_dynamic("source_units").unwrap().get_idx(0).unwrap();
+        assert_eq!(unit.get_dynamic("name").unwrap().as_str(), "BenchGroup<'a>");
+    }
+
+    #[test]
+    fn indentless_block_sequences_remain_values_and_keep_following_sibling_keys() {
+        let input = r#"path_role: source
+source_units:
+- id: file.rs#u0001
+  kind: struct
+  name: Main
+coverage_spans:
+- start_line: 1
+  end_line: 5
+  classification: modeled_unit
+  source_unit_ids:
+  - file.rs#u0001
+output_complete: true
+"#;
+
+        let (parsed, consumed) = <Dynamic as FromYaml>::from_yaml(input.as_bytes()).expect("parse");
+        assert_eq!(consumed, input.len());
+        let units = parsed.get_dynamic("source_units").expect("source_units");
+        assert!(units.is_list());
+        assert_eq!(units.get_idx(0).unwrap().get_dynamic("id").unwrap().as_str(), "file.rs#u0001");
+        let spans = parsed.get_dynamic("coverage_spans").expect("coverage_spans");
+        assert!(spans.is_list());
+        assert_eq!(spans.get_idx(0).unwrap().get_dynamic("end_line").unwrap().as_int(), Some(5));
+        assert!(parsed.get_dynamic("output_complete").unwrap().as_bool().unwrap());
+    }
+
+    #[test]
+    fn block_list_plain_scalar_with_colon_and_comma_keeps_following_map_fields() {
+        let input = r#"source_units:
+  - control_flow:
+      - loop:polls for I/O, timer, and message events
+    end_line: 42
+    id: quickjs-libc.c#u0001
+    kind: function
+    name: js_std_loop
+  - control_flow:
+      - async_boundary:creates runtime, loads module, enters loop
+    end_line: 84
+    id: quickjs-libc.c#u0002
+    kind: function
+    name: js_std_eval_binary
+valid: true
+"#;
+
+        let (parsed, consumed) = <Dynamic as FromYaml>::from_yaml(input.as_bytes()).expect("parse");
+        assert_eq!(consumed, input.len());
+        let units = parsed.get_dynamic("source_units").unwrap();
+        assert_eq!(units.len(), 2);
+        let first = units.get_idx(0).unwrap();
+        assert_eq!(first.get_dynamic("id").unwrap().as_str(), "quickjs-libc.c#u0001");
+        assert_eq!(first.get_dynamic("end_line").unwrap().as_int(), Some(42));
+        assert_eq!(first.get_dynamic("control_flow").unwrap().get_idx(0).unwrap().as_str(), "loop:polls for I/O, timer, and message events");
+        let second = units.get_idx(1).unwrap();
+        assert_eq!(second.get_dynamic("id").unwrap().as_str(), "quickjs-libc.c#u0002");
+        assert!(parsed.get_dynamic("valid").unwrap().as_bool().unwrap());
+
+        let yaml = parsed.to_yaml_string();
+        let (round_trip, consumed) = <Dynamic as FromYaml>::from_yaml(yaml.as_bytes()).expect("round trip");
+        assert_eq!(consumed, yaml.len(), "{yaml}");
+        assert_eq!(round_trip.get_dynamic("source_units").unwrap().get_idx(0).unwrap().get_dynamic("id").unwrap().as_str(), "quickjs-libc.c#u0001");
     }
 }

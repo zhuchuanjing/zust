@@ -1076,7 +1076,16 @@ impl Mount<Object> {
                 return false;
             }
         }
-        std::fs::write(&path, bytes).is_ok()
+        let file_name = path.file_name().and_then(|name| name.to_str()).unwrap_or("root-value");
+        let temp = path.with_file_name(format!(".{file_name}.{}.tmp", std::process::id()));
+        if std::fs::write(&temp, bytes).is_err() {
+            return false;
+        }
+        if std::fs::rename(&temp, &path).is_err() {
+            let _ = std::fs::remove_file(temp);
+            return false;
+        }
+        true
     }
 
     /// 读取文件 / 探测目录:目录 → Null(不报错),文件 → 按扩展名 decode,
@@ -1361,6 +1370,24 @@ mod tests {
         let got = mount.dir_get("x.yaml").unwrap();
         assert_eq!(got.get_dynamic("name").map(|v| v.as_str().to_string()), Some("zust".to_string()));
         assert_eq!(got.get_dynamic("age").and_then(|v| v.as_int()), Some(18));
+
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn mount_dir_yaml_replace_leaves_no_partial_file() {
+        let (mount, base) = fresh_dir_mount("ddd");
+        let first = Dynamic::map(Default::default());
+        first.insert("count", 1);
+        let second = Dynamic::map(Default::default());
+        second.insert("count", 2);
+
+        assert!(mount.dir_add("checkpoint.yaml", Object::Value(first)));
+        assert!(mount.dir_add("checkpoint.yaml", Object::Value(second)));
+        let got = mount.dir_get("checkpoint.yaml").unwrap();
+        assert_eq!(got.get_dynamic("count").and_then(|value| value.as_int()), Some(2));
+        let names = std::fs::read_dir(&base).unwrap().map(|entry| entry.unwrap().file_name().to_string_lossy().to_string()).collect::<Vec<_>>();
+        assert_eq!(names, vec!["checkpoint.yaml"]);
 
         let _ = std::fs::remove_dir_all(base);
     }

@@ -4,7 +4,7 @@ Zust is a Rust-like scripting language and runtime written in Rust. It keeps the
 
 Official website: [www.zust-lang.com](https://www.zust-lang.com)
 
-The project is close to a mature open-source release. The workspace now contains separately versioned crates, with the VM crate at `0.9.106`, the root crate at `0.9.27`, the dynamic crate at `0.9.27`, the compiler at `0.9.47`, the parser at `0.9.26`, the SPIR-V backend at `0.9.12`, the Metal backend at `0.9.14`, and the editor-facing packages at `0.9.2`.
+The project is close to a mature open-source release. The workspace now contains separately versioned crates, with the VM crate at `0.9.107`, the root crate at `0.9.27`, the dynamic crate at `0.9.27`, the compiler at `0.9.47`, the parser at `0.9.26`, the SPIR-V backend at `0.9.12`, the Metal backend at `0.9.14`, and the editor-facing packages at `0.9.2`.
 
 中文文档: [README.zh.md](README.zh.md)
 
@@ -638,6 +638,15 @@ let embedder = candle::load_embedder({
 });
 
 let result = candle::embed(embedder, ["hello Zust", "local embeddings"]);
+```
+
+CPU is the default. Build `zust-llm` with feature `cuda` or `metal`, then set `device` to `"cuda"`, `"metal"`, or `"gpu"`; `"gpu"` prefers CUDA when both backends are compiled. When using Candle through `zust-vm`, enable the matching `candle-cuda` or `candle-metal` feature.
+
+```bash
+cargo build -p zust-llm --features cuda
+cargo build -p zust-llm --features metal
+cargo build -p zust-vm --features candle-cuda
+cargo build -p zust-vm --features candle-metal
 ```
 
 Functions:

@@ -1,6 +1,6 @@
 [package]
 name = "zust-vm"
-version = "0.9.106"
+version = "0.9.107"
 edition = "2024"
 rust-version = "1.85"
 description = "Cranelift JIT runtime for executing Zust modules."
@@ -21,6 +21,8 @@ http = ["dep:axum", "dep:futures-util", "dep:reqwest", "dep:tokio", "dep:tower-h
 db = ["dep:sqlx-core", "dep:sqlx-mysql", "dep:sqlx-postgres", "dep:tokio"]
 llm = ["dep:llm", "dep:tokio"]
 candle = ["dep:llm", "llm/candle"]
+candle-cuda = ["candle", "llm/cuda"]
+candle-metal = ["candle", "llm/metal"]
 gpu = ["dep:vm-spirv", "dep:vm-metal"]
 vulkan = ["gpu", "dep:vulkan", "dep:vulkano"]
 metal = ["gpu", "vm-metal/runtime"]
@@ -31,7 +33,7 @@ dynamic = { package = "zust-dynamic", version = "0.9.24", path = "../dynamic" }
 parser = { package = "zust-parser", version = "0.9.26", path = "../parser" }
 compiler = { package = "zust-compiler", version = "0.9.47", path = "../compiler" }
 root = { package = "zust-root", version = "0.9.25", path = "../root" }
-llm = { package = "zust-llm", version = "0.9.22", path = "../llm", optional = true }
+llm = { package = "zust-llm", version = "0.9.24", path = "../llm", optional = true }
 vm-spirv = { package = "zust-vm-spirv", version = "0.9.12", path = "../vm-spirv", optional = true }
 vulkan = { package = "zust-vulkan", version = "0.9.6", path = "../vulkan", optional = true }
 

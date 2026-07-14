@@ -4,7 +4,7 @@ Zust 是一个用 Rust 编写的类 Rust 脚本语言和运行时。它保留了
 
 官方网站：[www.zust-lang.com](https://www.zust-lang.com)
 
-项目已经接近成熟的开源版本。当前 workspace 内各 crate 独立发版：VM crate 为 `0.9.106`，root crate 为 `0.9.27`，dynamic crate 为 `0.9.27`，compiler 为 `0.9.47`，parser 为 `0.9.26`，SPIR-V 后端为 `0.9.12`，Metal 后端为 `0.9.14`，编辑器相关包为 `0.9.2`。
+项目已经接近成熟的开源版本。当前 workspace 内各 crate 独立发版：VM crate 为 `0.9.107`，root crate 为 `0.9.27`，dynamic crate 为 `0.9.27`，compiler 为 `0.9.47`，parser 为 `0.9.26`，SPIR-V 后端为 `0.9.12`，Metal 后端为 `0.9.14`，编辑器相关包为 `0.9.2`。
 
 English: [README.md](README.md)
 
@@ -636,6 +636,15 @@ let embedder = candle::load_embedder({
 });
 
 let result = candle::embed(embedder, ["hello Zust", "local embeddings"]);
+```
+
+默认使用 CPU。编译 `zust-llm` 时启用 `cuda` 或 `metal` feature，再把 `device` 设为 `"cuda"`、`"metal"` 或 `"gpu"`；两种后端同时编译时，`"gpu"` 优先使用 CUDA。通过 `zust-vm` 使用 Candle 时，启用对应的 `candle-cuda` 或 `candle-metal` feature。
+
+```bash
+cargo build -p zust-llm --features cuda
+cargo build -p zust-llm --features metal
+cargo build -p zust-vm --features candle-cuda
+cargo build -p zust-vm --features candle-metal
 ```
 
 函数：

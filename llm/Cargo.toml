@@ -1,6 +1,6 @@
 [package]
 name = "zust-llm"
-version = "0.9.23"
+version = "0.9.24"
 edition = "2024"
 rust-version = "1.85"
 description = "LLM request helpers for Zust runtime integrations."
@@ -16,6 +16,8 @@ name = "llm"
 [features]
 default = []
 candle = ["dep:candle-core", "dep:candle-nn", "dep:candle-transformers", "dep:tokenizers", "dep:serde_json"]
+cuda = ["candle", "candle-core/cuda", "candle-nn/cuda", "candle-transformers/cuda"]
+metal = ["candle", "candle-core/metal", "candle-nn/metal", "candle-transformers/metal"]
 
 [[example]]
 name = "kalm_embed"

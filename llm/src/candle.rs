@@ -194,7 +194,19 @@ fn config(path: &Path) -> Result<EmbedderConfig> {
 fn device(name: &str) -> Result<Device> {
     match name {
         "" | "cpu" => Ok(Device::Cpu),
-        other => Err(anyhow!("unsupported candle device {other}; this build supports cpu")),
+        #[cfg(feature = "cuda")]
+        "cuda" | "gpu" => Device::new_cuda(0).map_err(|err| anyhow!("failed to create CUDA device: {err}")),
+        #[cfg(not(feature = "cuda"))]
+        "cuda" => Err(anyhow!("cuda device requested but zust-llm was compiled without cuda feature")),
+        #[cfg(feature = "metal")]
+        "metal" => Device::new_metal(0).map_err(|err| anyhow!("failed to create Metal device: {err}")),
+        #[cfg(not(feature = "metal"))]
+        "metal" => Err(anyhow!("metal device requested but zust-llm was compiled without metal feature")),
+        #[cfg(all(not(feature = "cuda"), feature = "metal"))]
+        "gpu" => Device::new_metal(0).map_err(|err| anyhow!("failed to create Metal device: {err}")),
+        #[cfg(not(any(feature = "cuda", feature = "metal")))]
+        "gpu" => Err(anyhow!("gpu device requested but zust-llm was compiled without cuda or metal feature")),
+        other => Err(anyhow!("unsupported candle device {other}; expected cpu, cuda, metal, or gpu")),
     }
 }
 
@@ -266,5 +278,23 @@ mod tests {
         let masks = vec![vec![1]];
         let pooled = mean_pool(hidden, &masks, true, Some(2));
         assert_eq!(pooled, vec![vec![0.6, 0.8]]);
+    }
+
+    #[test]
+    fn cpu_device_is_always_available() -> Result<()> {
+        assert!(device("cpu")?.is_cpu());
+        Ok(())
+    }
+
+    #[cfg(not(feature = "cuda"))]
+    #[test]
+    fn cuda_device_requires_cuda_feature() {
+        assert!(device("cuda").unwrap_err().to_string().contains("without cuda feature"));
+    }
+
+    #[cfg(not(feature = "metal"))]
+    #[test]
+    fn metal_device_requires_metal_feature() {
+        assert!(device("metal").unwrap_err().to_string().contains("without metal feature"));
     }
 }

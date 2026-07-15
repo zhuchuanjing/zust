@@ -37,13 +37,15 @@ where
             let result = f().await;
             let _ = tx.send(result);
         });
-        tokio::task::block_in_place(|| tokio::runtime::Handle::current().block_on(async {
-            match rx.await {
-                Ok(value) => value,
-                // rx 收到 Err 说明 tx 被 drop(spawn 任务 panic 或提前退出):带上下文 panic。
-                Err(_) => panic!("block_on_async: spawn 任务在发送结果前异常退出"),
-            }
-        }))
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(async {
+                match rx.await {
+                    Ok(value) => value,
+                    // rx 收到 Err 说明 tx 被 drop(spawn 任务 panic 或提前退出):带上下文 panic。
+                    Err(_) => panic!("block_on_async: spawn 任务在发送结果前异常退出"),
+                }
+            })
+        })
     } else {
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(f())
@@ -725,8 +727,7 @@ pub fn get_list(name: &str) -> Result<Vec<Dynamic>> {
         // Dir 后端没有 List 概念,但保留接口语义:返回目录下一级 entry 列表
         //(全是 string name,跟 dir() 一致;调用方拿 Dynamic 列表).
         Mount::Dir { base } => {
-            let path = crate::mount::safe_path(&base, &name)
-                .ok_or_else(|| anyhow!("path 非法: {}", name))?;
+            let path = crate::mount::safe_path(&base, &name).ok_or_else(|| anyhow!("path 非法: {}", name))?;
             if !path.exists() {
                 return Err(anyhow!("{} 不存在", name));
             }

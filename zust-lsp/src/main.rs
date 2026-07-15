@@ -299,6 +299,7 @@ fn lsp_externs() -> Vec<LspExtern> {
         LspExtern { full_name: "std::__struct_alloc", arg_tys: vec![Type::I64], ret_ty: Type::Any },
         LspExtern { full_name: "std::__struct_from_ptr", arg_tys: vec![Type::I64, Type::I64], ret_ty: Type::Any },
         LspExtern { full_name: "std::log", arg_tys: vec![Type::F32], ret_ty: Type::F32 },
+        LspExtern { full_name: "std::sqrt", arg_tys: vec![Type::F64], ret_ty: Type::F64 },
         LspExtern { full_name: "spirv::group_id", arg_tys: vec![], ret_ty: Type::Vec(Rc::new(Type::U32), 3) },
         LspExtern { full_name: "spirv::local_id", arg_tys: vec![], ret_ty: Type::Vec(Rc::new(Type::U32), 3) },
         LspExtern { full_name: "spirv::barrier", arg_tys: vec![], ret_ty: Type::Void },

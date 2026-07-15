@@ -710,13 +710,7 @@ mod tests {
 
         // 直接调用 native 函数,避免脚本侧 Any/Str 类型协调的额外复杂度。
         // add_std 走 add_native_ptr(name, name, ...),native_symbols 里的 key 是 bare 名。
-        let fn_ptr = *vm
-            .jit
-            .read()
-            .native_symbols
-            .read()
-            .get("env")
-            .ok_or_else(|| anyhow::anyhow!("env 未注册"))?;
+        let fn_ptr = *vm.jit.read().native_symbols.read().get("env").ok_or_else(|| anyhow::anyhow!("env 未注册"))?;
         let env_fn: extern "C" fn(*const Dynamic) -> *const Dynamic = unsafe { std::mem::transmute(fn_ptr) };
 
         // set_var 在 cargo test 多线程并行下不安全;在测试进程内本测试函数串行执行。

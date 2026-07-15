@@ -60,10 +60,7 @@ pub trait FromJson: Sized {
                         pos += 4;
                         // JSON 规范:高代理(0xD800..=0xDBFF)后必须跟 \uXXXX 低代理
                         // (0xDC00..=0xDFFF),组合成完整 code point;孤立代理丢弃。
-                        let code = if (0xD800..=0xDBFF).contains(&unicode)
-                            && buf.get(pos + 1..pos + 3) == Some(b"\\u")
-                            && pos + 7 <= buf.len()
-                        {
+                        let code = if (0xD800..=0xDBFF).contains(&unicode) && buf.get(pos + 1..pos + 3) == Some(b"\\u") && pos + 7 <= buf.len() {
                             let low_str = unsafe { std::str::from_utf8_unchecked(&buf[(pos + 3)..(pos + 7)]) };
                             if let Ok(low) = u32::from_str_radix(low_str, 16)
                                 && (0xDC00..=0xDFFF).contains(&low)

@@ -61,7 +61,7 @@ pub struct Parser {
     /// `match` 块顶层临时变量(__m_scrut_N / __m_done_N / __m_out_N)的后缀计数器,
     /// 用于避免嵌套 match 重名。
     pub(crate) match_counter: usize,
-    fatal: bool,  //递归过深等不可恢复错误;置位后所有解析入口立即失败,避免回溯重试导致死循环
+    fatal: bool, //递归过深等不可恢复错误;置位后所有解析入口立即失败,避免回溯重试导致死循环
 }
 
 /// [`Parser::spans`] 的 RAII 守卫。

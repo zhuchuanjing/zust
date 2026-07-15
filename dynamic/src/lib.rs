@@ -392,7 +392,9 @@ impl PartialEq for Dynamic {
             (Self::I64(a), Self::I64(b)) => a == b,
             // 混合整数类型(有符号/无符号) - 统一比较。注意 is_int 现在只含有符号,
             // 无符号需用 is_uint 兜底,否则 U8(5)==I32(5) 会判 false。
-            (a, b) if (a.is_int() || a.is_uint()) && (b.is_int() || b.is_uint()) => a.as_int().or_else(|| a.as_uint().and_then(|v| i64::try_from(v).ok())) == b.as_int().or_else(|| b.as_uint().and_then(|v| i64::try_from(v).ok())),
+            (a, b) if (a.is_int() || a.is_uint()) && (b.is_int() || b.is_uint()) => {
+                a.as_int().or_else(|| a.as_uint().and_then(|v| i64::try_from(v).ok())) == b.as_int().or_else(|| b.as_uint().and_then(|v| i64::try_from(v).ok()))
+            }
             // Float types
             (Self::F16(a), Self::F16(b)) => a == b,
             (Self::F32(a), Self::F32(b)) => a.to_bits() == b.to_bits(),

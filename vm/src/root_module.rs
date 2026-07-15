@@ -85,11 +85,7 @@ extern "C" fn root_get(name: *const Dynamic) -> *const Dynamic {
     unsafe {
         let result = (|| -> Option<Dynamic> {
             let (m, name) = get_mount(&(*name).as_str()).ok()?;
-            if matches!(m, Mount::Dir { .. }) {
-                m.get_for_object(name, |v| v.value().clone()).ok()
-            } else {
-                m.get(name, |v| v.value()).ok()
-            }
+            if matches!(m, Mount::Dir { .. }) { m.get_for_object(name, |v| v.value().clone()).ok() } else { m.get(name, |v| v.value()).ok() }
         })();
         alloc_dynamic(result.unwrap_or(Dynamic::Null))
     }

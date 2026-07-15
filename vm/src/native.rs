@@ -333,11 +333,13 @@ pub(crate) extern "C" fn import_with_vm(context: *const Weak<RwLock<JITRunTime>>
     if addr.is_null() || path.is_null() {
         return false;
     }
-    let name = if addr.is_null() || path.is_null() { return false; } else { unsafe { (&*addr).as_str().to_string() } };
+    let name = if addr.is_null() || path.is_null() {
+        return false;
+    } else {
+        unsafe { (&*addr).as_str().to_string() }
+    };
     let path = unsafe { (&*path).as_str().to_string() };
-    super::with_native_context(context, |jit| jit.import(name.as_str(), path.as_str()))
-        .map_err(|e| log::error!("import {name} 失败: {e:#}"))
-        .is_ok()
+    super::with_native_context(context, |jit| jit.import(name.as_str(), path.as_str())).map_err(|e| log::error!("import {name} 失败: {e:#}")).is_ok()
 }
 
 pub(crate) extern "C" fn spawn_with_vm(context: *const Weak<RwLock<JITRunTime>>, fn_name: *const Dynamic, args: *const Dynamic) -> bool {
@@ -393,13 +395,11 @@ pub(crate) extern "C" fn spawn_ptr(fn_ptr: i64, ret_ty: i64, args: *const Dynami
     let fn_ptr = fn_ptr as usize;
     let ret_ty = unsafe { (&*(ret_ty as *const Type)).clone() };
     let args = if args.is_null() { Dynamic::Null } else { unsafe { (&*args).deep_clone() } };
-    match std::thread::Builder::new()
-        .name("zust:closure".to_string())
-        .spawn(move || {
-            if let Err(err) = spawn_run_ptr(fn_ptr, ret_ty, args) {
-                log::error!("spawn closure failed: {err:#}");
-            }
-        }) {
+    match std::thread::Builder::new().name("zust:closure".to_string()).spawn(move || {
+        if let Err(err) = spawn_run_ptr(fn_ptr, ret_ty, args) {
+            log::error!("spawn closure failed: {err:#}");
+        }
+    }) {
         Ok(_) => true,
         Err(e) => {
             log::error!("spawn closure 线程启动失败: {e:#}");

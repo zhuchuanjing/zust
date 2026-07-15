@@ -906,8 +906,17 @@ fn stream_tail_preview(text: &str, max_chars: usize) -> String {
 fn validate_stream_finish_reason(finish_reason: Option<&str>, text: &str) -> Result<()> {
     match finish_reason {
         None | Some("") | Some("stop") | Some("tool_calls") => Ok(()),
-        Some(reason) => Err(anyhow!("LLM 流式生成未完整结束: finish_reason={reason}; received_chars={}; tail={:?}", text.chars().count(), stream_tail_preview(text, 2000))),
+        Some(reason) => Err(anyhow!("LLM 生成未完整结束: finish_reason={reason}; received_chars={}; tail={:?}", text.chars().count(), stream_tail_preview(text, 2000))),
     }
+}
+
+fn validate_non_stream_finish_reason(body: &Dynamic, raw_text: &str) -> Result<()> {
+    let reason = body
+        .get_dynamic("choices")
+        .and_then(|choices| choices.get_idx(0))
+        .and_then(|choice| choice.get_dynamic("finish_reason"))
+        .map(|value| value.as_str().to_string());
+    validate_stream_finish_reason(reason.as_deref(), raw_text)
 }
 
 fn copy_request_options_except(options: &Dynamic, msg: &Dynamic, skipped_keys: &[&str]) {
@@ -1032,6 +1041,48 @@ fn decode_tts_json_response(body: Dynamic) -> Result<Dynamic> {
 }
 
 pub async fn post(method: &str, openai: Dynamic, msg: Dynamic, tx: Option<Dynamic>) -> Result<Dynamic> {
+    let max_attempts = openai
+        .get_dynamic("retry_attempts")
+        .and_then(|value| value.as_int())
+        .unwrap_or(3)
+        .clamp(1, 5) as usize;
+
+    for attempt in 0..max_attempts {
+        match post_once(method, openai.clone(), msg.clone(), tx.clone()).await {
+            Ok(result) => return Ok(result),
+            Err(err) => {
+                let detail = format!("{err:#}");
+                let retryable = [
+                    "error sending request",
+                    "connection error",
+                    "tls handshake",
+                    "unexpected-eof",
+                    "unexpected eof",
+                    "peer closed connection",
+                    "connection reset",
+                    "timed out",
+                ]
+                .iter()
+                .any(|pattern| detail.to_ascii_lowercase().contains(pattern));
+                if !retryable || attempt + 1 >= max_attempts {
+                    return Err(err);
+                }
+                let delay_ms = 500u64 * (1u64 << attempt);
+                log::warn!(
+                    "LLM transport failed, retrying attempt {}/{} in {}ms: {}",
+                    attempt + 2,
+                    max_attempts,
+                    delay_ms,
+                    err
+                );
+                tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+            }
+        }
+    }
+    unreachable!("LLM retry loop always returns")
+}
+
+async fn post_once(method: &str, openai: Dynamic, msg: Dynamic, tx: Option<Dynamic>) -> Result<Dynamic> {
     //不能把 dynamic 作为耗材使用
     let url = openai.get_dynamic("url").ok_or(anyhow!("没有 url"))?;
     let token = bearer_token(&openai)?;
@@ -1257,6 +1308,7 @@ where
 }
 
 fn decode_llm_response(t: Dynamic, raw_text: &str) -> Result<Dynamic> {
+    validate_non_stream_finish_reason(&t, raw_text)?;
     if let Some(data) = t.get_dynamic("data") {
         if data.is_list()
             && let Some(item) = data.get_idx(0)
@@ -1413,6 +1465,27 @@ pub fn decode_text_content(content: Dynamic, _raw_text: &str) -> Result<Dynamic>
         log::info!("LLM think:\n{}", think_text);
     }
     let text = text.trim();
+    // Some chat models occasionally duplicate the opening YAML fence while
+    // emitting only one closing fence:
+    //
+    // ```yaml
+    // ```yaml
+    // key: value
+    // ```
+    //
+    // Without this normalization the generic fenced-block regex pairs the
+    // two opening fences and decodes an empty YAML document, discarding the
+    // real payload. Collapse only a consecutive duplicate YAML/YML opening
+    // fence at the very start; do not alter payload text or other languages.
+    let duplicate_yaml_open = regex::Regex::new(
+        r"(?i)^```[ \t]*(?:yaml|yml)[ \t]*\r?\n[ \t]*```[ \t]*(?:yaml|yml)[ \t]*\r?\n",
+    )?;
+    let normalized_text = if let Some(matched) = duplicate_yaml_open.find(text) {
+        format!("```yaml\n{}", &text[matched.end()..])
+    } else {
+        text.to_owned()
+    };
+    let text = normalized_text.trim();
     let reg = regex::Regex::new(r"(?s)```[ \t]*([^\r\n]*)\r?\n(.*?)\r?\n?[ \t]*```")?;
     if let Some(cap) = reg.captures_iter(text).next() {
         let format = cap.get(1).map_or("", |value| value.as_str()).trim().to_ascii_lowercase();
@@ -1677,6 +1750,19 @@ mod test {
     }
 
     #[test]
+    fn decode_text_content_decodes_duplicated_yaml_opening_fence() -> anyhow::Result<()> {
+        for input in [
+            "```yaml\n```yaml\nok: true\nitems:\n  - one\n```",
+            "```YAML\r\n```yml\r\nok: true\r\nitems:\r\n  - one\r\n```",
+        ] {
+            let decoded = super::decode_text_content(input.into(), "")?;
+            assert!(decoded.get_dynamic("ok").unwrap().is_true());
+            assert_eq!(decoded.get_dynamic("items").unwrap().len(), 1);
+        }
+        Ok(())
+    }
+
+    #[test]
     fn decode_text_content_returns_unknown_fence_as_string() -> anyhow::Result<()> {
         let decoded = super::decode_text_content("```rust\nfn main() {}\n```".into(), "")?;
 
@@ -1915,6 +2001,21 @@ mod test {
             assert!(message.contains("结尾标记"));
             assert!(!message.contains(&"前缀".repeat(1200)));
         }
+    }
+
+    #[test]
+    fn incomplete_non_stream_finish_reason_is_rejected() -> anyhow::Result<()> {
+        let raw = r#"{"choices":[{"finish_reason":"length","message":{"content":"partial yaml"}}]}"#;
+        let (body, _) = Dynamic::from_json(raw.as_bytes())?;
+        let error = super::decode_llm_response(body, raw).expect_err("non-stream length must fail");
+        let message = error.to_string();
+        assert!(message.contains("finish_reason=length"));
+        assert!(message.contains("received_chars="));
+
+        let complete_raw = r#"{"choices":[{"finish_reason":"stop","message":{"content":"complete"}}]}"#;
+        let (complete, _) = Dynamic::from_json(complete_raw.as_bytes())?;
+        assert_eq!(super::decode_llm_response(complete, complete_raw)?.as_str(), "complete");
+        Ok(())
     }
 
     #[test]

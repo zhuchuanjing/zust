@@ -911,11 +911,7 @@ fn validate_stream_finish_reason(finish_reason: Option<&str>, text: &str) -> Res
 }
 
 fn validate_non_stream_finish_reason(body: &Dynamic, raw_text: &str) -> Result<()> {
-    let reason = body
-        .get_dynamic("choices")
-        .and_then(|choices| choices.get_idx(0))
-        .and_then(|choice| choice.get_dynamic("finish_reason"))
-        .map(|value| value.as_str().to_string());
+    let reason = body.get_dynamic("choices").and_then(|choices| choices.get_idx(0)).and_then(|choice| choice.get_dynamic("finish_reason")).map(|value| value.as_str().to_string());
     validate_stream_finish_reason(reason.as_deref(), raw_text)
 }
 
@@ -1041,40 +1037,21 @@ fn decode_tts_json_response(body: Dynamic) -> Result<Dynamic> {
 }
 
 pub async fn post(method: &str, openai: Dynamic, msg: Dynamic, tx: Option<Dynamic>) -> Result<Dynamic> {
-    let max_attempts = openai
-        .get_dynamic("retry_attempts")
-        .and_then(|value| value.as_int())
-        .unwrap_or(3)
-        .clamp(1, 5) as usize;
+    let max_attempts = openai.get_dynamic("retry_attempts").and_then(|value| value.as_int()).unwrap_or(3).clamp(1, 5) as usize;
 
     for attempt in 0..max_attempts {
         match post_once(method, openai.clone(), msg.clone(), tx.clone()).await {
             Ok(result) => return Ok(result),
             Err(err) => {
                 let detail = format!("{err:#}");
-                let retryable = [
-                    "error sending request",
-                    "connection error",
-                    "tls handshake",
-                    "unexpected-eof",
-                    "unexpected eof",
-                    "peer closed connection",
-                    "connection reset",
-                    "timed out",
-                ]
-                .iter()
-                .any(|pattern| detail.to_ascii_lowercase().contains(pattern));
+                let retryable = ["error sending request", "connection error", "tls handshake", "unexpected-eof", "unexpected eof", "peer closed connection", "connection reset", "timed out"]
+                    .iter()
+                    .any(|pattern| detail.to_ascii_lowercase().contains(pattern));
                 if !retryable || attempt + 1 >= max_attempts {
                     return Err(err);
                 }
                 let delay_ms = 500u64 * (1u64 << attempt);
-                log::warn!(
-                    "LLM transport failed, retrying attempt {}/{} in {}ms: {}",
-                    attempt + 2,
-                    max_attempts,
-                    delay_ms,
-                    err
-                );
+                log::warn!("LLM transport failed, retrying attempt {}/{} in {}ms: {}", attempt + 2, max_attempts, delay_ms, err);
                 tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
             }
         }
@@ -1430,7 +1407,11 @@ fn decode_responses_text(t: &Dynamic) -> Option<Dynamic> {
     None
 }
 
-pub fn decode_text_content(content: Dynamic, _raw_text: &str) -> Result<Dynamic> {
+pub fn decode_text_content(content: Dynamic, raw_text: &str) -> Result<Dynamic> {
+    decode_text_content_with_yaml_policy(content, raw_text, std::env::var_os("ZUST_LLM_PRESERVE_FENCED_YAML").is_some())
+}
+
+fn decode_text_content_with_yaml_policy(content: Dynamic, _raw_text: &str, preserve_fenced_yaml: bool) -> Result<Dynamic> {
     let mut text = content.as_str().to_string();
     let mut think_text = String::new();
     loop {
@@ -1477,14 +1458,8 @@ pub fn decode_text_content(content: Dynamic, _raw_text: &str) -> Result<Dynamic>
     // two opening fences and decodes an empty YAML document, discarding the
     // real payload. Collapse only a consecutive duplicate YAML/YML opening
     // fence at the very start; do not alter payload text or other languages.
-    let duplicate_yaml_open = regex::Regex::new(
-        r"(?i)^```[ \t]*(?:yaml|yml)[ \t]*\r?\n[ \t]*```[ \t]*(?:yaml|yml)[ \t]*\r?\n",
-    )?;
-    let normalized_text = if let Some(matched) = duplicate_yaml_open.find(text) {
-        format!("```yaml\n{}", &text[matched.end()..])
-    } else {
-        text.to_owned()
-    };
+    let duplicate_yaml_open = regex::Regex::new(r"(?i)^```[ \t]*(?:yaml|yml)[ \t]*\r?\n[ \t]*```[ \t]*(?:yaml|yml)[ \t]*\r?\n")?;
+    let normalized_text = if let Some(matched) = duplicate_yaml_open.find(text) { format!("```yaml\n{}", &text[matched.end()..]) } else { text.to_owned() };
     let text = normalized_text.trim();
     let reg = regex::Regex::new(r"(?s)```[ \t]*([^\r\n]*)\r?\n(.*?)\r?\n?[ \t]*```")?;
     if let Some(cap) = reg.captures_iter(text).next() {
@@ -1493,7 +1468,7 @@ pub fn decode_text_content(content: Dynamic, _raw_text: &str) -> Result<Dynamic>
         if format == "json" || (format.is_empty() && ((code.starts_with('{') && code.ends_with('}')) || (code.starts_with('[') && code.ends_with(']')))) {
             Dynamic::from_json(code.as_bytes()).map(|(value, _)| value)
         } else if format == "yaml" || format == "yml" {
-            Dynamic::from_yaml(code.as_bytes()).map(|(value, _)| value)
+            if preserve_fenced_yaml { Ok(map!("lang" => "yaml", "code" => code)) } else { Dynamic::from_yaml(code.as_bytes()).map(|(value, _)| value) }
         } else {
             Ok(code.into())
         }
@@ -1750,11 +1725,19 @@ mod test {
     }
 
     #[test]
+    fn decode_text_content_can_preserve_fenced_yaml_wire() -> anyhow::Result<()> {
+        let decoded = super::decode_text_content_with_yaml_policy("```yaml\nsemantic_items:\n  \"first\": \"第一条语义。\n  \"second\": \"第二条语义。\n```".into(), "", true)?;
+        assert_eq!(decoded.get_dynamic("lang").unwrap().as_str(), "yaml");
+        let code_value = decoded.get_dynamic("code").unwrap();
+        let code = code_value.as_str();
+        assert!(code.contains("\"first\": \"第一条语义。"));
+        assert!(code.contains("\"second\": \"第二条语义。"));
+        Ok(())
+    }
+
+    #[test]
     fn decode_text_content_decodes_duplicated_yaml_opening_fence() -> anyhow::Result<()> {
-        for input in [
-            "```yaml\n```yaml\nok: true\nitems:\n  - one\n```",
-            "```YAML\r\n```yml\r\nok: true\r\nitems:\r\n  - one\r\n```",
-        ] {
+        for input in ["```yaml\n```yaml\nok: true\nitems:\n  - one\n```", "```YAML\r\n```yml\r\nok: true\r\nitems:\r\n  - one\r\n```"] {
             let decoded = super::decode_text_content(input.into(), "")?;
             assert!(decoded.get_dynamic("ok").unwrap().is_true());
             assert_eq!(decoded.get_dynamic("items").unwrap().len(), 1);

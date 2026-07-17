@@ -211,7 +211,7 @@ pub(crate) extern "C" fn scope_exit_bytes(value: *const u8, size: i64, ty: i64) 
     dst
 }
 
-pub(crate) unsafe fn take_dynamic_return(ptr: *const Dynamic) -> Box<Dynamic> {
+pub unsafe fn take_dynamic_return(ptr: *const Dynamic) -> Box<Dynamic> {
     if ptr.is_null() {
         return Box::new(Dynamic::Null);
     }

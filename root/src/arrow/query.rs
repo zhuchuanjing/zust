@@ -50,7 +50,13 @@ fn description_results_to_index_map(results: Vec<SearchDescriptionResult>) -> In
 
 impl Query {
     pub fn new(name: &str) -> Result<Self> {
-        let db = OptimisticTxDatabase::builder(name).open()?;
+        Self::new_at(name, name)
+    }
+
+    /// Open the database at `path` while preserving a stable logical keyspace name.
+    /// This allows a vector database to be moved without creating empty keyspaces.
+    pub fn new_at(path: &str, name: &str) -> Result<Self> {
+        let db = OptimisticTxDatabase::builder(path).open()?;
         let ids = db.keyspace(&format!("{}_ids", name), KeyspaceCreateOptions::default)?;
         let names = db.keyspace(&format!("{}_names", name), KeyspaceCreateOptions::default)?;
         let descriptions = db.keyspace(&format!("{}_descriptions", name), KeyspaceCreateOptions::default)?;

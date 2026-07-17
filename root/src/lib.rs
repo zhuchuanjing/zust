@@ -29,23 +29,8 @@ where
     F: FnOnce() -> std::pin::Pin<Box<dyn Future<Output = T> + Send>> + 'static + Send,
     T: Send + 'static,
 {
-    if tokio::runtime::Handle::try_current().is_ok() {
-        let (tx, rx) = tokio::sync::oneshot::channel();
-        tokio::task::spawn(async move {
-            // spawn 任务若 panic,tx 在 send 前被 drop,rx.await 会收到 Err,
-            // 由下面的 match 转成带上下文的 panic,而非裸 unwrap 丢失信息。
-            let result = f().await;
-            let _ = tx.send(result);
-        });
-        tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(async {
-                match rx.await {
-                    Ok(value) => value,
-                    // rx 收到 Err 说明 tx 被 drop(spawn 任务 panic 或提前退出):带上下文 panic。
-                    Err(_) => panic!("block_on_async: spawn 任务在发送结果前异常退出"),
-                }
-            })
-        })
+    if let Ok(handle) = tokio::runtime::Handle::try_current() {
+        tokio::task::block_in_place(|| handle.block_on(f()))
     } else {
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(f())

@@ -35,6 +35,14 @@ fn run_command(cmd: &Dynamic, args: &Dynamic, opts: &Dynamic) -> Dynamic {
         return error_result("args must be list of string");
     };
 
+    // 参数级审批：执行前按真实 argv 匹配宿主策略（local/zbuddy/policy）。
+    // allow 规则做 argv 前缀匹配（"cargo test" 匹配 ["cargo","test",...]），
+    // 未命中时走 agent::ask 同一审批协议——人/白名单看到的是实际命令而非
+    // 模型的自由文本描述。无策略节点时保持原行为（非沙箱场景不拦截）。
+    if let Err(denied) = check_policy(&cmd, &arg_list) {
+        return error_result(&denied);
+    }
+
     let timeout_ms = opt_int(opts, "timeout_ms", DEFAULT_TIMEOUT_MS);
     let max_chars = opt_int(opts, "max_chars", DEFAULT_MAX_CHARS as i64).max(0) as usize;
     let cwd = opt_text(opts, "cwd");
@@ -249,5 +257,76 @@ mod tests {
         assert!(cut);
         assert!(text.starts_with("你好世"));
         assert!(text.contains("1 chars"));
+    }
+}
+
+/// argv 前缀匹配：rule 按空白拆成词序列，是 [cmd, args...] 的前缀即命中。
+fn argv_matches(rule: &str, cmd: &str, args: &[String]) -> bool {
+    let mut words = rule.split_whitespace();
+    let Some(first) = words.next() else { return false };
+    if first != cmd {
+        return false;
+    }
+    let mut idx = 0;
+    for word in words {
+        if idx >= args.len() || args[idx] != word {
+            return false;
+        }
+        idx += 1;
+    }
+    true
+}
+
+/// 策略检查：local/zbuddy/policy = {allow: [规则...]}。
+/// - 节点不存在：不拦截（非沙箱宿主未配置策略）
+/// - allow 命中：放行
+/// - 未命中：写 local/zbuddy/ask（question 固定 process、context 是完整 argv），
+///   等 ask_reply——宿主白名单/web 人工批的是真实命令。超时/拒绝返回 Err。
+fn check_policy(cmd: &str, args: &[String]) -> Result<(), String> {
+    let Ok(policy) = root::get("local/zbuddy/policy") else {
+        return Ok(());
+    };
+    if !policy.is_map() {
+        return Ok(());
+    }
+    if let Some(allow) = policy.get_dynamic("allow") {
+        if allow.is_list() {
+            for idx in 0..allow.len() {
+                if let Some(rule) = allow.get_idx(idx) {
+                    if argv_matches(rule.as_str(), cmd, args) {
+                        return Ok(());
+                    }
+                }
+            }
+        }
+    }
+    // 未命中：走审批协议（与 agent::ask 同节点，宿主已有处理逻辑）
+    let argv = std::iter::once(cmd.to_string())
+        .chain(args.iter().cloned())
+        .collect::<Vec<_>>()
+        .join(" ");
+    let _ = root::remove("local/zbuddy/ask_reply");
+    let _ = root::add(
+        "local/zbuddy/ask",
+        root::Object::Value(dynamic::map!("question" => "run command", "context" => argv.clone())),
+    );
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(300);
+    loop {
+        if let Ok(reply) = root::get("local/zbuddy/ask_reply") {
+            if reply.is_map() {
+                let _ = root::remove("local/zbuddy/ask_reply");
+                let approved = reply.get_dynamic("approved").and_then(|v| v.as_bool()).unwrap_or(false);
+                return if approved {
+                    Ok(())
+                } else {
+                    Err(format!("command denied by approval: {argv}"))
+                };
+            }
+        }
+        if std::time::Instant::now() >= deadline {
+            let _ = root::remove("local/zbuddy/ask");
+            return Err(format!("command approval timeout: {argv}"));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
     }
 }

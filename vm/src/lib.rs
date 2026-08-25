@@ -30,6 +30,7 @@ mod math_module;
 #[cfg(feature = "llm")]
 mod oss_module;
 mod root_module;
+mod agent_module;
 mod patch_module;
 mod process_module;
 mod time_module;
@@ -332,6 +333,15 @@ impl JITRunTime {
         add_native_module_fns(self, "patch", &patch_module::PATCH_NATIVE)
     }
 
+    /// agent 协议模块：ask/report/checkpoint/rollback 与受信宿主的同步通信。
+    #[cfg(feature = "agent")]
+    pub fn add_agent(&mut self) -> Result<()> {
+        if self.compiler.sym_tab.symbols.get_id("agent::report").is_ok() {
+            return Ok(());
+        }
+        add_native_module_fns(self, "agent", &agent_module::AGENT_NATIVE)
+    }
+
     #[cfg(feature = "http")]
     pub fn add_http(&mut self) -> Result<()> {
         if self.compiler.sym_tab.symbols.get_id("http::request").is_ok() {
@@ -378,6 +388,8 @@ impl JITRunTime {
         self.add_process()?;
         #[cfg(feature = "patch")]
         self.add_patch()?;
+        #[cfg(feature = "agent")]
+        self.add_agent()?;
         Ok(())
     }
 }

@@ -1020,9 +1020,17 @@ fn encode_value(name: &str, value: &Dynamic) -> Result<Vec<u8>> {
     let ext = Path::new(name).extension().and_then(|e| e.to_str()).unwrap_or("");
     match ext {
         "json" => {
-            let mut s = String::new();
-            value.to_json(&mut s);
-            Ok(s.into_bytes())
+            // String 值按原文直写（调用方手里已是 JSON 文本）；结构化值才编码。
+            // 之前一律 to_json 把 String 当 JSON 字符串编码，引号被转义，
+            // 生成器与模型写 JSON 文件全部损坏。
+            match value {
+                Dynamic::String(_) | Dynamic::StringBuf(_) => Ok(value.as_str().as_bytes().to_vec()),
+                _ => {
+                    let mut s = String::new();
+                    value.to_json(&mut s);
+                    Ok(s.into_bytes())
+                }
+            }
         }
         "yaml" | "yml" => Ok(value.to_yaml_string().into_bytes()),
         "md" => Ok(value.to_markdown().into_bytes()),

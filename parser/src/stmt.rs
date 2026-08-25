@@ -574,6 +574,10 @@ impl Parser {
             self.until(b';')?;
             Stmt::new(StmtKind::Import { module, path, is_pub }, Span::new(start, self.current_pos()))
         } else if self.keyword("let").is_ok() {
+            // `let mut x = ...` 兼容糖：zust 变量本就可重赋值，模型（Rust 习惯）
+            // 写长程序时高频带 mut，这里直接吞掉而不是报"期望 ="。
+            self.whitespace()?;
+            let _ = self.keyword("mut");
             let pat = self.pattern()?;
             self.declare_pattern_symbols(&pat)?;
             self.until(b'=')?;

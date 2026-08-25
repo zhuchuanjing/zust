@@ -76,6 +76,13 @@ fn flush(hunks: &mut Vec<Hunk>, current: &mut Option<Hunk>) {
     }
 }
 
+/// 失配错误附带文件头部：程序式执行中文件内容对模型不可见，
+/// 错误信息自带现场（前 20 行），下一轮重试不再盲写上下文。
+fn mismatch_error(lines: &[String], hunk: &Hunk, anchor: &str) -> String {
+    let head: Vec<&str> = lines.iter().take(20).map(String::as_str).collect();
+    format!("context mismatch: hunk starting with {anchor:?} not found.\nfile head:\n{}", head.join("\n"))
+}
+
 /// old 侧为空（纯新增无锚点）拒绝执行：没有上下文的补丁无法校验位置。
 fn replace_once(lines: &mut Vec<String>, hunk: &Hunk) -> Result<(), String> {
     if hunk.old.is_empty() {
@@ -83,7 +90,7 @@ fn replace_once(lines: &mut Vec<String>, hunk: &Hunk) -> Result<(), String> {
     }
     let anchor = hunk.old.first().map(String::as_str).unwrap_or_default();
     if lines.len() < hunk.old.len() {
-        return Err(format!("context mismatch: file has {} lines, hunk needs {}", lines.len(), hunk.old.len()));
+        return Err(mismatch_error(lines, hunk, anchor));
     }
     for start in 0..=(lines.len() - hunk.old.len()) {
         if lines[start..start + hunk.old.len()] == hunk.old[..] {
@@ -92,7 +99,7 @@ fn replace_once(lines: &mut Vec<String>, hunk: &Hunk) -> Result<(), String> {
             return Ok(());
         }
     }
-    Err(format!("context mismatch: hunk starting with {anchor:?} not found"))
+    Err(mismatch_error(lines, hunk, anchor))
 }
 
 fn error_result(message: &str) -> Dynamic {

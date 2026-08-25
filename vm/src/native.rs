@@ -1077,6 +1077,19 @@ extern "C" fn any_substring(addr: *const Dynamic, start: i64, stop: *const Dynam
     alloc_dynamic(Dynamic::from(result))
 }
 
+/// `list.join(sep)`：字符串列表拼接（Rust 的 slice::join 惯例）。
+extern "C" fn any_join(addr: *const Dynamic, sep: *const Dynamic) -> *const Dynamic {
+    if addr.is_null() || sep.is_null() {
+        return alloc_dynamic(Dynamic::from(""));
+    }
+    let sep = unsafe { (&*sep).as_str() };
+    if let Dynamic::List(list) = unsafe { &*addr } {
+        let parts: Vec<String> = list.read().iter().map(|v| v.as_str().to_string()).collect();
+        return alloc_dynamic(Dynamic::from(parts.join(sep)));
+    }
+    alloc_dynamic(Dynamic::from(""))
+}
+
 extern "C" fn get_idx(addr: *const Dynamic, idx: i64) -> *const Dynamic {
     if addr.is_null() {
         any_null()
@@ -1558,7 +1571,7 @@ pub const STD: [(&str, &[Type], Type, *const u8); 7] = [
     ("env", &[Type::Str], Type::Any, env as *const u8),
 ];
 
-pub const ANY: [(&str, &[Type], Type, *const u8); 87] = [
+pub const ANY: [(&str, &[Type], Type, *const u8); 88] = [
     ("Any::null", &[], Type::Any, any_null as *const u8),
     ("Any::is_map", &[Type::Any], Type::Bool, any_is_map as *const u8),
     ("Any::is_list", &[Type::Any], Type::Bool, any_is_list as *const u8),
@@ -1568,6 +1581,7 @@ pub const ANY: [(&str, &[Type], Type, *const u8); 87] = [
     ("Any::len", &[Type::Any], Type::I32, any_len as *const u8),
     ("Any::keys", &[Type::Any], Type::Any, any_keys as *const u8),
     ("Any::split", &[Type::Any, Type::Any], Type::Any, any_split as *const u8),
+    ("Any::join", &[Type::Any, Type::Any], Type::Any, any_join as *const u8),
     ("Any::push", &[Type::Any, Type::Any], Type::Void, any_push as *const u8),
     ("Any::pop", &[Type::Any], Type::Any, any_pop as *const u8),
     ("Any::get_idx", &[Type::Any, Type::I64], Type::Any, get_idx as *const u8),

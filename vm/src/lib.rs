@@ -30,6 +30,7 @@ mod math_module;
 #[cfg(feature = "llm")]
 mod oss_module;
 mod root_module;
+mod process_module;
 mod time_module;
 pub use gpu_layout::{GpuFieldLayout, GpuStructLayout};
 pub use parking_lot::RwLock;
@@ -312,6 +313,16 @@ impl JITRunTime {
         add_native_module_fns(self, "math", &math_module::MATH_NATIVE)
     }
 
+    /// process 是高危能力(执行任意命令),与 http/db 一样走 feature 显式启用,
+    /// 不进 Vm::new 的 core 注册。
+    #[cfg(feature = "process")]
+    pub fn add_process(&mut self) -> Result<()> {
+        if self.compiler.sym_tab.symbols.get_id("process::run").is_ok() {
+            return Ok(());
+        }
+        add_native_module_fns(self, "process", &process_module::PROCESS_NATIVE)
+    }
+
     #[cfg(feature = "http")]
     pub fn add_http(&mut self) -> Result<()> {
         if self.compiler.sym_tab.symbols.get_id("http::request").is_ok() {
@@ -354,6 +365,8 @@ impl JITRunTime {
         self.add_db()?;
         #[cfg(feature = "gpu")]
         self.add_gpu()?;
+        #[cfg(feature = "process")]
+        self.add_process()?;
         Ok(())
     }
 }

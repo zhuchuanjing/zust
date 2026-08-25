@@ -321,7 +321,7 @@ pub struct BigFloat<N> {
 
 ## 运行时 Native 模块
 
-`zust-vm` 默认不启用扩展 feature。`Vm::new()` 注册 core 能力：VM 内存运行时、`std`、`Any`、`Vec` 和 `root`。`Vm::with_all()` 会注册当前编译进来的全部能力；启用 `full` 时会包含 `http`、`db`、`llm`、`candle` 和 `gpu`。`oss` 跟随 `llm` feature 注册；`candle` 注册本地 Candle 模型执行入口；`http::upload` 只有同时启用 `http` 和 `llm` 时可用。`vulkan` 和 `metal` 是 GPU 运行后端 feature，分别建立在 `gpu` 之上。
+`zust-vm` 默认不启用扩展 feature。`Vm::new()` 注册 core 能力：VM 内存运行时、`std`、`Any`、`Vec` 和 `root`。`Vm::with_all()` 会注册当前编译进来的全部能力；启用 `full` 时会包含 `http`、`db`、`llm`、`candle`、`gpu` 和 `process`。`oss` 跟随 `llm` feature 注册；`candle` 注册本地 Candle 模型执行入口；`http::upload` 只有同时启用 `http` 和 `llm` 时可用。`vulkan` 和 `metal` 是 GPU 运行后端 feature，分别建立在 `gpu` 之上。
 
 下面这些 native 模块和辅助类型都以 `Dynamic` 作为主要边界，因此 Zust 脚本可以直接传 map、list、字符串、数字和 bytes。
 
@@ -469,6 +469,26 @@ events.push({kind: "logout"});                   // 错误: 只改 events 副本
 - `root::add_map(path)`、`root::insert(path, key, value)`、`root::get_key(path, key)`、`root::remove_key(path, key)`。
 - `root::send(path, value)`、`root::send_idx(path, idx, value)`：向 native handler 或 Zust handler 发送消息。
 - `root::add_fn(path, fn_name)`：把已编译的 Zust 函数注册成 ROOT handler。
+
+### process
+
+`process` 提供子进程执行。执行任意命令属于高危能力，走独立 feature 显式启用，不进 `Vm::new()` 的 core 注册：
+
+```bash
+cargo build -p zust-vm --features process
+cargo build -p zust --features process
+```
+
+- `process::run(cmd, args, opts)`：同步执行命令并等待结束，返回 `{ok, code, stdout, stdout_truncated, stderr, stderr_truncated, timed_out}`。
+- `opts` 可选字段：`timeout_ms`（默认 60000）、`cwd`、`env`（map，追加到当前环境）、`max_chars`（stdout/stderr 截断上限，默认 16000；按字符截断，末尾标注被裁掉的字符数）。
+- 超时会 kill 子进程并置 `timed_out: true`，`code` 为 `-1`。
+
+```zust
+let out = process::run("cargo", ["test"], {timeout_ms: 300000, max_chars: 16000});
+if !out.ok {
+    print({code: out.code, stderr: out.stderr});
+}
+```
 
 ### http
 

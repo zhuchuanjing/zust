@@ -99,6 +99,9 @@ fn with_kind_model(options: Dynamic, kind: &str) -> Result<Dynamic> {
 
 pub async fn complete(bigmodel: Dynamic, msg: Dynamic, tx: Option<Dynamic>) -> Result<Dynamic> {
     let bigmodel = with_kind_model(bigmodel, "complete")?;
+    if uses_anthropic_api(&bigmodel) {
+        return anthropic_complete(bigmodel, msg).await;
+    }
     if uses_responses_api(&bigmodel, &msg) {
         let body = if msg.is_map() && msg.contains("input") { msg } else { map!("input"=> list!(map!("role"=> "user", "content"=> response_content(msg)))) };
         return post("responses", bigmodel, body, tx).await;
@@ -109,6 +112,78 @@ pub async fn complete(bigmodel: Dynamic, msg: Dynamic, tx: Option<Dynamic>) -> R
     } else {
         post("chat/completions", bigmodel, map!("messages"=> list!(map!("role"=> "user", "content"=> chat_content(msg)))), tx).await
     }
+}
+
+/// Anthropic 协议检测：显式 `api: "anthropic"`，或 url 以 /anthropic 结尾
+/// （智谱 Code Plan 等订阅通道只开 Anthropic 协议，模型直接填 glm-4.6 等）。
+fn uses_anthropic_api(openai: &Dynamic) -> bool {
+    if openai.get_dynamic("api").is_some_and(|api| api.as_str() == "anthropic") {
+        return true;
+    }
+    openai.get_dynamic("url").is_some_and(|url| url.as_str().trim_end_matches('/').ends_with("/anthropic"))
+}
+
+/// Anthropic Messages API：POST {url}/v1/messages，x-api-key 鉴权。
+/// 非流式；harness 侧按请求级重试兜底。system 提示词与用户文本都来自 msg：
+/// msg 为字符串时是 user 文本，为 map 时取 system/messages/text 字段。
+async fn anthropic_complete(bigmodel: Dynamic, msg: Dynamic) -> Result<Dynamic> {
+    use std::io::Write as _;
+
+    let url = bigmodel.get_dynamic("url").ok_or(anyhow!("没有 url"))?;
+    let token = bearer_token(&bigmodel)?;
+    let model = bigmodel.get_dynamic("model").ok_or(anyhow!("没有 model"))?;
+
+    // 请求体用 Dynamic 构造后 to_json——与 crate 其他请求路径一致，不引 serde_json
+    let body = map!("model" => model.clone(), "max_tokens" => bigmodel.get_dynamic("max_tokens").and_then(|v| v.as_int()).unwrap_or(8192));
+    if msg.is_map() {
+        if let Some(system) = msg.get_dynamic("system") {
+            body.insert("system", system);
+        }
+        if let Some(messages) = msg.get_dynamic("messages") {
+            body.insert("messages", messages);
+        } else if let Some(text) = msg.get_dynamic("text") {
+            body.insert("messages", list!(map!("role" => "user", "content" => text)));
+        }
+    } else {
+        body.insert("messages", list!(map!("role" => "user", "content" => msg)));
+    }
+    let mut body_str = String::new();
+    body.to_json(&mut body_str);
+
+    let client = shared_http_client(&bigmodel)?;
+    let endpoint = format!("{}/v1/messages", url.as_str().trim_end_matches('/'));
+    let mut request = client.post(&endpoint).header("Content-Type", "application/json").header("anthropic-version", "2023-06-01");
+    if let Some(token) = token {
+        request = request.header("x-api-key", token);
+    }
+    let resp = request.body(body_str).send().await?;
+    let status = resp.status();
+    let bytes = resp.bytes().await?;
+    let text = String::from_utf8_lossy(&bytes);
+    if !status.is_success() {
+        let _ = std::io::stderr().write_all(format!("anthropic http {status}: {text}\n").as_bytes());
+        return Err(anyhow!("Anthropic 请求失败 HTTP {status}: {}", text.trim()));
+    }
+    let (value, _) = Dynamic::from_json(&text.as_bytes()).map_err(|e| anyhow!("Anthropic 响应不是合法 JSON: {e}"))?;
+    // content: [{type:"text", text:"..."}] 拼出正文；错误体带 error.message
+    if let Some(error) = value.get_dynamic("error") {
+        let message = error.get_dynamic("message").map(|m| m.as_str().to_string()).unwrap_or_else(|| error.to_string());
+        return Err(anyhow!("Anthropic 错误: {message}"));
+    }
+    if let Some(content) = value.get_dynamic("content") {
+        let mut out = String::new();
+        for idx in 0..content.len() {
+            if let Some(part) = content.get_idx(idx) {
+                if part.get_dynamic("type").map(|t| t.as_str() == "text").unwrap_or(false) {
+                    if let Some(chunk) = part.get_dynamic("text") {
+                        out.push_str(chunk.as_str());
+                    }
+                }
+            }
+        }
+        return Ok(Dynamic::from(out));
+    }
+    Err(anyhow!("Anthropic 响应缺少 content: {text}"))
 }
 
 fn uses_responses_api(openai: &Dynamic, msg: &Dynamic) -> bool {

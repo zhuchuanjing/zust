@@ -1,7 +1,7 @@
 //使用 cranelift 作为后端 直接 jit 解释脚本
 mod binary;
 mod memory;
-pub use memory::take_dynamic_return;
+pub use memory::{set_fuel, take_dynamic_return};
 mod native;
 pub use native::{ANY, STD, ZustCallback};
 
@@ -125,6 +125,7 @@ impl JITRunTime {
         self.native_symbols.write().insert("__vm_array_from_ptr".to_string(), native::array_from_ptr as *const () as usize);
         self.native_symbols.write().insert("__vm_array_to_ptr".to_string(), native::array_to_ptr as *const () as usize);
         self.native_symbols.write().insert("__vm_arith_fault".to_string(), memory::arith_fault as *const () as usize);
+        self.native_symbols.write().insert("__vm_fuel_check".to_string(), memory::fuel_check as *const () as usize);
 
         let void_sig = self.get_sig(&[], Type::Void)?;
         self.builtin_fns.register(BuiltinFn::ScopeEnter, self.module.declare_function("__vm_scope_enter", cranelift_module::Linkage::Import, &void_sig)?);
@@ -167,6 +168,8 @@ impl JITRunTime {
         self.builtin_fns.register(BuiltinFn::ArrayToPtr, self.module.declare_function("__vm_array_to_ptr", cranelift_module::Linkage::Import, &array_to_ptr_sig)?);
 
         self.builtin_fns.register(BuiltinFn::ArithFault, self.module.declare_function("__vm_arith_fault", cranelift_module::Linkage::Import, &void_sig)?);
+        let fuel_sig = self.get_sig(&[], Type::I32)?;
+        self.builtin_fns.register(BuiltinFn::FuelCheck, self.module.declare_function("__vm_fuel_check", cranelift_module::Linkage::Import, &fuel_sig)?);
         Ok(())
     }
 

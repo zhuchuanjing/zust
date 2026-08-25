@@ -36,6 +36,7 @@ pub enum BuiltinFn {
     ArrayFromPtr,
     ArrayToPtr,
     ArithFault,
+    FuelCheck,
 }
 
 impl BuiltinFn {
@@ -58,6 +59,7 @@ impl BuiltinFn {
             Self::ArrayFromPtr => "VM array Dynamic runtime is not registered",
             Self::ArrayToPtr => "VM array assignment runtime is not registered",
             Self::ArithFault => "VM arith fault runtime is not registered",
+            Self::FuelCheck => "VM fuel check runtime is not registered",
         }
     }
 }
@@ -1896,6 +1898,10 @@ impl JITRunTime {
     fn gen_loop(&mut self, ctx: &mut BuildContext, cond: Option<&Expr>, body: &Stmt, f: Option<impl FnMut(&mut BuildContext)>) -> Result<()> {
         let loop_block = ctx.builder.create_block();
         let end_block = ctx.builder.create_block();
+        // 循环配额检查块：每次迭代入口调用 __vm_fuel_check，耗尽时跳到
+        // end_block。配额默认 -1（未启用）时检查恒通过，开销一次原子读。
+        let fuel_block = ctx.builder.create_block();
+        let fuel_fn_id = self.builtin_fns.get_or_err(BuiltinFn::FuelCheck)?;
         if let Some(cond) = cond {
             let start_block = ctx.builder.create_block();
             ctx.builder.ins().jump(start_block, &[]);
@@ -1903,12 +1909,13 @@ impl JITRunTime {
             let cond = self.eval(ctx, cond)?.get(ctx).ok_or_else(|| self.compile_error(ctx, cond.span, "while 条件无值（必须是可求值的表达式）"))?;
             let cond = self.bool_value(ctx, cond)?;
             let continue_block = if f.is_some() { ctx.builder.create_block() } else { start_block };
-            ctx.builder.ins().brif(cond, loop_block, &[], end_block, &[]);
+            ctx.builder.ins().brif(cond, fuel_block, &[], end_block, &[]);
             ctx.builder.switch_to_block(loop_block);
             let body_terminated = self.gen_stmt(ctx, body, Some(end_block), Some(continue_block))?;
             if !body_terminated {
                 ctx.builder.ins().jump(continue_block, &[]);
             }
+            self.fill_fuel_block(ctx, fuel_block, fuel_fn_id, loop_block, end_block)?;
             ctx.builder.seal_block(loop_block);
             f.map(|mut f| {
                 ctx.builder.switch_to_block(continue_block);
@@ -1917,15 +1924,31 @@ impl JITRunTime {
                 ctx.builder.seal_block(continue_block);
             });
         } else {
-            ctx.builder.ins().jump(loop_block, &[]);
+            // 入口与回跳都经过 fuel_block，每圈消耗一次配额
+            ctx.builder.ins().jump(fuel_block, &[]);
             ctx.builder.switch_to_block(loop_block);
-            let body_terminated = self.gen_stmt(ctx, body, Some(end_block), Some(loop_block))?;
+            let body_terminated = self.gen_stmt(ctx, body, Some(end_block), Some(fuel_block))?;
             if !body_terminated {
-                ctx.builder.ins().jump(loop_block, &[]);
+                ctx.builder.ins().jump(fuel_block, &[]);
             }
+            // fuel 块的 brif 会给 loop_block 添加新前驱，必须先于 loop_block 的 seal
+            self.fill_fuel_block(ctx, fuel_block, fuel_fn_id, loop_block, end_block)?;
             ctx.builder.seal_block(loop_block);
         }
         ctx.builder.switch_to_block(end_block);
+        Ok(())
+    }
+
+    /// 循环配额检查块：耗尽时跳 end_block，否则进 loop_block。
+    /// 在两个分支的入口跳转建立之后、loop_block seal 之前填充。
+    fn fill_fuel_block(&mut self, ctx: &mut BuildContext, fuel_block: Block, fuel_fn_id: cranelift_module::FuncId, loop_block: Block, end_block: Block) -> Result<()> {
+        ctx.builder.switch_to_block(fuel_block);
+        let fuel_fn = self.get_fn_ref(ctx, fuel_fn_id);
+        let fuel_call = ctx.builder.ins().call(fuel_fn, &[]);
+        let fuel_result = ctx.builder.inst_results(fuel_call)[0];
+        let exhausted = ctx.builder.ins().icmp_imm(cranelift::prelude::IntCC::Equal, fuel_result, 1);
+        ctx.builder.ins().brif(exhausted, end_block, &[], loop_block, &[]);
+        ctx.builder.seal_block(fuel_block);
         Ok(())
     }
 

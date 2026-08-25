@@ -145,6 +145,36 @@ pub(crate) extern "C" fn arith_fault() {
     dynamic::set_fault("整数除零");
 }
 
+thread_local! {
+    /// 沙箱循环配额。-1 表示未启用（无限）；>=0 时每次循环迭代消耗 1，
+    /// 耗尽后 JIT 插桩跳到循环出口并设 fault——死循环被降级为一次失败的
+    /// 调用，而不是拖死宿主线程后强杀进程。
+    static FUEL: std::cell::Cell<i64> = const { std::cell::Cell::new(-1) };
+}
+
+/// 设置当前线程的循环配额（宿主在执行不可信程序前调用）。
+pub fn set_fuel(quota: i64) {
+    FUEL.with(|fuel| fuel.set(quota));
+}
+
+/// JIT 循环插桩调用：返回 1 表示配额耗尽（已设 fault），调用方跳到循环出口。
+pub(crate) extern "C" fn fuel_check() -> i32 {
+    FUEL.with(|fuel| {
+        let left = fuel.get();
+        if left < 0 {
+            return 0;
+        }
+        if left == 0 {
+            // 关闭配额，避免出口后残余代码路径反复触发
+            fuel.set(-1);
+            dynamic::set_fault("fuel exhausted：沙箱循环配额耗尽");
+            return 1;
+        }
+        fuel.set(left - 1);
+        0
+    })
+}
+
 pub(crate) extern "C" fn scope_enter() {
     VM_MEMORY.with(|memory| memory.borrow_mut().enter_scope());
 }

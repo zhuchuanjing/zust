@@ -30,6 +30,7 @@ mod math_module;
 #[cfg(feature = "llm")]
 mod oss_module;
 mod root_module;
+mod patch_module;
 mod process_module;
 mod time_module;
 pub use gpu_layout::{GpuFieldLayout, GpuStructLayout};
@@ -323,6 +324,14 @@ impl JITRunTime {
         add_native_module_fns(self, "process", &process_module::PROCESS_NATIVE)
     }
 
+    #[cfg(feature = "patch")]
+    pub fn add_patch(&mut self) -> Result<()> {
+        if self.compiler.sym_tab.symbols.get_id("patch::apply").is_ok() {
+            return Ok(());
+        }
+        add_native_module_fns(self, "patch", &patch_module::PATCH_NATIVE)
+    }
+
     #[cfg(feature = "http")]
     pub fn add_http(&mut self) -> Result<()> {
         if self.compiler.sym_tab.symbols.get_id("http::request").is_ok() {
@@ -367,6 +376,8 @@ impl JITRunTime {
         self.add_gpu()?;
         #[cfg(feature = "process")]
         self.add_process()?;
+        #[cfg(feature = "patch")]
+        self.add_patch()?;
         Ok(())
     }
 }

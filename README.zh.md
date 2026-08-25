@@ -321,7 +321,7 @@ pub struct BigFloat<N> {
 
 ## 运行时 Native 模块
 
-`zust-vm` 默认不启用扩展 feature。`Vm::new()` 注册 core 能力：VM 内存运行时、`std`、`Any`、`Vec` 和 `root`。`Vm::with_all()` 会注册当前编译进来的全部能力；启用 `full` 时会包含 `http`、`db`、`llm`、`candle`、`gpu` 和 `process`。`oss` 跟随 `llm` feature 注册；`candle` 注册本地 Candle 模型执行入口；`http::upload` 只有同时启用 `http` 和 `llm` 时可用。`vulkan` 和 `metal` 是 GPU 运行后端 feature，分别建立在 `gpu` 之上。
+`zust-vm` 默认不启用扩展 feature。`Vm::new()` 注册 core 能力：VM 内存运行时、`std`、`Any`、`Vec` 和 `root`。`Vm::with_all()` 会注册当前编译进来的全部能力；启用 `full` 时会包含 `http`、`db`、`llm`、`candle`、`gpu`、`process` 和 `patch`。`oss` 跟随 `llm` feature 注册；`candle` 注册本地 Candle 模型执行入口；`http::upload` 只有同时启用 `http` 和 `llm` 时可用。`vulkan` 和 `metal` 是 GPU 运行后端 feature，分别建立在 `gpu` 之上。
 
 下面这些 native 模块和辅助类型都以 `Dynamic` 作为主要边界，因此 Zust 脚本可以直接传 map、list、字符串、数字和 bytes。
 
@@ -487,6 +487,27 @@ cargo build -p zust --features process
 let out = process::run("cargo", ["test"], {timeout_ms: 300000, max_chars: 16000});
 if !out.ok {
     print({code: out.code, stderr: out.stderr});
+}
+```
+
+### patch
+
+`patch` 提供上下文锚定的文本补丁（Codex apply_patch 语义的纯函数子集），走独立 feature：
+
+```bash
+cargo build -p zust-vm --features patch
+```
+
+- `patch::apply(content, diff) -> {ok: true, content}` 或 `{ok: false, error}`。
+- diff 由 hunk 组成，`@@` 或 `***` 开头的行是边界；hunk 内 `-` 前缀删除、`+` 前缀新增、
+  其余（含空行）是上下文行（允许 diff 风格前导空格）。
+- old 侧（上下文+删除行）必须按原顺序在 content 中找到匹配才替换；任一 hunk 失败则
+  整体失败、内容不变。纯函数不落盘，"校验不过不落盘"天然成立。
+
+```zust
+let patched = patch::apply(src, "@@\n keep\n-old line\n+new line");
+if patched.ok == true {
+    root::add("ws/file.txt", patched.content);
 }
 ```
 

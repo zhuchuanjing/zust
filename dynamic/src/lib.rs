@@ -1766,11 +1766,15 @@ impl Dynamic {
         } else if let Self::Bytes(bytes) = self {
             let head = bytes.get(..8).unwrap_or(bytes);
             s = format!("[{}{}]", hex::encode(head), if bytes.len() > 8 { "..." } else { "" });
+        } else if matches!(self, Self::String(_) | Self::StringBuf(_)) {
+            // 字符串没有 get_idx 语义；此前落到下方 list 分支必然 unwrap panic，
+            // dir mount 写文件时把整个 VM 带 abort。
+            s = self.to_string();
         } else {
             let len = self.len();
             if len > 0 {
                 for idx in 0..len {
-                    s.push_str(&format!("- {}\n", self.get_idx(idx).unwrap().to_markdown()));
+                    s.push_str(&format!("- {}\n", self.get_idx(idx).unwrap_or(Self::Null.clone()).to_markdown()));
                 }
             } else {
                 s = self.to_string();

@@ -107,7 +107,9 @@ fn run_command(cmd: &Dynamic, args: &Dynamic, opts: &Dynamic) -> Dynamic {
 }
 
 fn error_result(message: &str) -> Dynamic {
-    dynamic::map!("ok" => false, "error" => message)
+    // 字段形状与成功返回保持一致：调用方（模型程序）读 out.stdout / out.code
+    // 不应拿到 Null（spawn 失败/参数错时 stdout 为空串、code 为 -1）
+    dynamic::map!("ok" => false, "error" => message, "code" => -1i64, "stdout" => "", "stderr" => "")
 }
 
 fn read_all<R: Read>(mut pipe: Option<R>) -> Vec<u8> {

@@ -183,14 +183,14 @@ impl SymbolTable {
             Type::Str => {
                 let any_method = match name {
                     "len" | "contains" | "split" | "starts_with" | "ends_with" | "is_string" | "is_null"
-                    | "trim" | "find" | "replace" | "to_lower" | "to_upper" | "substring" => format!("Any::{}", name),
+                    | "trim" | "find" | "replace" | "to_lower" | "to_upper" | "substring" | "from_yaml" | "to_yaml" => format!("Any::{}", name),
                     _ => return Err(anyhow!("未发现 symbol {:?} {}", ty, name)),
                 };
                 return Ok((usize::MAX, Type::Symbol { id: self.get_id(&any_method)?, params: Vec::new() }));
             }
             Type::List(_) | Type::Array(_, _) => {
                 let any_method = match name {
-                    "len" | "push" | "pop" | "get_idx" | "set_idx" | "slice" | "contains" | "is_list" | "is_null" | "join" => format!("Any::{}", name),
+                    "len" | "push" | "pop" | "get_idx" | "set_idx" | "slice" | "contains" | "is_list" | "is_null" | "join" | "to_yaml" | "from_yaml" => format!("Any::{}", name),
                     _ => return Err(anyhow!("未发现 symbol {:?} {}", ty, name)),
                 };
                 return Ok((usize::MAX, Type::Symbol { id: self.get_id(&any_method)?, params: Vec::new() }));

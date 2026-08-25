@@ -26,7 +26,7 @@ const ROLLBACK_DONE_PATH: &str = "local/zbuddy/rollback_done";
 const REPORTS_PATH: &str = "local/zbuddy/reports";
 
 const POLL: Duration = Duration::from_millis(20);
-const ASK_TIMEOUT: Duration = Duration::from_secs(60);
+const ASK_TIMEOUT: Duration = Duration::from_secs(300);
 const SNAPSHOT_TIMEOUT: Duration = Duration::from_secs(30);
 
 extern "C" fn agent_report(value: *const Dynamic) -> *const Dynamic {

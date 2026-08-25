@@ -1769,7 +1769,7 @@ impl Dynamic {
         } else if matches!(self, Self::String(_) | Self::StringBuf(_)) {
             // 字符串没有 get_idx 语义；此前落到下方 list 分支必然 unwrap panic，
             // dir mount 写文件时把整个 VM 带 abort。
-            s = self.to_string();
+            s = self.as_str().to_string();
         } else {
             let len = self.len();
             if len > 0 {
@@ -1777,7 +1777,7 @@ impl Dynamic {
                     s.push_str(&format!("- {}\n", self.get_idx(idx).unwrap_or(Self::Null.clone()).to_markdown()));
                 }
             } else {
-                s = self.to_string();
+                s = self.as_str().to_string();
             }
         }
         s

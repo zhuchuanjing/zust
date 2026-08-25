@@ -182,7 +182,8 @@ impl SymbolTable {
             }
             Type::Str => {
                 let any_method = match name {
-                    "len" | "contains" | "split" | "starts_with" | "ends_with" | "is_string" | "is_null" => format!("Any::{}", name),
+                    "len" | "contains" | "split" | "starts_with" | "ends_with" | "is_string" | "is_null"
+                    | "trim" | "find" | "replace" | "to_lower" | "to_upper" | "substring" => format!("Any::{}", name),
                     _ => return Err(anyhow!("未发现 symbol {:?} {}", ty, name)),
                 };
                 return Ok((usize::MAX, Type::Symbol { id: self.get_id(&any_method)?, params: Vec::new() }));

@@ -15,6 +15,7 @@ mod rt;
 use cranelift::prelude::types;
 use dynamic::{Dynamic, Type};
 pub use rt::{BuiltinFn, BuiltinFnRegistry, JITRunTime};
+mod agent_module;
 #[cfg(feature = "candle")]
 mod candle_module;
 #[cfg(feature = "db")]
@@ -29,10 +30,13 @@ mod llm_module;
 mod math_module;
 #[cfg(feature = "llm")]
 mod oss_module;
-mod root_module;
-mod agent_module;
 mod patch_module;
 mod process_module;
+#[cfg(feature = "process")]
+pub use process_module::terminate_current_thread_processes;
+mod root_module;
+#[cfg(feature = "stdio")]
+mod stdio_module;
 mod time_module;
 pub use gpu_layout::{GpuFieldLayout, GpuStructLayout};
 pub use parking_lot::RwLock;
@@ -325,7 +329,12 @@ impl JITRunTime {
         if self.compiler.sym_tab.symbols.get_id("process::run").is_ok() {
             return Ok(());
         }
-        add_native_module_fns(self, "process", &process_module::PROCESS_NATIVE)
+        add_native_module_fns(self, "process", &process_module::PROCESS_NATIVE)?;
+        // pty 是 process 的可选补充（feature "pty"）：spawn_pty/resize_pty 与
+        // spawn 共享句柄注册表，审批策略完全一致
+        #[cfg(feature = "pty")]
+        add_native_module_fns(self, "process", &process_module::PTY_NATIVE)?;
+        Ok(())
     }
 
     #[cfg(feature = "patch")]
@@ -334,6 +343,16 @@ impl JITRunTime {
             return Ok(());
         }
         add_native_module_fns(self, "patch", &patch_module::PATCH_NATIVE)
+    }
+
+    /// stdio 只提供宿主进程的文本传输；逐行与精确 UTF-8 字节读写之外，协议解析与
+    /// 分发都留给 Zust。
+    #[cfg(feature = "stdio")]
+    pub fn add_stdio(&mut self) -> Result<()> {
+        if self.compiler.sym_tab.symbols.get_id("stdio::read_line").is_ok() {
+            return Ok(());
+        }
+        add_native_module_fns(self, "stdio", &stdio_module::STDIO_NATIVE)
     }
 
     /// agent 协议模块：ask/report/checkpoint/rollback 与受信宿主的同步通信。
@@ -393,6 +412,8 @@ impl JITRunTime {
         self.add_patch()?;
         #[cfg(feature = "agent")]
         self.add_agent()?;
+        #[cfg(feature = "stdio")]
+        self.add_stdio()?;
         Ok(())
     }
 }
@@ -838,6 +859,34 @@ mod tests {
     }
 
     #[test]
+    fn any_find_honors_optional_start_offset() -> anyhow::Result<()> {
+        let vm = Vm::with_all()?;
+        vm.import_code(
+            "vm_any_find_from",
+            br#"
+            pub fn find_from(text, sub, from) { text.find(sub, from) }
+            pub fn find_plain(text, sub) { text.find(sub) }
+            "#
+            .to_vec(),
+        )?;
+        let compiled = vm.get_fn("vm_any_find_from::find_from", &[Type::Any, Type::Any, Type::Any])?;
+        let find_from: extern "C" fn(*const Dynamic, *const Dynamic, *const Dynamic) -> i64 = unsafe { std::mem::transmute(compiled.ptr()) };
+        // 返回值仍是整个文本的字符下标；偏移后找不到返回 -1
+        assert_eq!(find_from(&Dynamic::from("see http a http b"), &Dynamic::from("http"), &Dynamic::from(0)), 4);
+        assert_eq!(find_from(&Dynamic::from("see http a http b"), &Dynamic::from("http"), &Dynamic::from(10)), 11);
+        assert_eq!(find_from(&Dynamic::from("see http a http b"), &Dynamic::from("http"), &Dynamic::from(13)), -1);
+        // 多字节字符按字符计数，不是字节
+        assert_eq!(find_from(&Dynamic::from("中文 http 中文"), &Dynamic::from("http"), &Dynamic::from(3)), 3);
+        // null 偏移等同从头开始
+        assert_eq!(find_from(&Dynamic::from("abab"), &Dynamic::from("b"), &Dynamic::Null), 1);
+        // 旧的一参形式不受影响
+        let compiled = vm.get_fn("vm_any_find_from::find_plain", &[Type::Any, Type::Any])?;
+        let find_plain: extern "C" fn(*const Dynamic, *const Dynamic) -> i64 = unsafe { std::mem::transmute(compiled.ptr()) };
+        assert_eq!(find_plain(&Dynamic::from("a,b"), &Dynamic::from(",")), 1);
+        Ok(())
+    }
+
+    #[test]
     fn any_substring_clamps_out_of_range_indices() -> anyhow::Result<()> {
         let vm = Vm::with_all()?;
         vm.import_code(
@@ -854,6 +903,282 @@ mod tests {
         let compiled = vm.get_fn("vm_any_substring::middle", &[Type::Any])?;
         let middle: extern "C" fn(*const Dynamic) -> *const Dynamic = unsafe { std::mem::transmute(compiled.ptr()) };
         assert_eq!(unsafe { &*middle(&Dynamic::from("hello")) }.as_str(), "el");
+        Ok(())
+    }
+
+    #[test]
+    fn any_trim_direction_methods_match_generated_code_expectations() -> anyhow::Result<()> {
+        let vm = Vm::with_all()?;
+        vm.import_code(
+            "vm_any_trim_direction",
+            br#"
+            pub fn run() {
+                let text = "   alpha   ";
+                [text.trim_start(), text.trim_end(), text.trim_start_matches(" ")]
+            }
+            "#
+            .to_vec(),
+        )?;
+        let compiled = vm.get_fn("vm_any_trim_direction::run", &[])?;
+        let run: extern "C" fn() -> *const Dynamic = unsafe { std::mem::transmute(compiled.ptr()) };
+        let result = unsafe { &*run() };
+        assert_eq!(result.get_idx(0).unwrap().as_str(), "alpha   ");
+        assert_eq!(result.get_idx(1).unwrap().as_str(), "   alpha");
+        assert_eq!(result.get_idx(2).unwrap().as_str(), "alpha   ");
+        Ok(())
+    }
+
+    #[test]
+    fn generated_code_compatibility_sugar_runs_end_to_end() -> anyhow::Result<()> {
+        let vm = Vm::with_all()?;
+        vm.import_code(
+            "vm_generated_sugar",
+            br#"
+            pub fn direct_condition(data) {
+                if data.ok { 'yes' } else { 'no' }
+            }
+
+            pub fn direct_while(data) {
+                let count = 0i64;
+                while data.ok {
+                    count = count + 1;
+                    data.ok = false;
+                }
+                count
+            }
+
+            pub fn conveniences(data) {
+                let chosen = data.ok ? 'yes' : 'no';
+                if data.ok and !chosen.is_empty() and chosen.length() == len(chosen) {
+                    chosen.trim_end_matches('s')
+                } else {
+                    'bad'
+                }
+            }
+
+            pub fn keyword_or(left: bool, right: bool) {
+                left or right
+            }
+
+            pub fn adjacent_string_aliases() {
+                '"alpha"'.trim_matches('"').replace_all('a', 'A')
+            }
+
+            pub fn common_generated_aliases() {
+                let values = [];
+                values.append("b");
+                values.append("a");
+                values.sort();
+                let mapping = {answer: "42"};
+                let rendered = to_string(parse_int(mapping.get("answer")));
+                let dynamic_parts = "x,y".split(",");
+                let decoded = parse_json("{\"name\":\"Ada\"}");
+                values.get(0) + rendered + "abcd".substring(2) + "a/b/c".rfind("/")
+                    + dynamic_parts.get(1) + decoded.get("name")
+                    + substring("wxyz", 1, 3) + "7".parse_int() + "2.5".parse_number()
+            }
+
+            pub fn bool_result_compat(value: bool) {
+                if value.ok { value.error + "ok" } else { "bad" }
+            }
+
+            pub fn python_style_number_check(value) {
+                if not is_number(value) { "not-number" } else { "number" }
+            }
+
+            pub fn integer_check(value) {
+                is_integer(value) && value.is_integer()
+            }
+            "#
+            .to_vec(),
+        )?;
+
+        let yes = dynamic::map!("ok" => true);
+        let no = dynamic::map!("ok" => false);
+        let compiled = vm.get_fn("vm_generated_sugar::direct_condition", &[Type::Any])?;
+        let direct_condition: extern "C" fn(*const Dynamic) -> *const Dynamic = unsafe { std::mem::transmute(compiled.ptr()) };
+        assert_eq!(unsafe { &*direct_condition(&yes) }.as_str(), "yes");
+        assert_eq!(unsafe { &*direct_condition(&no) }.as_str(), "no");
+
+        let compiled = vm.get_fn("vm_generated_sugar::direct_while", &[Type::Any])?;
+        let direct_while: extern "C" fn(*const Dynamic) -> i64 = unsafe { std::mem::transmute(compiled.ptr()) };
+        let loop_data = dynamic::map!("ok" => true);
+        assert_eq!(direct_while(&loop_data), 1);
+
+        let compiled = vm.get_fn("vm_generated_sugar::conveniences", &[Type::Any])?;
+        let conveniences: extern "C" fn(*const Dynamic) -> *const Dynamic = unsafe { std::mem::transmute(compiled.ptr()) };
+        assert_eq!(unsafe { &*conveniences(&yes) }.as_str(), "ye");
+        assert_eq!(unsafe { &*conveniences(&no) }.as_str(), "bad");
+
+        let compiled = vm.get_fn("vm_generated_sugar::keyword_or", &[Type::Bool, Type::Bool])?;
+        let keyword_or: extern "C" fn(bool, bool) -> bool = unsafe { std::mem::transmute(compiled.ptr()) };
+        assert!(keyword_or(false, true));
+
+        let compiled = vm.get_fn("vm_generated_sugar::adjacent_string_aliases", &[])?;
+        let adjacent_string_aliases: extern "C" fn() -> *const Dynamic = unsafe { std::mem::transmute(compiled.ptr()) };
+        assert_eq!(unsafe { &*adjacent_string_aliases() }.as_str(), "AlphA");
+
+        let compiled = vm.get_fn("vm_generated_sugar::common_generated_aliases", &[])?;
+        let common_generated_aliases: extern "C" fn() -> *const Dynamic = unsafe { std::mem::transmute(compiled.ptr()) };
+        assert_eq!(unsafe { &*common_generated_aliases() }.as_str(), "a42cd3yAdaxy72.5");
+
+        let compiled = vm.get_fn("vm_generated_sugar::bool_result_compat", &[Type::Bool])?;
+        let bool_result_compat: extern "C" fn(bool) -> *const Dynamic = unsafe { std::mem::transmute(compiled.ptr()) };
+        assert_eq!(unsafe { &*bool_result_compat(true) }.as_str(), "ok");
+        assert_eq!(unsafe { &*bool_result_compat(false) }.as_str(), "bad");
+
+        let compiled = vm.get_fn("vm_generated_sugar::python_style_number_check", &[Type::Any])?;
+        let python_style_number_check: extern "C" fn(*const Dynamic) -> *const Dynamic = unsafe { std::mem::transmute(compiled.ptr()) };
+        let number = Dynamic::from(42i64);
+        let text = Dynamic::from("42");
+        assert_eq!(unsafe { &*python_style_number_check(&number) }.as_str(), "number");
+        assert_eq!(unsafe { &*python_style_number_check(&text) }.as_str(), "not-number");
+
+        let compiled = vm.get_fn("vm_generated_sugar::integer_check", &[Type::Any])?;
+        let integer_check: extern "C" fn(*const Dynamic) -> bool = unsafe { std::mem::transmute(compiled.ptr()) };
+        let integer = Dynamic::from(42i64);
+        let fractional = Dynamic::from(42.5f64);
+        assert!(integer_check(&integer));
+        assert!(!integer_check(&fractional));
+        assert!(!integer_check(&text));
+        Ok(())
+    }
+
+    /// 回归：`classify("a")` 先把函数编译成 Str 形参变体后，`classify(null)`（实参静态
+    /// 类型是 Any）不得复用该变体——否则 adjust_args 会把 null 经 `Any::to_string`
+    /// 强转成 "()" 字符串，让 `!x.is_string()` 守卫错误失效（zbuddy web skill 实测）。
+    /// classify 的函数体必须超过内联权重上限，否则调用点直接内联、走不到变体匹配。
+    #[test]
+    fn any_arg_does_not_reuse_str_specialized_variant() -> anyhow::Result<()> {
+        let vm = Vm::with_all()?;
+        vm.import_code(
+            "vm_any_arg_variant",
+            br#"
+            fn classify(x) {
+                if !x.is_string() || x.is_empty() {
+                    return "not-string";
+                }
+                let pad0 = x + "0";
+                let pad1 = x + "1";
+                let pad2 = x + "2";
+                let pad3 = x + "3";
+                let pad4 = x + "4";
+                let pad5 = x + "5";
+                let pad6 = x + "6";
+                let pad7 = x + "7";
+                let pad8 = x + "8";
+                let pad9 = x + "9";
+                let pad10 = x + "10";
+                let pad11 = x + "11";
+                let pad12 = x + "12";
+                let pad13 = x + "13";
+                let pad14 = x + "14";
+                let pad15 = x + "15";
+                let pad16 = x + "16";
+                let pad17 = x + "17";
+                let pad18 = x + "18";
+                let pad19 = x + "19";
+                let pad20 = x + "20";
+                let pad21 = x + "21";
+                let pad22 = x + "22";
+                let pad23 = x + "23";
+                let pad24 = x + "24";
+                let pad25 = x + "25";
+                let pad26 = x + "26";
+                let pad27 = x + "27";
+                let pad28 = x + "28";
+                let pad29 = x + "29";
+                let pad30 = x + "30";
+                let pad31 = x + "31";
+                let pad32 = x + "32";
+                let pad33 = x + "33";
+                let pad34 = x + "34";
+                let pad35 = x + "35";
+                let pad36 = x + "36";
+                let pad37 = x + "37";
+                let pad38 = x + "38";
+                let pad39 = x + "39";
+                "str:" + x
+            }
+
+            pub fn run() {
+                classify("a") + "|" + classify(null)
+            }
+            "#
+            .to_vec(),
+        )?;
+
+        let compiled = vm.get_fn("vm_any_arg_variant::run", &[])?;
+        let run: extern "C" fn() -> *const Dynamic = unsafe { std::mem::transmute(compiled.ptr()) };
+        assert_eq!(unsafe { &*run() }.as_str(), "str:a|not-string");
+        Ok(())
+    }
+
+    #[test]
+    fn any_find_index_can_feed_unicode_substring() -> anyhow::Result<()> {
+        let vm = Vm::with_all()?;
+        vm.import_code(
+            "vm_unicode_find_substring",
+            br#"
+            pub fn from_function(text) {
+                let index = text.find("pub fn");
+                text.substring(index, null)
+            }
+            "#
+            .to_vec(),
+        )?;
+        let compiled = vm.get_fn("vm_unicode_find_substring::from_function", &[Type::Any])?;
+        let from_function: extern "C" fn(*const Dynamic) -> *const Dynamic = unsafe { std::mem::transmute(compiled.ptr()) };
+        let source = Dynamic::from("/// 中文说明\npub fn run() {}");
+        assert_eq!(unsafe { &*from_function(&source) }.as_str(), "pub fn run() {}");
+        Ok(())
+    }
+
+    #[test]
+    fn utf8_byte_length_and_slice_keep_protocol_boundaries() -> anyhow::Result<()> {
+        let vm = Vm::with_all()?;
+        vm.import_code(
+            "vm_utf8_bytes",
+            br#"
+            pub fn inspect(text) {
+                {
+                    bytes: text.byte_len(),
+                    prefix: text.byte_slice(0, 6),
+                    suffix: text.byte_slice(6, null),
+                    invalid: text.byte_slice(1, 2)
+                }
+            }
+            "#
+            .to_vec(),
+        )?;
+        let compiled = vm.get_fn("vm_utf8_bytes::inspect", &[Type::Any])?;
+        let inspect: extern "C" fn(*const Dynamic) -> *const Dynamic = unsafe { std::mem::transmute(compiled.ptr()) };
+        let text = Dynamic::from("你好é");
+        let result = unsafe { &*inspect(&text) };
+        assert_eq!(result.get_dynamic("bytes").and_then(|value| value.as_int()), Some(8));
+        assert_eq!(result.get_dynamic("prefix").unwrap().as_str(), "你好");
+        assert_eq!(result.get_dynamic("suffix").unwrap().as_str(), "é");
+        assert!(result.get_dynamic("invalid").unwrap().is_null());
+        Ok(())
+    }
+
+    #[test]
+    fn let_shadowing_reads_the_newest_binding() -> anyhow::Result<()> {
+        let vm = Vm::with_all()?;
+        vm.import_code(
+            "vm_let_shadowing",
+            br#"
+            pub fn run() {
+                let value = 1;
+                let value = value + 1;
+                value
+            }
+            "#
+            .to_vec(),
+        )?;
+        let compiled = vm.get_fn("vm_let_shadowing::run", &[])?;
+        let run: extern "C" fn() -> i32 = unsafe { std::mem::transmute(compiled.ptr()) };
+        assert_eq!(run(), 2);
         Ok(())
     }
 
@@ -2316,6 +2641,86 @@ mod tests {
     }
 
     #[test]
+    fn directory_mount_file_operations_are_available_to_zust() -> anyhow::Result<()> {
+        let vm = Vm::with_all()?;
+        assert_eq!(vm.infer("root::stat", &[Type::Any])?, Type::Any);
+        assert_eq!(vm.infer("root::read_text", &[Type::Any])?, Type::Any);
+        assert_eq!(vm.infer("root::read_texts", &[Type::Any])?, Type::Any);
+        assert_eq!(vm.infer("root::read_many", &[Type::Any])?, Type::Any);
+        assert_eq!(vm.infer("root::read_files", &[Type::Any])?, Type::Any);
+        assert_eq!(vm.infer("root::read_text_files", &[Type::Any])?, Type::Any);
+        assert_eq!(vm.infer("root::write_text", &[Type::Any, Type::Any])?, Type::Any);
+        assert_eq!(vm.infer("root::write_texts", &[Type::Any])?, Type::Any);
+        assert_eq!(vm.infer("root::write_many", &[Type::Any])?, Type::Any);
+        assert_eq!(vm.infer("root::write_files", &[Type::Any])?, Type::Any);
+        assert_eq!(vm.infer("root::write_files_atomic", &[Type::Any])?, Type::Any);
+        assert_eq!(vm.infer("root::list_files", &[Type::Any, Type::Bool])?, Type::Any);
+        assert_eq!(vm.infer("root::search_text", &[Type::Any, Type::Any, Type::Bool, Type::I64])?, Type::Any);
+        assert_eq!(vm.infer("root::copy_file", &[Type::Any, Type::Any])?, Type::Bool);
+        assert_eq!(vm.infer("root::rename", &[Type::Any, Type::Any])?, Type::Bool);
+        assert_eq!(vm.infer("root::make_dir", &[Type::Any])?, Type::Bool);
+        assert_eq!(vm.infer("root::create_dir", &[Type::Any])?, Type::Bool);
+        assert_eq!(vm.infer("root::remove_dir", &[Type::Any, Type::Bool])?, Type::Bool);
+
+        let base = std::env::temp_dir().join(format!("zust-vm-root-file-ops-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&base)?;
+        let mount_name = format!("vm_dir_{}", uuid::Uuid::new_v4().simple());
+        root::mount_dir(&mount_name, base.to_str().unwrap())?;
+        let module = format!("vm_root_file_ops_{}", uuid::Uuid::new_v4().simple());
+        vm.import_code(
+            &module,
+            format!(
+                r#"
+                pub fn run() {{
+                    root::make_dir("{mount_name}/scratch");
+                    let wrote = root::write_text("{mount_name}/scratch/source.txt", "source");
+                    let read = root::read_text("{mount_name}/scratch/source.txt");
+                    let wrote_many = root::write_files_atomic([
+                        {{path: "{mount_name}/scratch/a.rs", content: "pub fn a() {{}}"}},
+                        {{path: "{mount_name}/scratch/b.rs", content: "pub fn b() {{}}"}},
+                    ]);
+                    let read_many = root::read_text_files([
+                        "{mount_name}/scratch/a.rs",
+                        "{mount_name}/scratch/b.rs",
+                    ]);
+                    let listed = root::list_files("{mount_name}/scratch", false);
+                    let found = root::search_text("{mount_name}/scratch", "our", true, 10);
+                    let copied = root::copy_file("{mount_name}/scratch/source.txt", "{mount_name}/scratch/copy.txt");
+                    let moved = root::rename("{mount_name}/scratch/copy.txt", "{mount_name}/moved.txt");
+                    let info = root::stat("{mount_name}/moved.txt");
+                    wrote.ok && read.ok && read.content == "source"
+                        && wrote_many.ok && wrote_many.changed == 2
+                        && read_many.ok && read_many.files.len() == 2
+                        && read_many.results[0].content == "pub fn a() {{}}"
+                        && read_many.contents.get("{mount_name}/scratch/b.rs").content == "pub fn b() {{}}"
+                        && listed.ok
+                        && listed.paths.contains("{mount_name}/scratch/a.rs")
+                        && listed.files.contains("{mount_name}/scratch/b.rs")
+                        && listed.relative_paths.contains("a.rs")
+                        && found.ok && found.matches.len() == 1
+                        && copied && moved && root::contains("{mount_name}/moved.txt") && info.is_file && info.len == 6
+                }}
+
+                pub fn cleanup() {{
+                    root::remove_dir("{mount_name}/scratch")
+                }}
+                "#
+            )
+            .into_bytes(),
+        )?;
+
+        let compiled = vm.get_fn(&format!("{module}::run"), &[])?;
+        let run: extern "C" fn() -> bool = unsafe { std::mem::transmute(compiled.ptr()) };
+        assert!(run());
+        let compiled = vm.get_fn(&format!("{module}::cleanup"), &[])?;
+        let cleanup: extern "C" fn() -> bool = unsafe { std::mem::transmute(compiled.ptr()) };
+        assert!(cleanup());
+        assert!(!base.join("scratch").exists());
+        std::fs::remove_dir_all(base)?;
+        Ok(())
+    }
+
+    #[test]
     fn root_mount_fjall_accepts_mount_name() -> anyhow::Result<()> {
         let vm = Vm::with_all()?;
         assert_eq!(vm.infer("root::mount_fjall", &[Type::Any, Type::Any])?, Type::Void);
@@ -2617,6 +3022,80 @@ mod tests {
         assert_eq!(compiled.ret_ty(), &Type::Bool);
         let register: extern "C" fn() -> bool = unsafe { std::mem::transmute(compiled.ptr()) };
         assert!(register());
+        Ok(())
+    }
+
+    /// 回归：add_fn 注册的 handler 若推断返回类型是 Str（或 Map/List 等非 Any 指针
+    /// 类型），send_msg 经 `dynamic::call_fn` 调用时不能把 `*const Dynamic` 堆指针
+    /// 截成 i64——zbuddy http fixture 里这类 handler 的 HTTP 响应会变成指针数字。
+    #[test]
+    fn root_send_msg_preserves_pointer_return_of_registered_fn() -> anyhow::Result<()> {
+        let _ = root::remove("local/test/send_msg_str_ret");
+        let vm = Vm::with_all()?;
+        vm.import_code(
+            "vm_send_msg_str_ret",
+            br#"
+            pub fn probe(req) {
+                "landed"
+            }
+
+            pub fn register() {
+                root::add_fn("local/test/send_msg_str_ret", "vm_send_msg_str_ret::probe")
+            }
+            "#
+            .to_vec(),
+        )?;
+
+        let compiled = vm.get_fn("vm_send_msg_str_ret::register", &[])?;
+        let register: extern "C" fn() -> bool = unsafe { std::mem::transmute(compiled.ptr()) };
+        assert!(register());
+
+        let result = root::send_msg("local/test/send_msg_str_ret", dynamic::map!())?;
+        assert_eq!(result.as_str(), "landed");
+        Ok(())
+    }
+
+    /// 回归：`loop { return v; }` 的函数尾会被编译器补隐式 `Return(None)`（`last_return`
+    /// 不认识 Loop），而 infer 里 Loop 透传 always_returns=true 使 ret_ty 非 Void——
+    /// 原先 `return_value` 对非 void 的 `Return(None)` 生成 `return_(&[])`，与签名
+    /// 不匹配，cranelift verifier 报 "arguments of return must match function signature"。
+    #[test]
+    fn loop_return_matches_fn_signature() -> anyhow::Result<()> {
+        let vm = Vm::with_all()?;
+        vm.import_code(
+            "vm_loop_return",
+            br#"
+            fn loop_map(a) {
+                loop {
+                    return {ok: true, status: 7};
+                }
+            }
+
+            fn loop_str(a) {
+                loop {
+                    return "x";
+                }
+            }
+
+            fn loop_int(a) {
+                loop {
+                    return 7;
+                }
+            }
+
+            pub fn run() {
+                let m = loop_map(1);
+                let s = loop_str(1);
+                let i = loop_int(1);
+                m.status.to_string() + "|" + s + "|" + i.to_string()
+            }
+            "#
+            .to_vec(),
+        )?;
+
+        let compiled = vm.get_fn("vm_loop_return::run", &[])?;
+        let run: extern "C" fn() -> *const Dynamic = unsafe { std::mem::transmute(compiled.ptr()) };
+        assert_eq!(unsafe { &*run() }.as_str(), "7|x|7");
         Ok(())
     }
 
@@ -4395,7 +4874,7 @@ mod tests {
         assert_eq!(result.get_dynamic("points").and_then(|value| value.as_int()), Some(13));
         let mut json = String::new();
         result.to_json(&mut json);
-        assert!(json.contains("\"points\": 13"));
+        assert!(json.contains("\"points\":13"));
 
         let clone_then_mutate = vm.get_fn("vm_root_clone_bridge::clone_then_mutate", &[Type::Any])?;
         let clone_then_mutate: extern "C" fn(*const Dynamic) -> *const Dynamic = unsafe { std::mem::transmute(clone_then_mutate.ptr()) };

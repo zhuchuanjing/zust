@@ -579,7 +579,7 @@ impl Parser {
             self.whitespace()?;
             let _ = self.keyword("mut");
             let pat = self.pattern()?;
-            self.declare_pattern_symbols(&pat)?;
+            self.declare_let_pattern_symbols(&pat)?;
             self.until(b'=')?;
             self.whitespace()?;
             let value = if self.get()? == b'{' {
@@ -594,15 +594,24 @@ impl Parser {
             } else {
                 self.get_expr()?
             };
+            let expression_end = self.current_pos();
             self.whitespace()?;
-            let close = self.take(b';').is_ok();
+            let close = self.take(b';').is_ok() || self.buf[expression_end..self.pos].contains(&b'\n');
             let stmt = Stmt::new(StmtKind::Expr(value, close), Span::new(start, self.current_pos()));
             Stmt::new(StmtKind::Let { pat, value: Box::new(stmt) }, Span::new(start, self.current_pos()))
         } else if self.keyword("break").is_ok() {
-            self.until(b';')?;
+            let end = self.current_pos();
+            self.whitespace()?;
+            if self.take(b';').is_err() && !self.buf[end..self.current_pos()].contains(&b'\n') && !matches!(self.get(), Ok(b'}')) {
+                return Err(anyhow!("break 后期望换行、; 或 }}"));
+            }
             Stmt::new(StmtKind::Break, Span::new(start, self.current_pos()))
         } else if self.keyword("continue").is_ok() {
-            self.until(b';')?;
+            let end = self.current_pos();
+            self.whitespace()?;
+            if self.take(b';').is_err() && !self.buf[end..self.current_pos()].contains(&b'\n') && !matches!(self.get(), Ok(b'}')) {
+                return Err(anyhow!("continue 后期望换行、; 或 }}"));
+            }
             Stmt::new(StmtKind::Continue, Span::new(start, self.current_pos()))
         } else if self.keyword("return").is_ok() {
             self.whitespace()?;
@@ -708,7 +717,9 @@ impl Parser {
             } else {
                 self.get_expr()?
             };
+            let expression_end = self.current_pos();
             self.whitespace()?;
+            let ended_by_newline = self.buf[expression_end..self.pos].contains(&b'\n');
             if self.is_eof() {
                 Stmt::new(StmtKind::Expr(expr, false), Span::new(start, self.current_pos()))
             } else if self.get()? == b';' {
@@ -716,6 +727,8 @@ impl Parser {
                 Stmt::new(StmtKind::Expr(expr, true), Span::new(start, self.current_pos()))
             } else if self.get()? == b'}' {
                 Stmt::new(StmtKind::Expr(expr, false), Span::new(start, self.current_pos()))
+            } else if ended_by_newline {
+                Stmt::new(StmtKind::Expr(expr, true), Span::new(start, self.current_pos()))
             } else {
                 return Err(anyhow!("未结束的表达式"));
             }

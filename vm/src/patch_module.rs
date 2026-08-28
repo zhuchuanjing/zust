@@ -114,8 +114,7 @@ fn as_text(value: &Dynamic) -> Option<String> {
     }
 }
 
-pub const PATCH_NATIVE: [(&str, &[Type], Type, *const u8); 1] =
-    [("apply", &[Type::Any, Type::Any], Type::Any, patch_apply as *const u8)];
+pub const PATCH_NATIVE: [(&str, &[Type], Type, *const u8); 1] = [("apply", &[Type::Any, Type::Any], Type::Any, patch_apply as *const u8)];
 
 #[cfg(test)]
 mod tests {
@@ -126,11 +125,7 @@ mod tests {
     }
 
     fn field(value: &Dynamic, key: &str) -> Dynamic {
-        if let Dynamic::Map(map) = value {
-            map.read().get(key).cloned().unwrap_or(Dynamic::Null)
-        } else {
-            Dynamic::Null
-        }
+        if let Dynamic::Map(map) = value { map.read().get(key).cloned().unwrap_or(Dynamic::Null) } else { Dynamic::Null }
     }
 
     #[test]

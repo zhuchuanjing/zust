@@ -20,9 +20,13 @@ path = "src/main.rs"
 [features]
 # process 是高危能力(执行任意命令),由使用方显式开启。
 process = ["vm/process"]
+pty = ["vm/pty", "process"]
+stdio = ["vm/stdio"]
 agent = ["vm/agent"]
+patch = ["vm/patch"]
 # llm 转发:脚本内直接调模型(zbuddy harness 走 vm 内注册,CLI 调试用)
 llm = ["vm/llm"]
+http = ["vm/http"]
 
 [dependencies]
 anyhow.workspace = true

@@ -103,7 +103,8 @@ impl Drop for SpanGuard {
 /// 余量,而正常代码极少超过几十层嵌套。
 pub const MAX_PARSE_DEPTH: usize = 128;
 
-const NOT_IDENT: &[u8] = &[b' ', b'\t', b'\n', b'\r', b'/', b'*', b'+', b'-', b'=', b'(', b')', b'{', b'}', b'[', b']', b';', b':', b',', b'.', b'<', b'>', b'!', b'#', b'$', b'%', b'^', b'&', b'|', b'\\', b'"', b'\''];
+const NOT_IDENT: &[u8] =
+    &[b' ', b'\t', b'\n', b'\r', b'/', b'*', b'+', b'-', b'=', b'(', b')', b'{', b'}', b'[', b']', b';', b':', b',', b'.', b'<', b'>', b'!', b'?', b'#', b'$', b'%', b'^', b'&', b'|', b'\\', b'"', b'\''];
 const WHITE_SPACE: &[u8] = &[b' ', b'\t', b'\n', b'\r'];
 const TYPES: &[(&str, Type)] = &[
     ("bool", Type::Bool),
@@ -120,7 +121,7 @@ const TYPES: &[(&str, Type)] = &[
     ("f32", Type::F32),
     ("f64", Type::F64),
 ];
-const KEYWORDS: &[&str] = &["true", "false", "null", "let", "if", "else", "for", "in", "while", "loop", "pub", "fn", "struct", "impl", "const", "static", "continue", "return", "break", "match"];
+const KEYWORDS: &[&str] = &["true", "false", "null", "let", "if", "else", "for", "in", "while", "loop", "pub", "fn", "struct", "impl", "const", "static", "continue", "return", "break", "match", "and", "or", "not"];
 
 #[macro_export]
 macro_rules! parse_list {
@@ -329,6 +330,45 @@ impl Parser {
             }
             PatternKind::Wildcard | PatternKind::Var { .. } | PatternKind::Literal(_) | PatternKind::Member(_, _) | PatternKind::Idx(_, _) => Ok(()),
         }
+    }
+
+    /// `let` 允许像 Rust 一样遮蔽同名旧绑定；同一个 pattern 内部仍拒绝重名。
+    pub(crate) fn declare_let_pattern_symbols(&mut self, pat: &Pattern) -> Result<()> {
+        let mut names = BTreeSet::new();
+        self.collect_pattern_symbols(pat, &mut names)?;
+        self.decl_scopes.last_mut().expect("parser always has a declaration scope").extend(names);
+        Ok(())
+    }
+
+    fn collect_pattern_symbols(&self, pat: &Pattern, names: &mut BTreeSet<SmolStr>) -> Result<()> {
+        match &pat.kind {
+            PatternKind::Ident { name, .. } => {
+                if !name.is_empty() && !names.insert(name.clone()) {
+                    return Err(ParserErr::at(format!("pattern 内符号 {} 重复", name), self.current_pos()).into());
+                }
+            }
+            PatternKind::Tuple(items) => {
+                for item in items {
+                    self.collect_pattern_symbols(item, names)?;
+                }
+            }
+            PatternKind::List { elems, .. } => {
+                for item in elems {
+                    self.collect_pattern_symbols(item, names)?;
+                }
+            }
+            PatternKind::Struct { fields, .. } => {
+                for (name, sub) in fields {
+                    if let Some(sub) = sub {
+                        self.collect_pattern_symbols(sub, names)?;
+                    } else if !name.is_empty() && !names.insert(name.clone()) {
+                        return Err(ParserErr::at(format!("pattern 内符号 {} 重复", name), self.current_pos()).into());
+                    }
+                }
+            }
+            PatternKind::Wildcard | PatternKind::Var { .. } | PatternKind::Literal(_) | PatternKind::Member(_, _) | PatternKind::Idx(_, _) => {}
+        }
+        Ok(())
     }
 
     fn function_body(&mut self, args: &[(SmolStr, Type)]) -> Result<Stmt> {
@@ -609,7 +649,8 @@ impl Parser {
     }
 
     pub fn string(&mut self) -> Result<SmolStr> {
-        if self.get()? != b'"' {
+        let delimiter = self.get()?;
+        if delimiter != b'"' && delimiter != b'\'' {
             return Err(ParserErr::at("非字符串", self.current_pos()).into());
         }
         self.pos += 1;
@@ -635,7 +676,7 @@ impl Parser {
                         text_buf.push(b'\t');
                         self.pos += 1;
                     }
-                    ch @ (b'\\' | b'"') => {
+                    ch @ (b'\\' | b'"' | b'\'') => {
                         text_buf.push(ch);
                         self.pos += 1;
                     }
@@ -675,7 +716,7 @@ impl Parser {
                     }
                 }
             } else {
-                if self.buf[self.pos] == b'"' {
+                if self.buf[self.pos] == delimiter {
                     self.pos += 1;
                     return Ok(String::from_utf8(text_buf)?.into());
                 }
@@ -918,6 +959,34 @@ mod tests {
         }
     }
 
+    #[test]
+    fn newline_terminates_generated_statements_without_semicolons() -> Result<()> {
+        let code = r#"
+            pub fn main() {
+                let result = load()
+                print(result)
+                if not false {
+                    report("ok")
+                    continue
+                    break
+                    return
+                }
+
+                let first = 0
+                if true {
+                    first = 1
+                }
+                let index = first
+                while index < result.length() {
+                    index = index + 1
+                }
+            }
+        "#;
+        let stmts = parse_all(code)?;
+        assert_eq!(stmts.len(), 1);
+        Ok(())
+    }
+
     // 调试构建里单帧约 16KB,病态深嵌套即便有深度守卫也会在守卫触发"之前"打爆
     // 测试线程默认 2MB 栈;因此用大栈线程跑,验证守卫确实返回 TooDeep(而非崩溃)。
     // 生产是 release 构建,单帧仅数 KB,128 层上限在 8MB 主栈上余量充足。
@@ -1134,8 +1203,8 @@ mod tests {
     }
 
     #[test]
-    fn rejects_duplicate_local_let_names() {
-        let err = parse_all(
+    fn allows_local_let_shadowing() {
+        parse_all(
             r#"
             fn open() {
                 let value = 1;
@@ -1144,8 +1213,7 @@ mod tests {
             }
             "#,
         )
-        .unwrap_err();
-        assert!(err.to_string().contains("符号 value 已经声明"));
+        .unwrap();
     }
 
     #[test]
@@ -1536,5 +1604,41 @@ mod tests {
     fn parses_bigfloat_file() {
         let code = include_str!("../../zusts/bigfloat.zs");
         parse_all(code).unwrap();
+    }
+
+    #[test]
+    fn let_may_shadow_an_earlier_binding_but_not_repeat_inside_pattern() {
+        parse_all("pub fn run() { let value = 1; let value = value + 1; value }").unwrap();
+        assert!(parse_all("pub fn run() { let (value, value) = (1, 2); }").is_err());
+    }
+
+    #[test]
+    fn word_boolean_operators_preserve_comparison_precedence() {
+        for expr in [
+            "a and b",
+            "a and b >= 0",
+            "a and b >= 0 and c",
+            "a and b >= 0 and c >= 0",
+            "verify.ok and verify.content.find(\"fib(30) =\") >= 0",
+            "verify.ok and verify.content.find(\"fib(30) =\") >= 0 and verify.content.find(\"elapsed:\") >= 0",
+        ] {
+            parse_all(&format!("pub fn check(a, b, c, verify) {{ {expr} }}")).unwrap_or_else(|error| panic!("解析 `{expr}` 失败: {error:#}"));
+        }
+        let word = r#"
+            pub fn run(verify) {
+                verify.ok
+                    and verify.content.find("fib(30) =") >= 0
+                    and verify.content.find("elapsed:") >= 0
+            }
+        "#;
+        let symbolic = r#"
+            pub fn run(verify) {
+                verify.ok
+                    && verify.content.find("fib(30) =") >= 0
+                    && verify.content.find("elapsed:") >= 0
+            }
+        "#;
+        parse_all(symbolic).expect("符号布尔运算应能解析");
+        parse_all(word).expect("单词布尔运算应与符号运算保持相同优先级");
     }
 }

@@ -533,8 +533,326 @@ pub fn get(name: &str) -> Result<Dynamic> {
 }
 
 pub fn dir(name: &str, all: bool) -> Result<Dynamic> {
+    let mount_root;
+    let lookup = if name.contains('/') {
+        name
+    } else {
+        mount_root = format!("{name}/");
+        &mount_root
+    };
+    let (m, relative_name) = get_mount(lookup)?;
+    m.dir(relative_name, all).map(Into::into)
+}
+
+/// 返回目录挂载中一个路径的文件系统信息。不存在不是错误，返回
+/// `{exists: false, ...}`，方便 Zust 程序直接分支。
+pub fn stat(name: &str) -> Result<Dynamic> {
     let (m, name) = get_mount(name)?;
-    m.dir(name, all).map(Into::into)
+    let Mount::Dir { base } = m else {
+        return Err(anyhow!("stat 仅支持目录挂载"));
+    };
+    let path = crate::mount::safe_path(&base, name).ok_or_else(|| anyhow!("path 非法: {}", name))?;
+    let Ok(metadata) = std::fs::metadata(path) else {
+        return Ok(dynamic::map!("exists" => false, "is_file" => false, "is_dir" => false, "len" => 0_i64));
+    };
+    Ok(dynamic::map!(
+        "exists" => true,
+        "is_file" => metadata.is_file(),
+        "is_dir" => metadata.is_dir(),
+        "len" => metadata.len() as i64
+    ))
+}
+
+/// 按 UTF-8 原文读取目录挂载中的文件，不按扩展名解码。
+///
+/// `root::get` 适合结构化数据，`read_text` 则给代码代理保留精确字节语义：
+/// JSON/YAML 也不会被转换成 map/list 后再序列化。
+pub fn read_text(name: &str) -> Result<String> {
+    let (m, name) = get_mount(name)?;
+    let Mount::Dir { base } = m else {
+        return Err(anyhow!("read_text 仅支持目录挂载"));
+    };
+    let path = crate::mount::safe_path(&base, name).ok_or_else(|| anyhow!("path 非法: {}", name))?;
+    if !path.is_file() {
+        return Err(anyhow!("{} 不是文件", name));
+    }
+    std::fs::read_to_string(path).map_err(Into::into)
+}
+
+/// 一次读取多个目录挂载文件。任一文件失败时整体返回错误，不返回半份结果。
+pub fn read_texts(names: &[String]) -> Result<Vec<(String, String)>> {
+    let mut files = Vec::with_capacity(names.len());
+    for name in names {
+        let content = read_text(name).map_err(|error| anyhow!("读取 {} 失败: {}", name, error))?;
+        files.push((name.clone(), content));
+    }
+    Ok(files)
+}
+
+/// 把 UTF-8 原文原子写入目录挂载；不按扩展名做 JSON/YAML 编码。
+pub fn write_text(name: &str, content: &str) -> Result<bool> {
+    let (m, name) = get_mount(name)?;
+    let Mount::Dir { base } = m else {
+        return Err(anyhow!("write_text 仅支持目录挂载"));
+    };
+    let path = crate::mount::safe_path(&base, name).ok_or_else(|| anyhow!("path 非法: {}", name))?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let file_name = path.file_name().and_then(|value| value.to_str()).unwrap_or("root-write");
+    let temp = path.with_file_name(format!(".{file_name}.{}.tmp", std::process::id()));
+    std::fs::write(&temp, content.as_bytes())?;
+    if let Err(error) = std::fs::rename(&temp, &path) {
+        let _ = std::fs::remove_file(temp);
+        return Err(error.into());
+    }
+    Ok(true)
+}
+
+/// 把多个 UTF-8 文件作为一个事务写入目录挂载。
+///
+/// 所有目标先完成路径校验和临时文件写入，再逐个 rename 提交；任何一步失败都会
+/// 清理临时文件并恢复全部目标的原始字节，不留下部分更新。
+pub fn write_texts(writes: &[(String, String)]) -> Result<Vec<String>> {
+    struct Staged {
+        name: String,
+        path: std::path::PathBuf,
+        temp: std::path::PathBuf,
+        original: Option<Vec<u8>>,
+    }
+
+    let mut paths = std::collections::BTreeSet::new();
+    let mut resolved = Vec::with_capacity(writes.len());
+    for (name, content) in writes {
+        let (mount, relative) = get_mount(name)?;
+        let Mount::Dir { base } = mount else {
+            return Err(anyhow!("write_texts 仅支持目录挂载: {}", name));
+        };
+        let path = crate::mount::safe_path(&base, relative).ok_or_else(|| anyhow!("path 非法: {}", name))?;
+        if !paths.insert(path.clone()) {
+            return Err(anyhow!("重复目标路径: {}", name));
+        }
+        if path.exists() && !path.is_file() {
+            return Err(anyhow!("{} 不是文件", name));
+        }
+        resolved.push((name.clone(), content, path));
+    }
+
+    let transaction = uuid::Uuid::new_v4().simple().to_string();
+    let mut staged: Vec<Staged> = Vec::with_capacity(resolved.len());
+    for (index, (name, content, path)) in resolved.into_iter().enumerate() {
+        if let Some(parent) = path.parent() {
+            if let Err(error) = std::fs::create_dir_all(parent) {
+                for item in &staged {
+                    let _ = std::fs::remove_file(&item.temp);
+                }
+                return Err(error.into());
+            }
+        }
+        let original = if path.is_file() { Some(std::fs::read(&path)?) } else { None };
+        let file_name = path.file_name().and_then(|value| value.to_str()).unwrap_or("root-write-many");
+        let temp = path.with_file_name(format!(".{file_name}.{transaction}.{index}.tmp"));
+        if let Err(error) = std::fs::write(&temp, content.as_bytes()) {
+            for item in &staged {
+                let _ = std::fs::remove_file(&item.temp);
+            }
+            return Err(error.into());
+        }
+        staged.push(Staged { name, path, temp, original });
+    }
+
+    for index in 0..staged.len() {
+        if let Err(error) = std::fs::rename(&staged[index].temp, &staged[index].path) {
+            for item in &staged {
+                match &item.original {
+                    Some(bytes) => {
+                        let _ = std::fs::write(&item.path, bytes);
+                    }
+                    None => {
+                        let _ = std::fs::remove_file(&item.path);
+                    }
+                }
+                let _ = std::fs::remove_file(&item.temp);
+            }
+            return Err(anyhow!("提交 {} 失败，已恢复事务: {}", staged[index].name, error));
+        }
+    }
+
+    Ok(staged.into_iter().map(|item| item.name).collect())
+}
+
+/// 在文件或目录中做字面文本搜索，返回稳定的结构化命中。
+/// `path` 相对搜索根，行列从 1 开始；达到 `max_results` 时停止并标记 truncated。
+pub fn search_text(name: &str, needle: &str, recursive: bool, max_results: i64) -> Result<Dynamic> {
+    if needle.is_empty() {
+        return Err(anyhow!("needle 不能为空"));
+    }
+    if max_results <= 0 {
+        return Err(anyhow!("max_results 必须大于 0"));
+    }
+    // mount 根本身也是合法搜索目录。`search_text("ws", ...)` 与
+    // `search_text("ws/", ...)` 应等价，不要求调用者补无语义的尾斜杠。
+    let mount_root;
+    let lookup = if name.contains('/') {
+        name
+    } else {
+        mount_root = format!("{name}/");
+        &mount_root
+    };
+    let (m, relative_name) = get_mount(lookup)?;
+    let Mount::Dir { base } = m else {
+        return Err(anyhow!("search_text 仅支持目录挂载"));
+    };
+    let root_path = crate::mount::safe_path(&base, relative_name).ok_or_else(|| anyhow!("path 非法: {}", relative_name))?;
+    if !root_path.exists() {
+        return Err(anyhow!("{} 不存在", relative_name));
+    }
+
+    let mut files = Vec::new();
+    collect_search_files(&root_path, std::path::Path::new(""), recursive, &mut files)?;
+    files.sort_by(|left, right| left.0.cmp(&right.0));
+
+    let limit = max_results as usize;
+    let mut matches = Vec::new();
+    let mut truncated = false;
+    'files: for (relative, path) in files {
+        let Ok(content) = std::fs::read_to_string(path) else { continue };
+        for (line_index, line) in content.lines().enumerate() {
+            for (column, _) in line.match_indices(needle) {
+                if matches.len() >= limit {
+                    truncated = true;
+                    break 'files;
+                }
+                matches.push(dynamic::map!(
+                    "path" => relative.clone(),
+                    "line" => line_index as i64 + 1,
+                    "column" => column as i64 + 1,
+                    "text" => line.to_string()
+                ));
+            }
+        }
+    }
+    Ok(dynamic::map!("matches" => matches, "truncated" => truncated))
+}
+
+fn collect_search_files(path: &std::path::Path, relative: &std::path::Path, recursive: bool, files: &mut Vec<(String, std::path::PathBuf)>) -> Result<()> {
+    if path.is_file() {
+        let display = if relative.as_os_str().is_empty() { path.file_name().and_then(|value| value.to_str()).unwrap_or("").to_string() } else { relative.to_string_lossy().into_owned() };
+        files.push((display, path.to_path_buf()));
+        return Ok(());
+    }
+    if !path.is_dir() {
+        return Err(anyhow!("搜索路径既不是文件也不是目录"));
+    }
+    let mut entries = std::fs::read_dir(path)?.collect::<std::io::Result<Vec<_>>>()?;
+    entries.sort_by_key(|entry| entry.file_name());
+    for entry in entries {
+        let file_type = entry.file_type()?;
+        if file_type.is_symlink() {
+            continue;
+        }
+        let child_relative = relative.join(entry.file_name());
+        if file_type.is_file() {
+            files.push((child_relative.to_string_lossy().into_owned(), entry.path()));
+        } else if recursive && file_type.is_dir() {
+            collect_search_files(&entry.path(), &child_relative, true, files)?;
+        }
+    }
+    Ok(())
+}
+
+/// 在目录挂载之间复制单个文件。目标写入沿用 `root::add` 的临时文件 +
+/// rename 方式，避免复制失败留下半文件。
+pub fn copy_file(source: &str, target: &str) -> Result<bool> {
+    let (source_mount, source_name) = get_mount(source)?;
+    let (target_mount, target_name) = get_mount(target)?;
+    let Mount::Dir { base: source_base } = source_mount else {
+        return Err(anyhow!("copy_file 源仅支持目录挂载"));
+    };
+    let Mount::Dir { base: target_base } = target_mount else {
+        return Err(anyhow!("copy_file 目标仅支持目录挂载"));
+    };
+    let source_path = crate::mount::safe_path(&source_base, source_name).ok_or_else(|| anyhow!("源 path 非法: {}", source_name))?;
+    let target_path = crate::mount::safe_path(&target_base, target_name).ok_or_else(|| anyhow!("目标 path 非法: {}", target_name))?;
+    if !source_path.is_file() {
+        return Err(anyhow!("{} 不是文件", source));
+    }
+    if let Some(parent) = target_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let file_name = target_path.file_name().and_then(|name| name.to_str()).unwrap_or("root-copy");
+    let temp = target_path.with_file_name(format!(".{file_name}.{}.tmp", std::process::id()));
+    std::fs::copy(source_path, &temp)?;
+    if let Err(error) = std::fs::rename(&temp, &target_path) {
+        let _ = std::fs::remove_file(temp);
+        return Err(error.into());
+    }
+    Ok(true)
+}
+
+/// 移动目录挂载中的文件或目录；目标父目录不存在时自动创建。
+pub fn rename(source: &str, target: &str) -> Result<bool> {
+    let (source_mount, source_name) = get_mount(source)?;
+    let (target_mount, target_name) = get_mount(target)?;
+    let Mount::Dir { base: source_base } = source_mount else {
+        return Err(anyhow!("rename 源仅支持目录挂载"));
+    };
+    let Mount::Dir { base: target_base } = target_mount else {
+        return Err(anyhow!("rename 目标仅支持目录挂载"));
+    };
+    let source_path = crate::mount::safe_path(&source_base, source_name).ok_or_else(|| anyhow!("源 path 非法: {}", source_name))?;
+    let target_path = crate::mount::safe_path(&target_base, target_name).ok_or_else(|| anyhow!("目标 path 非法: {}", target_name))?;
+    if !source_path.exists() {
+        return Err(anyhow!("{} 不存在", source));
+    }
+    if let Some(parent) = target_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::rename(source_path, target_path)?;
+    Ok(true)
+}
+
+/// 递归创建目录挂载中的目录。
+pub fn make_dir(name: &str) -> Result<bool> {
+    let (m, name) = get_mount(name)?;
+    let Mount::Dir { base } = m else {
+        return Err(anyhow!("make_dir 仅支持目录挂载"));
+    };
+    let path = crate::mount::safe_path(&base, name).ok_or_else(|| anyhow!("path 非法: {}", name))?;
+    std::fs::create_dir_all(path)?;
+    Ok(true)
+}
+
+/// 创建一个目录；目标已存在时返回错误。适合用目录作为跨进程互斥锁。
+pub fn create_dir(name: &str) -> Result<bool> {
+    let (m, name) = get_mount(name)?;
+    let Mount::Dir { base } = m else {
+        return Err(anyhow!("create_dir 仅支持目录挂载"));
+    };
+    let path = crate::mount::safe_path(&base, name).ok_or_else(|| anyhow!("path 非法: {}", name))?;
+    std::fs::create_dir(path)?;
+    Ok(true)
+}
+
+/// 删除目录挂载中的目录。拒绝空相对路径，不能删除整个 mount 根。
+pub fn remove_dir(name: &str, recursive: bool) -> Result<bool> {
+    let (m, name) = get_mount(name)?;
+    let Mount::Dir { base } = m else {
+        return Err(anyhow!("remove_dir 仅支持目录挂载"));
+    };
+    if name.is_empty() || name == "." {
+        return Err(anyhow!("不能删除 mount 根目录"));
+    }
+    let path = crate::mount::safe_path(&base, name).ok_or_else(|| anyhow!("path 非法: {}", name))?;
+    if !path.is_dir() {
+        return Err(anyhow!("{} 不是目录", name));
+    }
+    if recursive {
+        std::fs::remove_dir_all(path)?;
+    } else {
+        std::fs::remove_dir(path)?;
+    }
+    Ok(true)
 }
 
 pub fn keys(name: &str) -> Result<Dynamic> {
@@ -856,6 +1174,37 @@ mod tests {
     }
 
     #[test]
+    fn push_then_get_list_roundtrip() {
+        let name = format!("local/test/getlist-{}", std::process::id());
+        let _ = remove(&name);
+        add_list(&name).unwrap();
+        assert!(push(&name, Dynamic::from("one")).is_ok());
+        assert!(push(&name, Dynamic::from("two")).is_ok());
+        let items = get_list(&name).unwrap();
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0].as_str(), "one");
+        assert_eq!(items[1].as_str(), "two");
+        let _ = remove(&name);
+    }
+
+    #[test]
+    fn get_on_list_node_reports_missing() {
+        // 语义记录：root::get 只认 Node::Object；List 节点对 get 不可见，
+        // 批量读必须走 get_list。固化这个不对称，防止被无声改变。
+        let name = format!("local/test/getlist-invisible-{}", std::process::id());
+        let _ = remove(&name);
+        add_list(&name).unwrap();
+        assert!(push(&name, Dynamic::from("x")).is_ok());
+        assert!(get(&name).is_err());
+        let _ = remove(&name);
+    }
+
+    #[test]
+    fn get_list_on_missing_node_errs() {
+        assert!(get_list("local/test/getlist-no-such-node").is_err());
+    }
+
+    #[test]
     fn add_native_accepts_closure_with_captured_state() {
         // 挂带捕获环境的闭包:原先 Object::Native 是 fn 指针,不支持闭包;
         // 改成 NativeHandler(Arc<dyn Fn>) 后应能挂任意 Fn 闭包。
@@ -1031,6 +1380,93 @@ mod tests {
         let mut all = (0..all.len()).map(|idx| all.get_idx(idx).unwrap().as_str().to_string()).collect::<Vec<_>>();
         all.sort();
         assert_eq!(all, vec!["a.txt", "sub", "sub/deep", "sub/deep/leaf.txt", "sub/item.txt"]);
+
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn directory_mount_file_operations_stay_inside_mount() {
+        let base = std::env::temp_dir().join(format!("zust-root-file-ops-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&base).unwrap();
+        std::fs::write(base.join("source.txt"), "source").unwrap();
+        let mount_name = format!("dir_{}", uuid::Uuid::new_v4().simple());
+        assert!(mount_dir(&mount_name, base.to_str().unwrap()).unwrap());
+
+        let source = format!("{mount_name}/source.txt");
+        let copied = format!("{mount_name}/nested/copied.txt");
+        let moved = format!("{mount_name}/moved.txt");
+        assert!(contains(&source));
+        assert!(stat(&source).unwrap().get_dynamic("is_file").unwrap().as_bool().unwrap());
+        assert!(copy_file(&source, &copied).unwrap());
+        assert_eq!(std::fs::read_to_string(base.join("nested/copied.txt")).unwrap(), "source");
+        assert!(rename(&copied, &moved).unwrap());
+        assert!(!contains(&copied));
+        assert!(contains(&moved));
+
+        let scratch = format!("{mount_name}/scratch/deep");
+        assert!(make_dir(&scratch).unwrap());
+        std::fs::write(base.join("scratch/deep/item.txt"), "item").unwrap();
+        let lock = format!("{mount_name}/lock");
+        assert!(create_dir(&lock).unwrap());
+        assert!(create_dir(&lock).is_err());
+        assert!(remove_dir(&format!("{mount_name}/scratch"), true).unwrap());
+        assert!(!base.join("scratch").exists());
+        assert!(remove_dir(&format!("{mount_name}/"), true).is_err());
+        assert!(copy_file(&format!("{mount_name}/../outside"), &copied).is_err());
+
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn directory_mount_text_operations_preserve_source_and_search_hits() {
+        let base = std::env::temp_dir().join(format!("zust-root-text-ops-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(base.join("src")).unwrap();
+        let mount_name = format!("dir_{}", uuid::Uuid::new_v4().simple());
+        assert!(mount_dir(&mount_name, base.to_str().unwrap()).unwrap());
+
+        let config = format!("{mount_name}/src/config.yaml");
+        assert!(write_text(&config, "port: \"8080\"\n").unwrap());
+        assert_eq!(read_text(&config).unwrap(), "port: \"8080\"\n");
+
+        let source = format!("{mount_name}/src/lib.rs");
+        write_text(&source, "pub const A: i32 = 1;\nconst B: i32 = 2;\n").unwrap();
+        let found = search_text(&format!("{mount_name}/src"), "const ", true, 10).unwrap();
+        let hits = found.get_dynamic("matches").unwrap();
+        assert_eq!(hits.len(), 2);
+        assert_eq!(hits.get_idx(0).unwrap().get_dynamic("path").unwrap().as_str(), "lib.rs");
+        assert_eq!(hits.get_idx(1).unwrap().get_dynamic("line").unwrap().as_int(), Some(2));
+        assert!(!found.get_dynamic("truncated").unwrap().as_bool().unwrap());
+        assert!(search_text(&format!("{mount_name}/src"), "const ", true, 1).unwrap().get_dynamic("truncated").unwrap().as_bool().unwrap());
+
+        let from_mount_root = search_text(&mount_name, "const ", true, 10).unwrap();
+        let root_hits = from_mount_root.get_dynamic("matches").unwrap();
+        assert_eq!(root_hits.len(), 2);
+        assert_eq!(root_hits.get_idx(0).unwrap().get_dynamic("path").unwrap().as_str(), "src/lib.rs");
+
+        assert!(read_text(&format!("{mount_name}/../outside")).is_err());
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn directory_mount_multi_file_write_is_transactional() {
+        let base = std::env::temp_dir().join(format!("zust-root-text-transaction-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&base).unwrap();
+        std::fs::write(base.join("a.rs"), "old a").unwrap();
+        std::fs::write(base.join("b.rs"), "old b").unwrap();
+        let mount_name = format!("dir_{}", uuid::Uuid::new_v4().simple());
+        assert!(mount_dir(&mount_name, base.to_str().unwrap()).unwrap());
+
+        let a = format!("{mount_name}/a.rs");
+        let b = format!("{mount_name}/b.rs");
+        let changed = write_texts(&[(a.clone(), "new a".to_string()), (b.clone(), "new b".to_string())]).unwrap();
+        assert_eq!(changed, vec![a.clone(), b.clone()]);
+        assert_eq!(read_texts(&[a.clone(), b.clone()]).unwrap(), vec![(a.clone(), "new a".to_string()), (b, "new b".to_string())]);
+
+        std::fs::write(base.join("blocker"), "file, not directory").unwrap();
+        let failed = write_texts(&[(a.clone(), "partial".to_string()), (format!("{mount_name}/blocker/child.rs"), "never".to_string())]);
+        assert!(failed.is_err());
+        assert_eq!(read_text(&a).unwrap(), "new a");
+        assert!(!base.join("blocker/child.rs").exists());
 
         let _ = std::fs::remove_dir_all(base);
     }

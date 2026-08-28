@@ -269,7 +269,7 @@ impl Compiler {
                 Some(ListElemState::Unknown | ListElemState::Mixed) => Type::Any,
                 None => elem_ty.clone(),
             })),
-            "push" => {
+            "push" | "append" => {
                 let pushed_ty = params
                     .first()
                     .map(|param| {
@@ -307,8 +307,10 @@ impl Compiler {
                 }
                 Ok(Some(Type::Void))
             }
-            "len" => Ok(Some(Type::I32)),
-            "contains" | "is_list" | "is_null" => Ok(Some(Type::Bool)),
+            "insert" => Ok(Some(Type::Bool)),
+            "len" | "length" => Ok(Some(Type::I32)),
+            "byte_len" => Ok(Some(Type::I64)),
+            "contains" | "is_list" | "is_null" | "is_number" | "is_integer" | "is_empty" => Ok(Some(Type::Bool)),
             _ => Ok(None),
         }
     }
@@ -378,7 +380,7 @@ impl Compiler {
             }
             StmtKind::If { cond, then_body, else_body } => {
                 let cond_ty = self.infer_expr(cond)?;
-                if cond_ty != Type::Bool {
+                if !matches!(cond_ty, Type::Bool | Type::Any) {
                     return Err(Self::semantic_error(cond.span, format!("条件表达式必须是布尔类型，实际是 {:?}", cond_ty)));
                 }
                 let (mut ret, then_returns) = self.infer_returns(then_body, tail)?;
@@ -402,7 +404,7 @@ impl Compiler {
             }
             StmtKind::While { cond, body } => {
                 let cond_ty = self.infer_expr(cond)?;
-                if cond_ty != Type::Bool {
+                if !matches!(cond_ty, Type::Bool | Type::Any) {
                     return Err(Self::semantic_error(cond.span, format!("条件表达式必须是布尔类型，实际是 {:?}", cond_ty)));
                 }
                 self.infer_returns(body, false).map(|(ty, _)| (ty, false))
@@ -991,7 +993,7 @@ impl Compiler {
             }
             StmtKind::While { cond, body } => {
                 let cond_ty = self.infer_expr(cond)?;
-                if cond_ty != Type::Bool {
+                if !matches!(cond_ty, Type::Bool | Type::Any) {
                     return Err(Self::semantic_error(cond.span, format!("条件表达式必须是布尔类型，实际是 {:?}", cond_ty)));
                 }
                 self.infer_stmt(body)

@@ -29,13 +29,15 @@ const POLL: Duration = Duration::from_millis(20);
 const ASK_TIMEOUT: Duration = Duration::from_secs(300);
 const SNAPSHOT_TIMEOUT: Duration = Duration::from_secs(30);
 
-extern "C" fn agent_report(value: *const Dynamic) -> *const Dynamic {
+extern "C" fn agent_report(value: *const Dynamic) -> bool {
     let value = unsafe { (&*value).clone() };
     if root::push(REPORTS_PATH, value.clone()).is_err() {
         let _ = root::add_list(REPORTS_PATH);
-        let _ = root::push(REPORTS_PATH, value);
+        if root::push(REPORTS_PATH, value).is_err() {
+            return false;
+        }
     }
-    alloc_dynamic(Dynamic::Bool(true))
+    true
 }
 
 extern "C" fn agent_ask(question: *const Dynamic, context: *const Dynamic) -> *const Dynamic {
@@ -55,8 +57,7 @@ extern "C" fn agent_checkpoint(label: *const Dynamic) -> *const Dynamic {
     let label = unsafe { (&*label).clone() };
     let _ = root::remove(CHECKPOINT_DONE_PATH);
     let _ = root::add(CHECKPOINT_PATH, root::Object::Value(dynamic::map!("label" => label)));
-    let done = wait_map(CHECKPOINT_DONE_PATH, SNAPSHOT_TIMEOUT)
-        .unwrap_or_else(|| dynamic::map!("ok" => false, "error" => "checkpoint timeout"));
+    let done = wait_map(CHECKPOINT_DONE_PATH, SNAPSHOT_TIMEOUT).unwrap_or_else(|| dynamic::map!("ok" => false, "error" => "checkpoint timeout"));
     let _ = root::remove(CHECKPOINT_DONE_PATH);
     alloc_dynamic(done)
 }
@@ -65,8 +66,7 @@ extern "C" fn agent_rollback(id: *const Dynamic) -> *const Dynamic {
     let id = unsafe { (&*id).clone() };
     let _ = root::remove(ROLLBACK_DONE_PATH);
     let _ = root::add(ROLLBACK_PATH, root::Object::Value(dynamic::map!("id" => id)));
-    let done = wait_map(ROLLBACK_DONE_PATH, SNAPSHOT_TIMEOUT)
-        .unwrap_or_else(|| dynamic::map!("ok" => false, "error" => "rollback timeout"));
+    let done = wait_map(ROLLBACK_DONE_PATH, SNAPSHOT_TIMEOUT).unwrap_or_else(|| dynamic::map!("ok" => false, "error" => "rollback timeout"));
     let _ = root::remove(ROLLBACK_DONE_PATH);
     alloc_dynamic(done)
 }
@@ -99,11 +99,7 @@ mod tests {
     use super::*;
 
     fn field(value: &Dynamic, key: &str) -> Dynamic {
-        if let Dynamic::Map(map) = value {
-            map.read().get(key).cloned().unwrap_or(Dynamic::Null)
-        } else {
-            Dynamic::Null
-        }
+        if let Dynamic::Map(map) = value { map.read().get(key).cloned().unwrap_or(Dynamic::Null) } else { Dynamic::Null }
     }
 
     /// ask 的超时拒绝路径：宿主不写 ask_reply 时 fail-closed。
@@ -118,5 +114,17 @@ mod tests {
         let result = wait_map("local/zbuddy/test_absent", Duration::from_millis(80));
         assert!(result.is_none());
         assert!(start.elapsed() >= Duration::from_millis(70));
+    }
+
+    #[test]
+    fn report_returns_true_and_appends_to_the_host_queue() {
+        let marker = format!("report-{}", std::process::id());
+        let value: Dynamic = dynamic::map!("marker" => marker.clone());
+        assert!(agent_report(&value));
+
+        let (mount, name) = root::get_mount(REPORTS_PATH).expect("reports mount");
+        let count = mount.len(name).expect("reports length");
+        let found = (0..count).any(|idx| mount.get_idx(name, idx, |item| item.value()).ok().and_then(|item| item.get_dynamic("marker")).is_some_and(|value| value.as_str() == marker));
+        assert!(found);
     }
 }

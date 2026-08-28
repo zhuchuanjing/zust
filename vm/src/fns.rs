@@ -123,7 +123,10 @@ impl JITRunTime {
                             let mut real_types = Vec::new();
                             for (ty1, ty2) in tys.iter().zip(want_tys.iter()) {
                                 if ty1 != ty2 {
-                                    if ty1.is_any() || ty2.is_any() {
+                                    // 只有变体形参是 Any（内部动态分派）才能承接其它静态类型的实参。
+                                    // 反向（实参是 Any、变体是具体类型）不能复用：adjust_args 会把
+                                    // Any 强转成具体类型（如 null → Str 变成 "()"），改变动态语义。
+                                    if ty1.is_any() {
                                         real_types.push(ty1.clone());
                                     }
                                     //ty1 是目的类型

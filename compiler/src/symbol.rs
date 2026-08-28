@@ -162,6 +162,11 @@ impl SymbolTable {
     }
 
     pub fn get_field(&self, ty: &Type, name: &str) -> Result<(usize, Type)> {
+        // 这些转换/复制方法适用于所有值。统一经 Any 原语实现，避免整数、Bool、
+        // 字符串等静态类型各自重复暴露一套同义方法。
+        if matches!(name, "clone" | "to_string" | "to_int" | "parse_int" | "to_number" | "parse_number" | "to_json") {
+            return Ok((usize::MAX, Type::Symbol { id: self.get_id(&format!("Any::{}", name))?, params: Vec::new() }));
+        }
         //原生类型的函数 is_map is_list 或者 sqrt
         let id = match ty {
             Type::Any => {
@@ -172,8 +177,9 @@ impl SymbolTable {
                     return Ok((idx, field_ty.clone()));
                 }
                 match name {
-                    "is_map" | "is_list" | "is_string" | "is_null" | "contains" | "starts_with" | "ends_with" => return Ok((usize::MAX, Type::Bool)),
-                    "len" => return Ok((usize::MAX, Type::I32)),
+                    "is_map" | "is_list" | "is_string" | "is_null" | "is_number" | "is_integer" | "is_empty" | "contains" | "starts_with" | "ends_with" => return Ok((usize::MAX, Type::Bool)),
+                    "len" | "length" => return Ok((usize::MAX, Type::I32)),
+                    "byte_len" => return Ok((usize::MAX, Type::I64)),
                     _ => return Ok((usize::MAX, Type::Any)),
                 }
             }
@@ -182,15 +188,31 @@ impl SymbolTable {
             }
             Type::Str => {
                 let any_method = match name {
-                    "len" | "contains" | "split" | "starts_with" | "ends_with" | "is_string" | "is_null"
-                    | "trim" | "find" | "replace" | "to_lower" | "to_upper" | "substring" | "from_yaml" | "to_yaml" => format!("Any::{}", name),
+                    "len" | "length" | "is_empty" | "contains" | "split" | "starts_with" | "ends_with" | "is_string" | "is_null" | "trim" | "trim_start" | "trim_end" | "trim_matches" | "trim_start_matches"
+                    | "trim_end_matches" | "find" | "rfind" | "replace" | "replace_all" | "to_lower" | "to_upper" | "substring" | "byte_len" | "byte_slice" | "from_yaml" | "to_yaml" | "from_json" => {
+                        format!("Any::{}", name)
+                    }
                     _ => return Err(anyhow!("未发现 symbol {:?} {}", ty, name)),
                 };
                 return Ok((usize::MAX, Type::Symbol { id: self.get_id(&any_method)?, params: Vec::new() }));
             }
             Type::List(_) | Type::Array(_, _) => {
                 let any_method = match name {
-                    "len" | "push" | "pop" | "get_idx" | "set_idx" | "slice" | "contains" | "is_list" | "is_null" | "join" | "to_yaml" | "from_yaml" => format!("Any::{}", name),
+                    "append" | "add" => "Any::push".to_string(),
+                    "get" => "Any::get_idx".to_string(),
+                    "set" => "Any::set_idx".to_string(),
+                    "contains_key" => "Any::contains".to_string(),
+                    "len" | "length" | "is_empty" | "push" | "pop" | "insert" | "get_idx" | "set_idx" | "slice" | "contains" | "is_list" | "is_null" | "join" | "sort" | "to_yaml" | "from_yaml" => {
+                        format!("Any::{}", name)
+                    }
+                    _ => return Err(anyhow!("未发现 symbol {:?} {}", ty, name)),
+                };
+                return Ok((usize::MAX, Type::Symbol { id: self.get_id(&any_method)?, params: Vec::new() }));
+            }
+            Type::Map => {
+                let any_method = match name {
+                    "contains_key" => "Any::contains".to_string(),
+                    "len" | "length" | "is_empty" | "keys" | "contains" | "get" | "get_key" | "set" | "set_key" | "del_key" | "is_map" | "is_null" | "to_yaml" | "from_yaml" => format!("Any::{}", name),
                     _ => return Err(anyhow!("未发现 symbol {:?} {}", ty, name)),
                 };
                 return Ok((usize::MAX, Type::Symbol { id: self.get_id(&any_method)?, params: Vec::new() }));

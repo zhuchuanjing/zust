@@ -1124,7 +1124,10 @@ impl Mount<Object> {
             return Err(anyhow!("{} 不是文件", name));
         }
         let bytes = std::fs::read(&path).map_err(|e| anyhow!("读取 {} 失败: {}", path.display(), e))?;
-        let dynamic = decode_value(name, &bytes).map_err(|e| anyhow!("解析 {} 失败: {}", name, e))?;
+        // 删除是文件系统操作，不应要求文件内容能被 Dynamic 解码。模型经常需要
+        // 清理编译产物、图片和其他二进制文件；这些文件没有可返回的结构化值，
+        // 删除成功后返回 Null 即可。可解码的文本/YAML/JSON 仍保留旧的返回值语义。
+        let dynamic = decode_value(name, &bytes).unwrap_or(Dynamic::Null);
         std::fs::remove_file(&path).map_err(|e| anyhow!("删除 {} 失败: {}", path.display(), e))?;
         Ok(dynamic)
     }
@@ -1529,6 +1532,18 @@ mod tests {
         let removed = mount.dir_remove("x.json").unwrap();
         assert_eq!(removed.get_dynamic("hello").map(|d| d.as_str().to_string()), Some("world".to_string()));
         assert!(!base.join("x.json").exists());
+
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn mount_dir_remove_deletes_non_dynamic_binary_file() {
+        let (mount, base) = fresh_dir_mount("ddd");
+        std::fs::write(base.join("program"), [0xff, 0xfe, 0x00, 0x80]).unwrap();
+
+        let removed = mount.dir_remove("program").unwrap();
+        assert!(removed.is_null());
+        assert!(!base.join("program").exists());
 
         let _ = std::fs::remove_dir_all(base);
     }

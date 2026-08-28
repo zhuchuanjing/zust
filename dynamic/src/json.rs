@@ -268,7 +268,7 @@ impl ToJson for Dynamic {
             Self::VecF64(vec) => vec_to_json!(buf, vec, F64),
             Self::List(a) => {
                 buf.push('[');
-                let mut once = ZOnce::new("", ",\n");
+                let mut once = ZOnce::new("", ",");
                 a.read().iter().for_each(|item| {
                     buf.push_str(once.take());
                     item.to_json(buf);
@@ -277,25 +277,25 @@ impl ToJson for Dynamic {
             }
             Self::Map(map) => {
                 buf.push('{');
-                let mut once = ZOnce::new("", ",\n");
+                let mut once = ZOnce::new("", ",");
                 map.read().iter().for_each(|(k, v)| {
                     buf.push_str(once.take());
                     k.as_str().to_json(buf);
-                    buf.push_str(": ");
+                    buf.push(':');
                     v.to_json(buf);
                 });
-                buf.push_str("}\n");
+                buf.push('}');
             }
             Self::StructView { .. } | Self::StructOwned { .. } => {
                 buf.push('{');
-                let mut once = ZOnce::new("", ",\n");
+                let mut once = ZOnce::new("", ",");
                 self.keys().iter().for_each(|k| {
                     buf.push_str(once.take());
                     k.as_str().to_json(buf);
-                    buf.push_str(": ");
+                    buf.push(':');
                     self.get_dynamic(k).unwrap_or(Dynamic::Null).to_json(buf);
                 });
-                buf.push_str("}\n");
+                buf.push('}');
             }
             Self::Custom(value) => {
                 buf.push_str("{\"@custom\":");
@@ -303,5 +303,22 @@ impl ToJson for Dynamic {
                 buf.push('}');
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dynamic_json_is_one_compact_roundtrippable_value() {
+        let value = crate::map!("jsonrpc" => "2.0", "id" => 1i64, "params" => crate::map!("items" => vec![1i64, 2i64]));
+        let mut text = String::new();
+        value.to_json(&mut text);
+        assert_eq!(text, r#"{"id":1,"jsonrpc":"2.0","params":{"items":[1,2]}}"#);
+        assert!(!text.contains('\n'));
+        let (decoded, consumed) = Dynamic::from_json(text.as_bytes()).unwrap();
+        assert_eq!(consumed, text.len());
+        assert_eq!(decoded, value);
     }
 }

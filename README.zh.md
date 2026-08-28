@@ -25,7 +25,7 @@ VM 托管临时内存的工作已经完成。VM 创建的 `Any`/`Dynamic` 值和
 - VM 内部内存和结构体 helper 由运行时直接注册，不再暴露到脚本符号表。
 - 嵌套闭包捕获正确解析——闭包内部定义的闭包能正确捕获外层变量。
 - 支持字符串到数字的类型转换：`"123" as i32`、`"3.14" as f64`。
-- parser 在同一 scope 内拒绝重复声明。
+- `let` 支持像 Rust 一样遮蔽同名旧绑定；同一个 pattern 与顶层 item 仍拒绝重复声明。
 - dict shorthand 字段：`{name}` 等价于 `{name: name}`。
 - `std::sqrt(value)` 计算 `f64` 的平方根。
 - `std::sleep(ms)` 阻塞当前执行线程指定毫秒数。
@@ -47,18 +47,18 @@ Zust 的设计围绕几个现实目标展开：
 
 仓库内的语法套件已经覆盖了 parser、compiler 和 VM 目前实现的核心语言面：
 
-- 行注释、块注释、转义字符串、原始字符串，以及十进制、十六进制、八进制、二进制数字字面量。
+- 行注释、块注释、单双引号转义字符串、原始字符串，以及十进制、十六进制、八进制、二进制数字字面量。单引号仍产生字符串，不引入独立 `char` 类型。
 - 基本类型：`bool`、`string`、8 到 64 位有符号/无符号整数、`f16`、`f32`、`f64`、tuple、动态 list/map、固定数组和面向 GPU 的向量类型。
 - `let` 绑定支持标识符、tuple、list、通配符和带类型标注的模式。
 - `const`、`static`、公开项、函数、泛型函数、结构体、泛型结构体、`impl`、方法和关联调用。
-- 代码块、表达式形式的 `if`/`else`、`for`、`while`、`loop`、`break`、`continue` 和 `return`。
+- 代码块、表达式形式的 `if`/`else`、兼容写法 `cond ? yes : no`、`for`、`while`、`loop`、`break`、`continue` 和 `return`。
 - 带类型参数并能捕获外部值的闭包，包括嵌套闭包捕获。
-- 算术、比较、逻辑、位运算、索引、range、类型转换、赋值和复合赋值表达式。
+- 算术、比较、逻辑、位运算、索引、range、类型转换、赋值和复合赋值表达式；`and`/`or` 分别是短路运算符 `&&`/`||` 的别名。
 - 字符串到数字的类型转换：`"123" as i32`、`"3.14" as f64`。
 - dict shorthand 字段：`{name}` 等价于 `{name: name}`。
 - 空 tuple `()` 作为合法表达式。
 - 跨 `.zs` 文件导入；单参数 `import` 会默认补全 `.zs` 后缀。
-- 同一 scope 内拒绝重复声明。
+- `let` 可遮蔽同名旧绑定；同一个 pattern 与顶层 item 拒绝重复声明。
 
 Zust 的目标不是完整兼容 Rust，而是保留 Rust 的结构感并服务脚本场景：没有借用检查，变量不需要显式 `mut`，宿主模块边界默认使用动态值。
 
@@ -86,6 +86,7 @@ let i = 42;
 let f = 3.14f32;
 let ok = true;
 let text = "hello";
+let compatible_text = 'hello';
 let raw = r#"hello "Zust""#;
 let nothing = null;
 
@@ -102,7 +103,7 @@ let short = {name, version};
 
 数字字面量可以带显式后缀，例如 `1i32`、`8u64`、`3.14f32`；整数字面量支持 `0x`、`0o` 和 `0b` 前缀。浮点数字面量支持科学计数法：`1e-3f32`、`1.797e308f64`。
 
-字符串拼接会在运行时使用动态字符串转换，因此支持 `"" + idx`、`"" + level + "级"`、`"" + map.value` 这类写法。原始字符串允许内嵌引号和反斜杠：`r#"hello "Zust""#` 或 `r##"内含 "# 的文本"##`。
+字符串拼接会在运行时使用动态字符串转换，因此支持 `"" + idx`、`"" + level + "级"`、`"" + map.value` 这类写法。单引号是普通字符串的兼容写法，不是独立字符类型；原始字符串允许内嵌引号和反斜杠：`r#"hello "Zust""#` 或 `r##"内含 "# 的文本"##`。
 
 字符串到数字的类型转换通过 `as` 完成：`"123" as i32` 得到 `123`，`"3.14" as f64` 得到 `3.14`。无效数字转为 `0`。
 
@@ -169,6 +170,12 @@ for value in {"a": 1, "b": 2} {
 }
 
 let label = if list.len() > 0 { "non-empty" } else { "empty" };
+let same_label = list.is_empty() ? "empty" : "non-empty";
+
+// Any 条件使用 Any::to_bool 的既有转换规则，不必额外写 `== true`。
+if result.ok and result.content.is_string() {
+    print(result.content);
+}
 
 let value = 0i32;
 while value < 100 {
@@ -357,10 +364,10 @@ spawn(|x, y| {
 
 动态值暴露这些成员方法和静态转换函数：
 
-- 构造和类型辅助：`Any::null()`、`is_map()`、`is_list()`、`is_string()`、`is_null()`、`clone()`。
-- 长度和转换辅助：`len()`、`keys()`、`to_string()`、`Any::from_i64(value)`、`Any::to_i64(value)`、`Any::from_bool(value)`、`Any::to_bool(value)`、`Any::from_f64(value)`、`Any::to_f64(value)`。
+- 构造和类型辅助：`Any::null()`、`is_map()`、`is_list()`、`is_string()`、`is_null()`、`is_number()`、`is_integer()`、`is_empty()`、`clone()`。
+- 长度和转换辅助：`value.len()`、兼容别名 `value.length()`、全局 `len(value)`、`keys()`、`to_string()`、`Any::from_i64(value)`、`Any::to_i64(value)`、`Any::from_bool(value)`、`Any::to_bool(value)`、`Any::from_f64(value)`、`Any::to_f64(value)`。
 - 序列化辅助：`to_yaml()`、`from_yaml()`，详见下方的 [序列化](#序列化) 一节。
-- List 和字符串辅助：`push(value)`、`pop()`、`split(sep)`、`slice(start, stop, inclusive)`。
+- List 和字符串辅助：`push(value)`、`pop()`、`split(sep)`、`slice(start, stop, inclusive)`、`trim()`、`trim_start()`、`trim_end()`、`trim_matches(pattern)`、`trim_start_matches(pattern)`、`trim_end_matches(pattern)`、`replace(from, to)`、别名 `replace_all(from, to)`、`find(text)`、`substring(start, stop)`。`find` 和 `substring` 都使用字符下标；协议 framing 使用 `byte_len()` 与 `byte_slice(start, stop)` 明确按 UTF-8 字节计数和切片，非法字节边界返回 `Null`。
 - Map 和索引辅助：`get_idx(idx)`、`set_idx(idx, value)`、`get(key)`、`get_key(key)`、`set_key(key, value)`、`del_key(key)`、`contains(value)`、`starts_with(prefix)`。
 - 迭代辅助：`iter()`、`next()`。
 - 动态表达式辅助：`Any::binary(left, op, right)`、`Any::logic(left, op, right)`，主要由编译器生成调用。
@@ -480,6 +487,13 @@ cargo build -p zust --features process
 ```
 
 - `process::run(cmd, args, opts)`：同步执行命令并等待结束，返回 `{ok, code, stdout, stdout_truncated, stderr, stderr_truncated, timed_out}`。
+- `process::spawn(cmd, args, opts)`：启动受监督进程，返回 `{ok, id, pid, running}`；
+  用 `process::write_stdin(id, text, close)` 多次写入并可显式关闭 stdin；
+  `process::read_output(id)` 在进程结束前读取自上次调用后新增的 stdout/stderr；
+  `process::poll(id)` 非阻塞取终态，`process::terminate(id)` 强制结束。终态查询会消费
+  handle；agent 宿主在每个程序结束（包括 fault/panic）时兜底回收未消费进程。
+- `read_output` 只提供原始文本传输，不解析 JSON、JSON-RPC 或其他协议；这些逻辑由
+  Zust 的 `Dynamic.from_json()` / `to_json()` 与普通程序控制流完成。
 - `opts` 可选字段：`timeout_ms`（默认 60000）、`cwd`、`env`（map，追加到当前环境）、`max_chars`（stdout/stderr 截断上限，默认 16000；按字符截断，末尾标注被裁掉的字符数）。
 - 超时会 kill 子进程并置 `timed_out: true`，`code` 为 `-1`。
 
@@ -489,6 +503,20 @@ if !out.ok {
     print({code: out.code, stderr: out.stderr});
 }
 ```
+
+### stdio
+
+`stdio` 是 feature-gated 的宿主进程逐行文本边界，不进 `Vm::new()` core：
+
+```bash
+cargo build -p zust-vm --features stdio
+cargo build -p zust --features stdio
+```
+
+- `stdio::read_line()`：阻塞读取一行，移除行尾 CRLF/LF；EOF 返回 `Null`。
+- `stdio::write_line(text)`：写入原始字符串、追加换行并立即 flush；非字符串返回 false。
+- 模块不解析 JSON 或协议。JSON 使用 Dynamic 的 `from_json/to_json`，JSON-RPC、ACP、
+  MCP 等方法分发由 Zust 程序实现。`to_json()` 输出一个无内嵌格式化换行的紧凑 JSON 值。
 
 ### patch
 

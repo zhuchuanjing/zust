@@ -133,6 +133,11 @@ fn build_client(options: &Dynamic) -> Result<reqwest::Client> {
             builder = builder.proxy(reqwest::Proxy::all(&proxy)?);
         }
     }
+    // redirect: "none" 关闭 reqwest 的自动跟随，把每一跳 3xx 留给脚本层
+    // 按自有策略（同源/预算/凭证）决策——zbuddy web fetch 依赖这个边界。
+    if options.get_dynamic("redirect").map(|v| v.as_str().to_string()) == Some("none".to_string()) {
+        builder = builder.redirect(reqwest::redirect::Policy::none());
+    }
     Ok(builder.build()?)
 }
 
@@ -269,16 +274,15 @@ fn response_headers(headers: &reqwest::header::HeaderMap) -> Dynamic {
 }
 
 fn decode_body(bytes: &[u8], content_type: &str) -> Dynamic {
-    if content_type.starts_with("application/json")
+    // 只按 content-type 解码：JSON 才尝试结构化解析；text/plain 等文本绝不
+    //  sniff——长数字串会被 from_json 宽容解析成 inf，破坏正文完整性。
+    if (content_type.starts_with("application/json") || content_type.contains("+json"))
         && let Ok((value, _)) = Dynamic::from_json(bytes)
     {
         return value;
     }
 
     if let Ok(text) = std::str::from_utf8(bytes) {
-        if let Ok((value, _)) = Dynamic::from_json(bytes) {
-            return value;
-        }
         return Dynamic::from(text);
     }
 
@@ -906,6 +910,19 @@ fn to_response(obj: Dynamic) -> Result<Response> {
     let status = obj.get_dynamic("@status").and_then(|value| value.as_int()).and_then(|code| StatusCode::from_u16(code as u16).ok()).unwrap_or(StatusCode::OK);
     let mut builder = Response::builder().status(status);
     let headers = builder.headers_mut().ok_or_else(|| anyhow!("response builder has no headers"))?;
+    // @headers：脚本层自定义响应头（如重定向 fixture 的 Location）。
+    if let Some(custom) = obj.get_dynamic("@headers") {
+        if custom.is_map() {
+            for key in custom.keys() {
+                let name = key.as_str();
+                if let Some(value) = custom.get_dynamic(name) {
+                    if let (Ok(header_name), Ok(header_value)) = (AxumHeaderName::from_bytes(name.as_bytes()), AxumHeaderValue::from_str(value.as_str())) {
+                        headers.insert(header_name, header_value);
+                    }
+                }
+            }
+        }
+    }
     if let Some(content_type) = obj.get_dynamic("@content-type") {
         headers.insert(AxumHeaderName::from_static("content-type"), AxumHeaderValue::from_str(content_type.as_str())?);
     } else {
@@ -929,6 +946,19 @@ fn json_response(status: StatusCode, obj: Dynamic) -> Response {
 }
 
 fn dynamic_json(obj: Dynamic) -> String {
+    // @ 前缀键是传输元数据（@status/@headers 等），序列化进 body 前剥离，
+    // 与请求侧 strip_inline_headers 同一约定。
+    if obj.is_map() {
+        let cleaned = obj.deep_clone();
+        for key in cleaned.keys() {
+            if key.as_str().starts_with('@') {
+                cleaned.remove_dynamic(key.as_str());
+            }
+        }
+        let mut body = String::new();
+        cleaned.to_json(&mut body);
+        return body;
+    }
     let mut body = String::new();
     obj.to_json(&mut body);
     body

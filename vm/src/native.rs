@@ -5,7 +5,7 @@ use crate::memory::{alloc_dynamic, alloc_struct_bytes, take_dynamic_return};
 use anyhow::{Result, anyhow};
 use cranelift::prelude::AbiParam;
 use cranelift_module::{Linkage, Module};
-use dynamic::{Dynamic, ToYaml, Type};
+use dynamic::{Dynamic, FromJson, ToJson, ToYaml, Type};
 use parser::{BinaryOp, Expr, ExprKind, Span};
 use rand::RngExt;
 use std::borrow::Cow;
@@ -119,6 +119,14 @@ extern "C" fn any_is_string(addr: *const Dynamic) -> bool {
 
 extern "C" fn any_is_null(addr: *const Dynamic) -> bool {
     addr.is_null() || unsafe { (*addr).is_null() }
+}
+
+extern "C" fn any_is_number(addr: *const Dynamic) -> bool {
+    !addr.is_null() && unsafe { (*addr).is_int() || (*addr).is_uint() || (*addr).is_float() }
+}
+
+extern "C" fn any_is_integer(addr: *const Dynamic) -> bool {
+    !addr.is_null() && unsafe { (*addr).is_int() || (*addr).is_uint() }
 }
 
 extern "C" fn random(start: *const Dynamic, stop: *const Dynamic) -> *const Dynamic {
@@ -924,6 +932,10 @@ extern "C" fn any_len(addr: *const Dynamic) -> i64 {
     if addr.is_null() { 0 } else { unsafe { (&*addr).len() as i64 } }
 }
 
+extern "C" fn any_is_empty(addr: *const Dynamic) -> bool {
+    addr.is_null() || unsafe { (&*addr).len() == 0 }
+}
+
 extern "C" fn any_keys(addr: *const Dynamic) -> *const Dynamic {
     if addr.is_null() {
         return alloc_dynamic(Dynamic::list(Vec::new()));
@@ -955,8 +967,43 @@ extern "C" fn any_push(addr: *mut Dynamic, value: *mut Dynamic) {
     }
 }
 
+/// 函数式 `append(list, value)` / 动态 `list.append(value)`：原地追加后返回同一
+/// 动态集合。模型常把结果重新赋给原变量，返回集合可同时兼容函数式与命令式写法。
+extern "C" fn any_append(addr: *mut Dynamic, value: *mut Dynamic) -> *const Dynamic {
+    any_push(addr, value);
+    if addr.is_null() { any_null() } else { alloc_dynamic(unsafe { (&*addr).clone() }) }
+}
+
 extern "C" fn any_pop(addr: *mut Dynamic) -> *const Dynamic {
     if addr.is_null() { any_null() } else { alloc_dynamic(unsafe { (*addr).pop().unwrap_or(Dynamic::Null) }) }
+}
+
+/// Rust/JavaScript 都常见的 `list.insert(index, value)` 便利写法；map 也接受
+/// `insert(key, value)`，便于模型生成的结构化代码直接运行。
+extern "C" fn any_insert(addr: *mut Dynamic, key: *const Dynamic, value: *const Dynamic) -> bool {
+    if addr.is_null() || key.is_null() || value.is_null() {
+        return false;
+    }
+    unsafe {
+        match &mut *addr {
+            Dynamic::List(list) => {
+                let Some(index) = (&*key).as_int().and_then(|value| usize::try_from(value).ok()) else {
+                    return false;
+                };
+                let mut list = list.write();
+                if index > list.len() {
+                    return false;
+                }
+                list.insert(index, (&*value).clone());
+                true
+            }
+            Dynamic::Map(map) if (&*key).is_str() => {
+                map.write().insert((&*key).as_str().into(), (&*value).clone());
+                true
+            }
+            _ => false,
+        }
+    }
 }
 
 extern "C" fn get_key(addr: *const Dynamic, key: *const Dynamic) -> *const Dynamic {
@@ -966,6 +1013,16 @@ extern "C" fn get_key(addr: *const Dynamic, key: *const Dynamic) -> *const Dynam
         let key: &str = unsafe { &*key }.as_str();
         alloc_dynamic(unsafe { (*addr).get_dynamic(key).unwrap_or(Dynamic::Null) })
     }
+}
+
+extern "C" fn any_get(addr: *const Dynamic, key: *const Dynamic) -> *const Dynamic {
+    if addr.is_null() || key.is_null() {
+        return any_null();
+    }
+    if let Some(index) = unsafe { (&*key).as_int() } {
+        return get_idx(addr, index);
+    }
+    get_key(addr, key)
 }
 
 extern "C" fn del_key(addr: *const Dynamic, key: *const Dynamic) -> *const Dynamic {
@@ -1015,6 +1072,63 @@ extern "C" fn any_trim(addr: *const Dynamic) -> *const Dynamic {
     alloc_dynamic(Dynamic::from(unsafe { (&*addr).as_str().trim().to_string() }))
 }
 
+extern "C" fn any_trim_start(addr: *const Dynamic) -> *const Dynamic {
+    if addr.is_null() {
+        return alloc_dynamic(Dynamic::from(""));
+    }
+    alloc_dynamic(Dynamic::from(unsafe { (&*addr).as_str().trim_start().to_string() }))
+}
+
+extern "C" fn any_trim_end(addr: *const Dynamic) -> *const Dynamic {
+    if addr.is_null() {
+        return alloc_dynamic(Dynamic::from(""));
+    }
+    alloc_dynamic(Dynamic::from(unsafe { (&*addr).as_str().trim_end().to_string() }))
+}
+
+extern "C" fn any_trim_matches(addr: *const Dynamic, pattern: *const Dynamic) -> *const Dynamic {
+    if addr.is_null() || pattern.is_null() {
+        return alloc_dynamic(Dynamic::from(""));
+    }
+    let text = unsafe { (&*addr).as_str() };
+    let pattern = unsafe { (&*pattern).as_str() };
+    if pattern.is_empty() {
+        return alloc_dynamic(Dynamic::from(text.to_string()));
+    }
+    let mut trimmed = text;
+    while let Some(rest) = trimmed.strip_prefix(pattern) {
+        trimmed = rest;
+    }
+    while let Some(rest) = trimmed.strip_suffix(pattern) {
+        trimmed = rest;
+    }
+    alloc_dynamic(Dynamic::from(trimmed.to_string()))
+}
+
+extern "C" fn any_trim_start_matches(addr: *const Dynamic, pattern: *const Dynamic) -> *const Dynamic {
+    if addr.is_null() || pattern.is_null() {
+        return alloc_dynamic(Dynamic::from(""));
+    }
+    let text = unsafe { (&*addr).as_str() };
+    let pattern = unsafe { (&*pattern).as_str() };
+    if pattern.is_empty() {
+        return alloc_dynamic(Dynamic::from(text.to_string()));
+    }
+    alloc_dynamic(Dynamic::from(text.trim_start_matches(pattern).to_string()))
+}
+
+extern "C" fn any_trim_end_matches(addr: *const Dynamic, pattern: *const Dynamic) -> *const Dynamic {
+    if addr.is_null() || pattern.is_null() {
+        return alloc_dynamic(Dynamic::from(""));
+    }
+    let text = unsafe { (&*addr).as_str() };
+    let pattern = unsafe { (&*pattern).as_str() };
+    if pattern.is_empty() {
+        return alloc_dynamic(Dynamic::from(text.to_string()));
+    }
+    alloc_dynamic(Dynamic::from(text.trim_end_matches(pattern).to_string()))
+}
+
 extern "C" fn any_to_lower(addr: *const Dynamic) -> *const Dynamic {
     if addr.is_null() {
         return alloc_dynamic(Dynamic::from(""));
@@ -1043,17 +1157,88 @@ extern "C" fn any_replace(addr: *const Dynamic, from: *const Dynamic, to: *const
     alloc_dynamic(Dynamic::from(unsafe { (&*addr).as_str().replace(from, to) }))
 }
 
-extern "C" fn any_find(addr: *const Dynamic, sub: *const Dynamic) -> i64 {
+extern "C" fn any_find(addr: *const Dynamic, sub: *const Dynamic, from: *const Dynamic) -> i64 {
     if addr.is_null() || sub.is_null() {
         return -1;
     }
     let text = unsafe { (&*addr).as_str() };
     let sub = unsafe { (&*sub).as_str() };
-    // 返回字节偏移(不是字符偏移)。对 ASCII 文本等价,对多字节文本调用方需要自己再
-    // 用 substring 切。找不到返回 -1(而不是 Option),与 zust 其它 find 类操作一致。
-    match text.find(sub) {
-        Some(byte_idx) => byte_idx as i64,
+    // 可选起始字符下标（null/缺省从 0 开始）；返回值仍是整个文本的字符
+    // 下标，与 substring 的字符索引语义一致。找不到返回 -1(而不是 Option),
+    // 与 zust 其它 find 类操作一致。
+    let mut start = 0i64;
+    if !from.is_null() {
+        let raw = unsafe { &*from };
+        if !raw.is_null() {
+            start = raw.as_int().unwrap_or(0).max(0);
+        }
+    }
+    let skip: usize = text.chars().take(start as usize).map(|c| c.len_utf8()).sum();
+    let skip = skip.min(text.len());
+    match text[skip..].find(sub) {
+        Some(byte_idx) => start + text[skip..skip + byte_idx].chars().count() as i64,
         None => -1,
+    }
+}
+
+extern "C" fn any_rfind(addr: *const Dynamic, sub: *const Dynamic) -> i64 {
+    if addr.is_null() || sub.is_null() {
+        return -1;
+    }
+    let text = unsafe { (&*addr).as_str() };
+    let sub = unsafe { (&*sub).as_str() };
+    match text.rfind(sub) {
+        Some(byte_idx) => text[..byte_idx].chars().count() as i64,
+        None => -1,
+    }
+}
+
+/// UTF-8 文本的原始字节长度。普通 `len` 仍返回字符数；协议 framing 需要明确
+/// 区分这两个概念，不能用字符数伪装 Content-Length。
+extern "C" fn any_byte_len(addr: *const Dynamic) -> i64 {
+    if addr.is_null() {
+        return 0;
+    }
+    unsafe { (&*addr).as_str().len() as i64 }
+}
+
+/// 按 UTF-8 字节偏移切片。起止位置必须都落在字符边界，非法范围返回 Null，
+/// 让协议解析器能把损坏的 framing 与合法空串区分开。
+extern "C" fn any_byte_slice(addr: *const Dynamic, start: i64, stop: *const Dynamic) -> *const Dynamic {
+    if addr.is_null() || start < 0 {
+        return any_null();
+    }
+    let text = unsafe { (&*addr).as_str() };
+    let Ok(start) = usize::try_from(start) else {
+        return any_null();
+    };
+    let stop = if stop.is_null() || unsafe { (&*stop).is_null() } {
+        text.len()
+    } else {
+        let value = unsafe { &*stop };
+        let Some(value) = value.as_int() else {
+            return any_null();
+        };
+        let Ok(value) = usize::try_from(value) else {
+            return any_null();
+        };
+        value
+    };
+    if start > stop || stop > text.len() || !text.is_char_boundary(start) || !text.is_char_boundary(stop) {
+        return any_null();
+    }
+    alloc_dynamic(Dynamic::from(text[start..stop].to_string()))
+}
+
+extern "C" fn any_sort(addr: *mut Dynamic) {
+    if addr.is_null() {
+        return;
+    }
+    if let Dynamic::List(list) = unsafe { &mut *addr } {
+        list.write().sort_by(|left, right| {
+            let numeric = left.as_float().zip(right.as_float()).and_then(|(left, right)| left.partial_cmp(&right));
+            numeric.unwrap_or_else(|| left.to_string().cmp(&right.to_string()))
+        });
     }
 }
 
@@ -1416,6 +1601,22 @@ extern "C" fn set_key(addr: *mut Dynamic, key: *const Dynamic, value: *const Dyn
     unsafe { (&mut *addr).set_dynamic(key.into(), (&*value).clone()) }
 }
 
+extern "C" fn any_set(addr: *mut Dynamic, key: *const Dynamic, value: *const Dynamic) {
+    if addr.is_null() || key.is_null() || value.is_null() {
+        return;
+    }
+    if let Some(index) = unsafe { (&*key).as_int() } {
+        set_idx(addr, index, value);
+    } else {
+        set_key(addr, key, value);
+    }
+}
+
+extern "C" fn any_set_return(addr: *mut Dynamic, key: *const Dynamic, value: *const Dynamic) -> *const Dynamic {
+    any_set(addr, key, value);
+    if addr.is_null() { any_null() } else { alloc_dynamic(unsafe { (&*addr).clone() }) }
+}
+
 extern "C" fn set_idx(addr: *mut Dynamic, idx: i64, value: *const Dynamic) {
     if addr.is_null() {
         return;
@@ -1524,6 +1725,25 @@ extern "C" fn any_from_yaml(addr: *const Dynamic) -> *const Dynamic {
     }
 }
 
+extern "C" fn any_to_json(addr: *const Dynamic) -> *const Dynamic {
+    if addr.is_null() {
+        return alloc_dynamic(Dynamic::from("null"));
+    }
+    let mut buf = String::new();
+    unsafe { &*addr }.to_json(&mut buf);
+    alloc_dynamic(Dynamic::from(buf))
+}
+
+extern "C" fn any_from_json(addr: *const Dynamic) -> *const Dynamic {
+    if addr.is_null() {
+        return any_null();
+    }
+    match Dynamic::from_json(unsafe { (&*addr).as_str().as_bytes() }) {
+        Ok((value, _)) => alloc_dynamic(value),
+        Err(_) => any_null(),
+    }
+}
+
 extern "C" fn any_binary(left: *const Dynamic, op: i32, right: *const Dynamic) -> *const Dynamic {
     if left.is_null() {
         if right.is_null() {
@@ -1561,7 +1781,7 @@ extern "C" fn any_logic(left: *const Dynamic, op: i32, right: *const Dynamic) ->
     }
 }
 
-pub const STD: [(&str, &[Type], Type, *const u8); 7] = [
+pub const STD: [(&str, &[Type], Type, *const u8); 34] = [
     ("print", &[Type::Any], Type::Void, print as *const u8),
     ("sqrt", &[Type::F64], Type::F64, sqrt as *const u8),
     ("sleep", &[Type::I64], Type::Void, sleep as *const u8),
@@ -1569,21 +1789,55 @@ pub const STD: [(&str, &[Type], Type, *const u8); 7] = [
     ("uuid", &[], Type::Any, uuid as *const u8),
     ("rand", &[Type::Any, Type::Any], Type::Any, random as *const u8),
     ("env", &[Type::Str], Type::Any, env as *const u8),
+    ("len", &[Type::Any], Type::I32, any_len as *const u8),
+    ("to_string", &[Type::Any], Type::Str, any_to_string as *const u8),
+    ("str", &[Type::Any], Type::Str, any_to_string as *const u8),
+    ("to_int", &[Type::Any], Type::I64, any_to_i64 as *const u8),
+    ("int", &[Type::Any], Type::I64, any_to_i64 as *const u8),
+    ("parse_int", &[Type::Any], Type::I64, any_to_i64 as *const u8),
+    ("to_number", &[Type::Any], Type::F64, any_to_f64 as *const u8),
+    ("parse_number", &[Type::Any], Type::F64, any_to_f64 as *const u8),
+    ("num", &[Type::Any], Type::F64, any_to_f64 as *const u8),
+    ("format_number", &[Type::Any], Type::Str, any_to_string as *const u8),
+    ("join", &[Type::Any, Type::Any], Type::Any, any_join as *const u8),
+    ("push", &[Type::Any, Type::Any], Type::Any, any_append as *const u8),
+    ("append", &[Type::Any, Type::Any], Type::Any, any_append as *const u8),
+    ("get", &[Type::Any, Type::Any], Type::Any, any_get as *const u8),
+    ("set", &[Type::Any, Type::Any, Type::Any], Type::Any, any_set_return as *const u8),
+    ("contains_key", &[Type::Any, Type::Any], Type::Bool, contains as *const u8),
+    ("replace_all", &[Type::Any, Type::Any, Type::Any], Type::Any, any_replace as *const u8),
+    ("rfind", &[Type::Any, Type::Any], Type::I64, any_rfind as *const u8),
+    ("substring", &[Type::Any, Type::I64, Type::Any], Type::Any, any_substring as *const u8),
+    ("byte_len", &[Type::Any], Type::I64, any_byte_len as *const u8),
+    ("byte_slice", &[Type::Any, Type::I64, Type::Any], Type::Any, any_byte_slice as *const u8),
+    ("parse_json", &[Type::Any], Type::Any, any_from_json as *const u8),
+    ("from_json", &[Type::Any], Type::Any, any_from_json as *const u8),
+    ("to_json", &[Type::Any], Type::Str, any_to_json as *const u8),
+    ("json_dump", &[Type::Any], Type::Str, any_to_json as *const u8),
+    ("is_number", &[Type::Any], Type::Bool, any_is_number as *const u8),
+    ("is_integer", &[Type::Any], Type::Bool, any_is_integer as *const u8),
 ];
 
-pub const ANY: [(&str, &[Type], Type, *const u8); 88] = [
+pub const ANY: [(&str, &[Type], Type, *const u8); 112] = [
     ("Any::null", &[], Type::Any, any_null as *const u8),
     ("Any::is_map", &[Type::Any], Type::Bool, any_is_map as *const u8),
     ("Any::is_list", &[Type::Any], Type::Bool, any_is_list as *const u8),
     ("Any::is_string", &[Type::Any], Type::Bool, any_is_string as *const u8),
     ("Any::is_null", &[Type::Any], Type::Bool, any_is_null as *const u8),
+    ("Any::is_number", &[Type::Any], Type::Bool, any_is_number as *const u8),
+    ("Any::is_integer", &[Type::Any], Type::Bool, any_is_integer as *const u8),
+    ("Any::is_empty", &[Type::Any], Type::Bool, any_is_empty as *const u8),
     ("Any::clone", &[Type::Any], Type::Any, any_clone as *const u8),
     ("Any::len", &[Type::Any], Type::I32, any_len as *const u8),
+    ("Any::length", &[Type::Any], Type::I32, any_len as *const u8),
     ("Any::keys", &[Type::Any], Type::Any, any_keys as *const u8),
     ("Any::split", &[Type::Any, Type::Any], Type::Any, any_split as *const u8),
     ("Any::join", &[Type::Any, Type::Any], Type::Any, any_join as *const u8),
     ("Any::push", &[Type::Any, Type::Any], Type::Void, any_push as *const u8),
+    ("Any::append", &[Type::Any, Type::Any], Type::Any, any_append as *const u8),
+    ("Any::add", &[Type::Any, Type::Any], Type::Any, any_append as *const u8),
     ("Any::pop", &[Type::Any], Type::Any, any_pop as *const u8),
+    ("Any::insert", &[Type::Any, Type::Any, Type::Any], Type::Bool, any_insert as *const u8),
     ("Any::get_idx", &[Type::Any, Type::I64], Type::Any, get_idx as *const u8),
     ("Any::push_bool", &[Type::Any, Type::Bool], Type::Void, list_bool_push as *const u8),
     ("Any::get_idx_bool", &[Type::Any, Type::I64], Type::Bool, list_bool_get_idx as *const u8),
@@ -1631,30 +1885,47 @@ pub const ANY: [(&str, &[Type], Type, *const u8); 88] = [
     ("Any::set_idx_str", &[Type::Any, Type::I64, Type::Str], Type::Void, list_str_set_idx as *const u8),
     ("Any::slice", &[Type::Any, Type::I64, Type::Any, Type::Bool], Type::Any, slice as *const u8),
     ("Any::contains", &[Type::Any, Type::Any], Type::Bool, contains as *const u8),
+    ("Any::contains_key", &[Type::Any, Type::Any], Type::Bool, contains as *const u8),
     ("Any::starts_with", &[Type::Any, Type::Any], Type::Bool, starts_with as *const u8),
     ("Any::ends_with", &[Type::Any, Type::Any], Type::Bool, ends_with as *const u8),
     ("Any::trim", &[Type::Any], Type::Any, any_trim as *const u8),
+    ("Any::trim_start", &[Type::Any], Type::Any, any_trim_start as *const u8),
+    ("Any::trim_end", &[Type::Any], Type::Any, any_trim_end as *const u8),
+    ("Any::trim_matches", &[Type::Any, Type::Any], Type::Any, any_trim_matches as *const u8),
+    ("Any::trim_start_matches", &[Type::Any, Type::Any], Type::Any, any_trim_start_matches as *const u8),
+    ("Any::trim_end_matches", &[Type::Any, Type::Any], Type::Any, any_trim_end_matches as *const u8),
     ("Any::to_lower", &[Type::Any], Type::Any, any_to_lower as *const u8),
     ("Any::to_upper", &[Type::Any], Type::Any, any_to_upper as *const u8),
     ("Any::replace", &[Type::Any, Type::Any, Type::Any], Type::Any, any_replace as *const u8),
-    ("Any::find", &[Type::Any, Type::Any], Type::I64, any_find as *const u8),
+    ("Any::replace_all", &[Type::Any, Type::Any, Type::Any], Type::Any, any_replace as *const u8),
+    ("Any::find", &[Type::Any, Type::Any, Type::Any], Type::I64, any_find as *const u8),
+    ("Any::rfind", &[Type::Any, Type::Any], Type::I64, any_rfind as *const u8),
     ("Any::substring", &[Type::Any, Type::I64, Type::Any], Type::Any, any_substring as *const u8),
-    ("Any::get", &[Type::Any, Type::Any], Type::Any, get_key as *const u8),
+    ("Any::byte_len", &[Type::Any], Type::I64, any_byte_len as *const u8),
+    ("Any::byte_slice", &[Type::Any, Type::I64, Type::Any], Type::Any, any_byte_slice as *const u8),
+    ("Any::sort", &[Type::Any], Type::Void, any_sort as *const u8),
+    ("Any::get", &[Type::Any, Type::Any], Type::Any, any_get as *const u8),
     ("Any::get_key", &[Type::Any, Type::Any], Type::Any, get_key as *const u8),
     ("Any::del_key", &[Type::Any, Type::Any], Type::Any, del_key as *const u8),
     ("Any::set_idx", &[Type::Any, Type::I64, Type::Any], Type::Void, set_idx as *const u8),
     ("Any::set_key", &[Type::Any, Type::Any, Type::Any], Type::Void, set_key as *const u8),
-    ("Any::set", &[Type::Any, Type::Any, Type::Any], Type::Void, set_key as *const u8),
+    ("Any::set", &[Type::Any, Type::Any, Type::Any], Type::Void, any_set as *const u8),
     ("Any::from_i64", &[Type::I64], Type::Any, any_from_i64 as *const u8),
     ("Any::from_u64", &[Type::U64], Type::Any, any_from_u64 as *const u8),
     ("Any::from_bool", &[Type::Bool], Type::Any, any_from_bool as *const u8),
     ("Any::to_i64", &[Type::Any], Type::I64, any_to_i64 as *const u8),
+    ("Any::to_int", &[Type::Any], Type::I64, any_to_i64 as *const u8),
+    ("Any::parse_int", &[Type::Any], Type::I64, any_to_i64 as *const u8),
     ("Any::to_bool", &[Type::Any], Type::Bool, any_to_bool as *const u8),
     ("Any::from_f64", &[Type::F64], Type::Any, any_from_f64 as *const u8),
     ("Any::to_f64", &[Type::Any], Type::F64, any_to_f64 as *const u8),
+    ("Any::to_number", &[Type::Any], Type::F64, any_to_f64 as *const u8),
+    ("Any::parse_number", &[Type::Any], Type::F64, any_to_f64 as *const u8),
     ("Any::to_string", &[Type::Any], Type::Str, any_to_string as *const u8),
     ("Any::to_yaml", &[Type::Any], Type::Str, any_to_yaml as *const u8),
     ("Any::from_yaml", &[Type::Any], Type::Any, any_from_yaml as *const u8),
+    ("Any::to_json", &[Type::Any], Type::Str, any_to_json as *const u8),
+    ("Any::from_json", &[Type::Any], Type::Any, any_from_json as *const u8),
     ("Any::binary", &[Type::Any, Type::I32, Type::Any], Type::Any, any_binary as *const u8),
     ("Any::logic", &[Type::Any, Type::I32, Type::Any], Type::Bool, any_logic as *const u8),
     ("Any::iter", &[Type::Any], Type::Any, any_iter as *const u8),

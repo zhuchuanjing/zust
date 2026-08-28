@@ -490,13 +490,24 @@ pub fn call_fn(ptr: i64, ret_ty: Type, param: Box<Dynamic>) -> Result<Box<Dynami
             }
             Ok(Box::new(Dynamic::F64(r)))
         }
-        _ => {
+        _ if ret_ty.is_int() || ret_ty.is_uint() => {
             let fn_ptr: extern "C" fn(*const Dynamic) -> i64 = unsafe { std::mem::transmute(ptr) };
             let r = fn_ptr(param);
             unsafe {
                 drop(Box::from_raw(param));
             }
             Ok(Box::new(Dynamic::I64(r)))
+        }
+        // Str/Map/List/Iter/Array/Struct 等其余类型在 JIT ABI 里都是 *const Dynamic
+        // (vm 的 get_type 对非标量一律返回指针)，必须按 Any 分支回收堆值；
+        // 落进上面的 i64 分支会把堆指针截成一个整数。
+        _ => {
+            let fn_ptr: extern "C" fn(*const Dynamic) -> *mut Dynamic = unsafe { std::mem::transmute(ptr) };
+            let r = fn_ptr(param);
+            unsafe {
+                drop(Box::from_raw(param));
+            }
+            Ok(unsafe { take_dynamic_return(r) })
         }
     }
 }

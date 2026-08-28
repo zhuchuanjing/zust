@@ -287,12 +287,23 @@ mod tests {
 
     #[test]
     fn syntax_suite_regression() -> Result<()> {
-        let vm = vm::Vm::with_all()?;
-        vm_import_file(&vm, "syntax_suite", "syntax_suite.zs")?;
-        for name in SYNTAX_BOOL_TESTS {
-            run_bool_test(&vm, name)?;
-        }
-        Ok(())
+        // debug 构建的 parser 递归帧较大，完整语法集会超过 Rust 测试线程
+        // 默认的 2 MiB 栈；生产主线程和 release 构建不受影响。给这项聚合回归
+        // 明确栈预算，避免新增一个产生式就把本来正确的语法测试推过临界点。
+        std::thread::Builder::new()
+            .name("syntax-suite-regression".into())
+            .stack_size(16 * 1024 * 1024)
+            .spawn(|| -> Result<()> {
+                let vm = vm::Vm::with_all()?;
+                vm_import_file(&vm, "syntax_suite", "syntax_suite.zs")?;
+                for name in SYNTAX_BOOL_TESTS {
+                    run_bool_test(&vm, name)?;
+                }
+                Ok(())
+            })
+            .context("spawn syntax suite regression")?
+            .join()
+            .map_err(|_| anyhow::anyhow!("syntax suite regression panicked"))?
     }
 
     #[test]

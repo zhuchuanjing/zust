@@ -379,9 +379,11 @@ impl JITRunTime {
         }
 
         let Some((value, value_ty)) = value else {
-            self.scope_exit_void(ctx)?;
-            ctx.builder.ins().return_(&[]);
-            return Ok(());
+            // 非 void 函数掉落尾部（如 `loop { return v; }` 后编译器补的隐式 return,
+            // 正常控制流不会到达,仅 fuel 耗尽等降级路径经过）:按 null 返回并复用
+            // 下方正常通路转成签名类型,而不是生成与签名不匹配的 return_(&[])。
+            let null = self.get_null_value(ctx)?;
+            return self.return_value(ctx, Some(null));
         };
 
         if ret_ty.is_any() || ret_ty.is_str() || matches!(ret_ty, Type::Map | Type::List(_) | Type::Iter) {
@@ -1595,6 +1597,20 @@ impl JITRunTime {
                 value => value.get(ctx).ok_or_else(|| anyhow!("函数 {} 的参数表达式没有值: {:?}", fn_name, p))?,
             };
             args.push(value);
+        }
+        // 尾参数具备自然默认值的高频 API。此前少参调用能一路进入 JIT，
+        // 最终才以 verifier 参数数量错误失败；在 ABI 调整前补齐可让错误更早、更稳。
+        if fn_name.as_str().ends_with("Any::substring") && args.len() == 2 {
+            let null_idx = self.compiler.get_const(Dynamic::Null);
+            let null = self.get_const_value(ctx, null_idx)?;
+            args.push(null);
+        } else if fn_name.as_str().ends_with("Any::find") && args.len() == 2 {
+            // find(sub, from) 的 from 缺省从头开始
+            let null_idx = self.compiler.get_const(Dynamic::Null);
+            let null = self.get_const_value(ctx, null_idx)?;
+            args.push(null);
+        } else if fn_name.as_str().ends_with("root::remove_dir") && args.len() == 1 {
+            args.push((ctx.builder.ins().iconst(types::I8, 1), Type::Bool));
         }
         if let Some(captures) = &capture_values {
             args.extend(captures.iter().cloned());

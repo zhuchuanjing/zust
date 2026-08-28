@@ -1,4 +1,4 @@
-use crate::Stmt;
+use crate::{Stmt, StmtKind};
 use anyhow::{Result, anyhow};
 use dynamic::Dynamic;
 use smol_str::SmolStr;
@@ -222,8 +222,6 @@ pub enum ExprKind {
 pub enum ExprErr {
     #[error("{0} 不是标识符")]
     NotIdent(SmolStr),
-    #[error("{0} 非原生类型")]
-    NotNative(SmolStr),
     #[error("期望表达式")]
     ExpectExpr,
 }
@@ -503,7 +501,11 @@ impl Parser {
     }
 
     fn binary_op(&mut self) -> Option<BinaryOp> {
-        if self.just("<<=").is_ok() {
+        if self.keyword("and").is_ok() {
+            Some(BinaryOp::And)
+        } else if self.keyword("or").is_ok() {
+            Some(BinaryOp::Or)
+        } else if self.just("<<=").is_ok() {
             Some(BinaryOp::ShlAssign)
         } else if self.just(">>=").is_ok() {
             Some(BinaryOp::ShrAssign)
@@ -626,15 +628,9 @@ impl Parser {
             // 数字开头一定是数字字面量:解析失败(如越界)直接上抛,
             // 不要回落到其它产生式而把"超出范围"错误吞成笼统的"期望表达式"。
             let n = self.number()?;
-            let expr = if let Ok(ty) = self.get_type() {
-                if ty.is_native() {
-                    Expr::new(ExprKind::Typed { value: Box::new(Expr::new(ExprKind::Value(n), self.span_from(start))), ty }, self.span_from(start))
-                } else {
-                    return Err(ExprErr::NotNative(SmolStr::from(format!("{:?}", ty))).into());
-                }
-            } else {
-                Expr::new(ExprKind::Value(n), self.span_from(start))
-            };
+            // `number` 已负责解析紧邻字面量的原生类型后缀。这里不能再调用
+            // 会跳过空白的 `get_type`,否则 `0 and ready` 会把 `and` 吞成类型名。
+            let expr = Expr::new(ExprKind::Value(n), self.span_from(start));
             self.postfix_expr(start, expr)
         } else if self.keyword("true").is_ok() {
             let expr = Expr::new(ExprKind::Value(Dynamic::Bool(true)), self.span_from(start));
@@ -646,9 +642,11 @@ impl Parser {
             let expr = Expr::new(ExprKind::Value(Dynamic::Null), self.span_from(start));
             self.postfix_expr(start, expr)
         } else if let Ok(ident) = self.ident() {
+            let ident_end = self.pos;
             self.whitespace()?;
+            let crossed_newline = self.buf[ident_end..self.pos].contains(&b'\n');
             let save_pos = self.pos;
-            if self.take(b'<').is_ok() {
+            if !crossed_newline && self.take(b'<').is_ok() {
                 let typed_literal = (|| -> Result<Expr> {
                     let type_params = crate::parse_list!(self, Vec::new(), b'>', b',', self.get_type_param()?);
                     self.whitespace()?;
@@ -671,13 +669,18 @@ impl Parser {
                 }
                 self.pos = save_pos;
             }
-            if allow_struct_literal
+            if !crossed_newline
+                && allow_struct_literal
                 && self.looks_like_dict()
                 && let Ok(b'{') = self.get()
                 && let Ok(dict) = try_parse!(self, self.dict())
             {
                 return Ok(Expr::new(ExprKind::Typed { value: Box::new(dict), ty: Type::Ident { name: ident, params: Vec::new() } }, self.span_from(start)));
             }
+            // 泛型/结构体字面量探测失败时必须连同前导空白一起回退。
+            // 否则裸标识符右值会吞掉换行，把下一条 `while/if/let` 粘进
+            // 当前表达式；postfix/as 与外层表达式会按需重新消费同一行空白。
+            self.pos = ident_end;
             self.postfix_expr(start, Expr::new(ExprKind::Ident(ident), self.span_from(start)))
         } else {
             Err(ExprErr::ExpectExpr.into())
@@ -793,7 +796,24 @@ impl Parser {
     }
 
     fn expr_with_min_weight_inner(&mut self, left: Option<(Expr, bool)>, left_op: Option<BinaryOp>, min_weight: usize, allow_struct_literal: bool) -> Result<(Expr, bool)> {
+        let whitespace_start = self.current_pos();
         self.whitespace()?;
+        let crossed_newline = self.buf[whitespace_start..self.current_pos()].contains(&b'\n');
+        if crossed_newline && left.is_some() && left_op.is_none() {
+            // 生成代码高频省略分号。换行后若不是显式运算符续行，就把已经完整的
+            // 左表达式交还给 stmt；否则 `call()\nlet next = ...` 会继续尝试把
+            // `let/next` 当右操作数，最终报 `unexpected Expr`。
+            let rest = &self.buf[self.current_pos()..];
+            let symbolic_continuation = rest.first().is_some_and(|ch| b"+-*/%<>=!&|?:.[".contains(ch));
+            let keyword_continuation = rest.starts_with(b"and ") || rest.starts_with(b"or ");
+            if !symbolic_continuation && !keyword_continuation {
+                // 换行属于语句终止符，不能在表达式层吞掉。回退到空白起点，
+                // 让 stmt 统一消费并记录“由换行闭合”；否则 stmt 看到的
+                // expression_end 已经越过换行，会误报“未结束的表达式”。
+                self.pos = whitespace_start;
+                return Ok((left.unwrap().0, false));
+            }
+        }
         if self.is_eof() {
             return left.ok_or_else(|| ParserErr::at("左操作数缺失", self.current_pos()).into());
         }
@@ -822,6 +842,11 @@ impl Parser {
         } else if ch == b'!' && self.ahead().map(|a| a != b'=').unwrap_or(true) {
             let start = self.current_pos();
             self.pos += 1;
+            let value = self.expr_with_min_weight(None, None, BinaryOp::Mul.weight() + 1, allow_struct_literal)?.0;
+            Ok((Expr::new(ExprKind::Unary { op: UnaryOp::Not, value: Box::new(value) }, Span::new(start, self.current_pos())), false))
+        } else if (left.is_none() || left_op.is_some()) && self.keyword("not").is_ok() {
+            // 模型高频生成 Python 风格 `not value`。语义与 `!value` 完全一致，
+            // 仍复用现有动态 Bool 与一元运算编译路径。
             let value = self.expr_with_min_weight(None, None, BinaryOp::Mul.weight() + 1, allow_struct_literal)?.0;
             Ok((Expr::new(ExprKind::Unary { op: UnaryOp::Not, value: Box::new(value) }, Span::new(start, self.current_pos())), false))
         } else if ch == b'-' && self.ahead().map(|a| a != b'=').unwrap_or(true) && (left.is_none() || (left.is_some() && left_op.is_some())) {
@@ -890,6 +915,18 @@ impl Parser {
             let body = Box::new(self.function_body(&args)?);
             let expr = Expr::new(ExprKind::Closure { args, body }, Span::new(start, self.current_pos()));
             Ok((self.postfix_expr(start, expr)?, true))
+        } else if ch == b'?' && left.is_some() && left_op.is_none() && min_weight == 0 {
+            self.pos += 1;
+            let cond = left.unwrap().0;
+            let then_expr = self.expr_with_min_weight(None, None, 0, allow_struct_literal)?.0;
+            self.whitespace()?;
+            self.until(b':')?;
+            let else_expr = self.expr_with_min_weight(None, None, 0, allow_struct_literal)?.0;
+            let span = cond.span.merge(else_expr.span);
+            let then_body = Stmt::new(StmtKind::Expr(then_expr, false), span);
+            let else_body = Stmt::new(StmtKind::Expr(else_expr, false), span);
+            let stmt = Stmt::new(StmtKind::If { cond, then_body: Box::new(then_body), else_body: Some(Box::new(else_body)) }, span);
+            return Ok((Expr::new(ExprKind::Stmt(Box::new(stmt)), span), true));
         } else if let Some(this_op) = self.binary_op() {
             let (left, close) = left.ok_or(anyhow!("{:?} need left value", this_op))?;
             if this_op == BinaryOp::RangeOpen {

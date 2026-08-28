@@ -1397,6 +1397,12 @@ impl Compiler {
 
     fn type_field_access_expr(&mut self, left: Expr, key: &str, span: Span, prefer_dynamic_field: bool) -> Option<Expr> {
         let ty = self.infer_expr(&left).ok()?;
+        if ty.is_bool() && key == "ok" {
+            return Some(left);
+        }
+        if ty.is_bool() && key == "error" {
+            return Some(Expr::new(ExprKind::Const(self.get_const(Dynamic::from(""))), span));
+        }
         if prefer_dynamic_field && ty.is_any() {
             return Some(self.literal_field_access_expr(left, key, span));
         }
@@ -1947,6 +1953,17 @@ impl Compiler {
                             } else {
                                 Expr::new(ExprKind::Binary { left: Box::new(left), op: BinaryOp::Idx, right: Box::new(found) }, expr.span)
                             });
+                        }
+                        if let Ok(ty) = self.infer_expr(&left) {
+                            // root 的删除类原语直接返回 Bool，而模型常按统一结果对象写
+                            // `result.ok` / `result.error`。Bool.ok 等价于自身，Bool.error
+                            // 是空串，使两种返回风格可在不改变原语 ABI 的情况下共存。
+                            if ty.is_bool() && ident == "ok" {
+                                return Ok(left);
+                            }
+                            if ty.is_bool() && ident == "error" {
+                                return Ok(Expr::new(ExprKind::Const(self.get_const(Dynamic::from(""))), expr.span));
+                            }
                         }
                         if let Ok(ty) = self.infer_expr(&left)
                             && let Ok((idx, ty)) = self.get_field(&ty, ident)

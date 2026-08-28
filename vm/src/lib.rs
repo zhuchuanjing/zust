@@ -1,7 +1,7 @@
 //使用 cranelift 作为后端 直接 jit 解释脚本
 mod binary;
 mod memory;
-pub use memory::{set_fuel, take_dynamic_return};
+pub use memory::{alloc_dynamic, set_fuel, take_dynamic_return};
 mod native;
 pub use native::{ANY, STD, ZustCallback};
 

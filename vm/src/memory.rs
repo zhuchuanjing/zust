@@ -131,7 +131,7 @@ pub(crate) fn alloc_struct_bytes(size: usize) -> *mut u8 {
     VM_MEMORY.with(|memory| memory.borrow_mut().alloc_bytes(size))
 }
 
-pub(crate) fn alloc_dynamic(value: Dynamic) -> *const Dynamic {
+pub fn alloc_dynamic(value: Dynamic) -> *const Dynamic {
     VM_MEMORY.with(|memory| {
         let mut memory = memory.borrow_mut();
         if memory.has_scope() { memory.alloc_dynamic(value) as *const Dynamic } else { Box::into_raw(Box::new(value)) }

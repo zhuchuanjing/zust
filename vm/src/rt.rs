@@ -1609,6 +1609,10 @@ impl JITRunTime {
             let null_idx = self.compiler.get_const(Dynamic::Null);
             let null = self.get_const_value(ctx, null_idx)?;
             args.push(null);
+        } else if fn_name.as_str().ends_with("Any::slice") && args.len() == 3 {
+            // slice(start, stop) 的 inclusive 缺省 false（stop 排他，与
+            // substring 同口径）；缺这行时 3 参调用直达 verifier 参数数错误
+            args.push((ctx.builder.ins().iconst(types::I8, 0), Type::Bool));
         } else if fn_name.as_str().ends_with("root::remove_dir") && args.len() == 1 {
             args.push((ctx.builder.ins().iconst(types::I8, 1), Type::Bool));
         }

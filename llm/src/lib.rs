@@ -1053,10 +1053,12 @@ pub async fn post_binary(method: &str, openai: Dynamic, msg: Dynamic) -> Result<
         ),
     );
 
+    let full_url = format!("{}/{}", url.as_str(), method);
+    eprintln!("[llm post] {} {} (has_token={})", method, full_url, token.is_some());
     let resp = if let Some(token) = token {
-        client.post(&format!("{}/{}", url.as_str(), method)).header("Content-Type", "application/json").header("authorization", format!("Bearer {}", token)).body(body_str).send().await?
+        client.post(&full_url).header("Content-Type", "application/json").header("authorization", format!("Bearer {}", token)).body(body_str).send().await?
     } else {
-        client.post(&format!("{}/{}", url.as_str(), method)).header("Content-Type", "application/json").body(body_str).send().await?
+        client.post(&full_url).header("Content-Type", "application/json").body(body_str).send().await?
     };
     let status = resp.status();
     let content_type = resp.headers().get(reqwest::header::CONTENT_TYPE).and_then(|value| value.to_str().ok()).unwrap_or("").to_string();
@@ -1153,10 +1155,12 @@ async fn post_once(method: &str, openai: Dynamic, msg: Dynamic, tx: Option<Dynam
     msg.to_json(&mut body_str);
     log::info!("{}", body_str);
 
+    let full_url = format!("{}/{}", url.as_str(), method);
+    eprintln!("[llm post] {} {} (has_token={})", method, full_url, token.is_some());
     let resp = if let Some(token) = token {
-        client.post(&format!("{}/{}", url.as_str(), method)).header("Content-Type", "application/json").header("authorization", format!("Bearer {}", token)).body(body_str).send().await?
+        client.post(&full_url).header("Content-Type", "application/json").header("authorization", format!("Bearer {}", token)).body(body_str).send().await?
     } else {
-        client.post(&format!("{}/{}", url.as_str(), method)).header("Content-Type", "application/json").body(body_str).send().await?
+        client.post(&full_url).header("Content-Type", "application/json").body(body_str).send().await?
     };
     let status = resp.status();
 

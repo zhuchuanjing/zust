@@ -177,18 +177,28 @@ impl SymbolTable {
                     return Ok((idx, field_ty.clone()));
                 }
                 match name {
-                    "is_map" | "is_list" | "is_string" | "is_null" | "is_number" | "is_integer" | "is_empty" | "contains" | "starts_with" | "ends_with" => return Ok((usize::MAX, Type::Bool)),
+                    "is_map" | "is_list" | "is_string" | "is_null" | "is_number" | "is_integer" | "is_bool" | "is_int" | "is_float" | "is_empty" | "contains" | "starts_with" | "ends_with" => return Ok((usize::MAX, Type::Bool)),
                     "len" | "length" => return Ok((usize::MAX, Type::I32)),
                     "byte_len" => return Ok((usize::MAX, Type::I64)),
                     _ => return Ok((usize::MAX, Type::Any)),
                 }
+            }
+            Type::Bool | Type::I8 | Type::I16 | Type::I32 | Type::I64 | Type::U8 | Type::U16 | Type::U32 | Type::U64 | Type::F16 | Type::F32 | Type::F64 => {
+                // 标量类型只暴露类型自检方法（is_bool/is_int/is_float）与 Any 转换
+                let any_method = match name {
+                    "is_bool" | "is_int" | "is_float" | "is_map" | "is_list" | "is_string" | "is_null" | "is_number" | "is_integer" | "is_empty" => {
+                        format!("Any::{}", name)
+                    }
+                    _ => return Err(anyhow!("未发现 symbol {:?} {}", ty, name)),
+                };
+                return Ok((usize::MAX, Type::Symbol { id: self.get_id(&any_method)?, params: Vec::new() }));
             }
             Type::Struct { params: _, fields: _ } => {
                 return ty.get_field(name).map(|(idx, ty)| (idx, ty.clone()));
             }
             Type::Str => {
                 let any_method = match name {
-                    "len" | "length" | "is_empty" | "contains" | "split" | "starts_with" | "ends_with" | "is_string" | "is_null" | "trim" | "trim_start" | "trim_end" | "trim_matches" | "trim_start_matches"
+                    "len" | "length" | "is_empty" | "contains" | "split" | "starts_with" | "ends_with" | "is_string" | "is_null" | "is_bool" | "is_int" | "is_float" | "trim" | "trim_start" | "trim_end" | "trim_matches" | "trim_start_matches"
                     | "trim_end_matches" | "find" | "rfind" | "replace" | "replace_all" | "to_lower" | "to_upper" | "substring" | "byte_len" | "byte_slice" | "from_yaml" | "to_yaml" | "from_json" => {
                         format!("Any::{}", name)
                     }

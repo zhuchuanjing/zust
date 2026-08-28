@@ -129,6 +129,18 @@ extern "C" fn any_is_integer(addr: *const Dynamic) -> bool {
     !addr.is_null() && unsafe { (*addr).is_int() || (*addr).is_uint() }
 }
 
+extern "C" fn any_is_bool(addr: *const Dynamic) -> bool {
+    !addr.is_null() && unsafe { matches!(*addr, Dynamic::Bool(_)) }
+}
+
+extern "C" fn any_is_int(addr: *const Dynamic) -> bool {
+    !addr.is_null() && unsafe { matches!(*addr, Dynamic::I8(_) | Dynamic::I16(_) | Dynamic::I32(_) | Dynamic::I64(_) | Dynamic::U8(_) | Dynamic::U16(_) | Dynamic::U32(_) | Dynamic::U64(_)) }
+}
+
+extern "C" fn any_is_float(addr: *const Dynamic) -> bool {
+    !addr.is_null() && unsafe { matches!(*addr, Dynamic::F16(_) | Dynamic::F32(_) | Dynamic::F64(_)) }
+}
+
 extern "C" fn random(start: *const Dynamic, stop: *const Dynamic) -> *const Dynamic {
     if !start.is_null() && !stop.is_null() {
         let mut rng = rand::rng();
@@ -1818,7 +1830,7 @@ pub const STD: [(&str, &[Type], Type, *const u8); 34] = [
     ("is_integer", &[Type::Any], Type::Bool, any_is_integer as *const u8),
 ];
 
-pub const ANY: [(&str, &[Type], Type, *const u8); 112] = [
+pub const ANY: [(&str, &[Type], Type, *const u8); 118] = [
     ("Any::null", &[], Type::Any, any_null as *const u8),
     ("Any::is_map", &[Type::Any], Type::Bool, any_is_map as *const u8),
     ("Any::is_list", &[Type::Any], Type::Bool, any_is_list as *const u8),
@@ -1826,6 +1838,12 @@ pub const ANY: [(&str, &[Type], Type, *const u8); 112] = [
     ("Any::is_null", &[Type::Any], Type::Bool, any_is_null as *const u8),
     ("Any::is_number", &[Type::Any], Type::Bool, any_is_number as *const u8),
     ("Any::is_integer", &[Type::Any], Type::Bool, any_is_integer as *const u8),
+    ("Any::is_bool", &[Type::Any], Type::Bool, any_is_bool as *const u8),
+    ("Any::is_int", &[Type::Any], Type::Bool, any_is_int as *const u8),
+    ("Any::is_float", &[Type::Any], Type::Bool, any_is_float as *const u8),
+    ("Any::is_bool", &[Type::Any], Type::Bool, any_is_bool as *const u8),
+    ("Any::is_int", &[Type::Any], Type::Bool, any_is_int as *const u8),
+    ("Any::is_float", &[Type::Any], Type::Bool, any_is_float as *const u8),
     ("Any::is_empty", &[Type::Any], Type::Bool, any_is_empty as *const u8),
     ("Any::clone", &[Type::Any], Type::Any, any_clone as *const u8),
     ("Any::len", &[Type::Any], Type::I32, any_len as *const u8),

@@ -627,6 +627,47 @@ mod tests {
     }
 
     #[test]
+    fn list_slice_two_args_compiles_with_default_exclusive_stop() -> anyhow::Result<()> {
+        // 回归：Any::slice 注册为 (self, start, stop, inclusive) 四参，
+        // 方法调用路径只发三参；缺省 inclusive=false 补齐前，这里在
+        // JIT verifier 以 "mismatched argument count: got 3, expected 4" 失败
+        let vm = Vm::new();
+        vm.import_source(
+            "vm_slice_default",
+            r#"
+            pub fn run() {
+                let paths = ["a", "b", "c"];
+                paths.slice(0, 2).len()
+            }
+            "#,
+        )?;
+        let compiled = vm.get_fn("vm_slice_default::run", &[])?;
+        let run: extern "C" fn() -> i64 = unsafe { std::mem::transmute(compiled.ptr()) };
+        assert_eq!(run(), 2);
+        Ok(())
+    }
+
+    #[test]
+    fn map_field_slice_two_args_compiles() -> anyhow::Result<()> {
+        // 同一回归的链式形态：map 字段访问后接 slice（真实轨迹里
+        // ripgrep 任务的 inst103/281/358 三处失败均为此形状）
+        let vm = Vm::new();
+        vm.import_source(
+            "vm_map_field_slice",
+            r#"
+            pub fn run() {
+                let listed = {paths: ["a", "b", "c"]};
+                listed.paths.slice(0, 2).len()
+            }
+            "#,
+        )?;
+        let compiled = vm.get_fn("vm_map_field_slice::run", &[])?;
+        let run: extern "C" fn() -> i64 = unsafe { std::mem::transmute(compiled.ptr()) };
+        assert_eq!(run(), 2);
+        Ok(())
+    }
+
+    #[test]
     fn build_context_set_var_fills_sparse_none_slots() -> anyhow::Result<()> {
         use crate::context::{BuildContext, LocalVar};
         use cranelift::codegen::ir::{Function, Signature, UserFuncName};

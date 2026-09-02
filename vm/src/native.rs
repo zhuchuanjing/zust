@@ -121,6 +121,17 @@ extern "C" fn any_is_null(addr: *const Dynamic) -> bool {
     addr.is_null() || unsafe { (*addr).is_null() }
 }
 
+/// Rust Option 习惯兼容：可空值（root::get 缺失、get_idx 越界等）的
+/// is_some/is_none 判空。注意 find/rfind 未命中返回 -1 而不是 null，
+/// 对它们应判 `idx >= 0`。
+extern "C" fn any_is_some(addr: *const Dynamic) -> bool {
+    !(addr.is_null() || unsafe { (*addr).is_null() })
+}
+
+extern "C" fn any_is_none(addr: *const Dynamic) -> bool {
+    addr.is_null() || unsafe { (*addr).is_null() }
+}
+
 extern "C" fn any_is_number(addr: *const Dynamic) -> bool {
     !addr.is_null() && unsafe { (*addr).is_int() || (*addr).is_uint() || (*addr).is_float() }
 }
@@ -1830,12 +1841,14 @@ pub const STD: [(&str, &[Type], Type, *const u8); 34] = [
     ("is_integer", &[Type::Any], Type::Bool, any_is_integer as *const u8),
 ];
 
-pub const ANY: [(&str, &[Type], Type, *const u8); 118] = [
+pub const ANY: [(&str, &[Type], Type, *const u8); 120] = [
     ("Any::null", &[], Type::Any, any_null as *const u8),
     ("Any::is_map", &[Type::Any], Type::Bool, any_is_map as *const u8),
     ("Any::is_list", &[Type::Any], Type::Bool, any_is_list as *const u8),
     ("Any::is_string", &[Type::Any], Type::Bool, any_is_string as *const u8),
     ("Any::is_null", &[Type::Any], Type::Bool, any_is_null as *const u8),
+    ("Any::is_some", &[Type::Any], Type::Bool, any_is_some as *const u8),
+    ("Any::is_none", &[Type::Any], Type::Bool, any_is_none as *const u8),
     ("Any::is_number", &[Type::Any], Type::Bool, any_is_number as *const u8),
     ("Any::is_integer", &[Type::Any], Type::Bool, any_is_integer as *const u8),
     ("Any::is_bool", &[Type::Any], Type::Bool, any_is_bool as *const u8),

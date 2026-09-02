@@ -6106,6 +6106,82 @@ mod tests {
         Ok(())
     }
 
+    /// Rust 索引习惯回归：`list[i as usize]` / `value as isize` 此前在
+    /// 类型名解析处报"usize 未发现"（模型高频回退，同 let mut/单引号一族）。
+    #[test]
+    fn cast_usize_isize_accepts_rust_indexing_habit() -> anyhow::Result<()> {
+        let vm = Vm::with_all()?;
+        vm.import_code(
+            "vm_cast_usize_habit",
+            br#"
+            pub fn pick_by_usize(list, idx) {
+                list[idx as usize]
+            }
+
+            pub fn to_isize(value: i64) {
+                value as isize
+            }
+            "#
+            .to_vec(),
+        )?;
+
+        let compiled = vm.get_fn("vm_cast_usize_habit::pick_by_usize", &[Type::Any, Type::I64])?;
+        assert_eq!(compiled.ret_ty(), &Type::Any);
+        let pick_by_usize: extern "C" fn(*const Dynamic, i64) -> *const Dynamic = unsafe { std::mem::transmute(compiled.ptr()) };
+        let list = Dynamic::list(vec![10i64.into(), 20i64.into(), 30i64.into()]);
+        let picked = unsafe { &*pick_by_usize(&list, 1) };
+        assert_eq!(picked.as_int(), Some(20));
+
+        let compiled = vm.get_fn("vm_cast_usize_habit::to_isize", &[Type::I64])?;
+        assert_eq!(compiled.ret_ty(), &Type::I64);
+        let to_isize: extern "C" fn(i64) -> i64 = unsafe { std::mem::transmute(compiled.ptr()) };
+        assert_eq!(to_isize(7), 7);
+        Ok(())
+    }
+
+    /// Rust Option 习惯回归：可空值判空走 is_some/is_none（此前语义分析
+    /// "is_some 未发现"）。注意 find/rfind 未命中返回 -1 而不是 null：
+    /// is_some 对 -1 为 true，判"找到"必须用 `idx >= 0`（陷阱随用例固化）。
+    #[test]
+    fn any_is_some_none_option_habit() -> anyhow::Result<()> {
+        let vm = Vm::with_all()?;
+        vm.import_code(
+            "vm_is_some_habit",
+            br#"
+            pub fn map_missing_is_none() {
+                let data = {name: "x"};
+                let value = data.get("nickname");
+                if value.is_none() { 1 } else { 0 }
+            }
+
+            pub fn map_present_is_some() {
+                let data = {name: "x"};
+                let value = data.get("name");
+                if value.is_some() { 1 } else { 0 }
+            }
+
+            pub fn find_miss_is_some_not_none() {
+                let idx = "abc".find("zzz");
+                if idx.is_some() { 1 } else { 0 }
+            }
+            "#
+            .to_vec(),
+        )?;
+
+        let compiled = vm.get_fn("vm_is_some_habit::map_missing_is_none", &[])?;
+        let missing: extern "C" fn() -> i64 = unsafe { std::mem::transmute(compiled.ptr()) };
+        assert_eq!(missing(), 1);
+
+        let compiled = vm.get_fn("vm_is_some_habit::map_present_is_some", &[])?;
+        let present: extern "C" fn() -> i64 = unsafe { std::mem::transmute(compiled.ptr()) };
+        assert_eq!(present(), 1);
+
+        let compiled = vm.get_fn("vm_is_some_habit::find_miss_is_some_not_none", &[])?;
+        let find_miss: extern "C" fn() -> i64 = unsafe { std::mem::transmute(compiled.ptr()) };
+        assert_eq!(find_miss(), 1);
+        Ok(())
+    }
+
     #[test]
     fn boolean_literals_in_complex_expression_trees() -> anyhow::Result<()> {
         let vm = Vm::with_all()?;

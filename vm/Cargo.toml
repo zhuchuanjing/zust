@@ -34,7 +34,7 @@ metal = ["gpu", "vm-metal/runtime"]
 
 [dependencies]
 log = "0.4.29"
-dynamic = { package = "zust-dynamic", path = "../dynamic" }
+dynamic = { package = "zust-dynamic", version = "0.9.28", path = "../dynamic" }
 parser = { package = "zust-parser", version = "0.9.28", path = "../parser" }
 compiler = { package = "zust-compiler", version = "0.9.49", path = "../compiler" }
 root = { package = "zust-root", version = "0.9.29", path = "../root" }
